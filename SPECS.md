@@ -24,7 +24,7 @@
 
 ## 1. Plataforma
 
-- **Motor:** Unreal Engine 5.7 (`Simu.uproject`)
+- **Motor:** Unreal Engine 5.8 (`Simu.uproject`; migrado desde 5.7 el 10-08-2026 — ver `Source/*.Target.cs`, `DefaultBuildSettings = BuildSettingsVersion.V7`)
 - **Módulos:** `Simu` (Runtime, `Default`), `CubeSphere` (Runtime, `PostConfigInit`)
 - **Plugins habilitados:** ProceduralMeshComponent, Niagara, Water, Landmass, GeometryScripting
 - **Target:** Windows únicamente
