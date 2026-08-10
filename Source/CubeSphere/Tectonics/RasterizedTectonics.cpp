@@ -527,6 +527,27 @@ void URasterizedTectonics::SetElevationAt(ECSCubeFace Face, int32 X, int32 Y, fl
     FaceData[FaceIdx].ElevationData[GetLinearIndex(X, Y)] = Elevation;
 }
 
+void URasterizedTectonics::SetElevationData(ECSCubeFace Face, const TArray<float>& InData)
+{
+    if (!bIsInitialized)
+    {
+        return;
+    }
+
+    const int32 FaceIdx = static_cast<int32>(Face);
+    if (FaceIdx < 0 || FaceIdx >= 6 || !FaceData[FaceIdx].bIsValid)
+    {
+        return;
+    }
+
+    if (InData.Num() != Resolution * Resolution)
+    {
+        return;
+    }
+
+    FaceData[FaceIdx].ElevationData = InData;
+}
+
 int32 URasterizedTectonics::GetPlateIDAt(ECSCubeFace Face, int32 X, int32 Y) const
 {
     if (!bIsInitialized || !IsValidCoord(X, Y))

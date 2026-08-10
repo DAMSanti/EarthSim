@@ -122,7 +122,7 @@ Confirmado por ausencia total de referencias en `Source/`:
 - **Hidrosfera/erosión real** (Pipe Model, estratigrafía NPK) — [`docs/05-hidrosfera-erosion.md`](docs/05-hidrosfera-erosion.md)
 - **Climatología profunda** (ciclo carbono-silicatos, albedo dinámico) — [`docs/06-climatologia-efecto-invernadero.md`](docs/06-climatologia-efecto-invernadero.md)
 - **Biosfera/agentes evolutivos** (genoma vectorial, metabolismo, Niagara) — [`docs/07-biosfera-evolucion.md`](docs/07-biosfera-evolucion.md)
-- **Guardado/serialización**: no existe ningún `SaveGame` ni `FArchive` custom en el proyecto. El estado de una sesión de simulación no sobrevive a un reinicio.
+- **Guardado/serialización**: implementado el 11-08-2026 — `Tectonics/TectonicSaveGame.h` + `ATectonicsTestActor::SaveSimulation/LoadSimulation` (teclas K/L). Compila pero no se ha probado el roundtrip completo en el editor. Ver `ROADMAP.md` M5 para el razonamiento de por qué basta con guardar la semilla + estado evolucionado (no toda la topología).
 
 ## 10. Riesgos y deuda técnica activa
 

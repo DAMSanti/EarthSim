@@ -253,6 +253,14 @@ public:
     UFUNCTION(BlueprintCallable, Category = "Tectonics")
     void RegeneratePlanetMesh();
 
+    /** Guardar un snapshot de la simulación actual (ROADMAP.md M5). Tecla K en runtime. */
+    UFUNCTION(BlueprintCallable, Category = "Tectonics|Persistence")
+    bool SaveSimulation(const FString& SlotName);
+
+    /** Cargar un snapshot guardado con SaveSimulation. Tecla L en runtime. */
+    UFUNCTION(BlueprintCallable, Category = "Tectonics|Persistence")
+    bool LoadSimulation(const FString& SlotName);
+
 protected:
     // ============================================================
     // FUNCIONES INTERNAS

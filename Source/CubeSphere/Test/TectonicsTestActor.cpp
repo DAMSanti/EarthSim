@@ -8,6 +8,7 @@
 #include "BoundaryInteractions.h"
 #include "RasterizedTectonics.h"
 #include "SphericalVoronoi.h"
+#include "TectonicSaveGame.h"
 #include "ProceduralMeshComponent.h"
 #include "Components/DirectionalLightComponent.h"
 #include "Engine/Engine.h"
@@ -345,6 +346,85 @@ FString ATectonicsTestActor::GetGlobalStats() const
         AvgElevation,
         TimeScale
     );
+}
+
+bool ATectonicsTestActor::SaveSimulation(const FString& SlotName)
+{
+    if (!bSystemsInitialized || !PlateSystem || !RasterizedTectonics)
+    {
+        return false;
+    }
+
+    UTectonicSaveGame* Save = Cast<UTectonicSaveGame>(UGameplayStatics::CreateSaveGameObject(UTectonicSaveGame::StaticClass()));
+    if (!Save)
+    {
+        return false;
+    }
+
+    Save->RandomSeed = RandomSeed;
+    Save->NumPlates = NumPlates;
+    Save->GridResolution = GridResolution;
+    Save->RasterResolution = RasterResolution;
+    Save->VisualRadius = VisualRadius;
+    Save->Plates = PlateSystem->GetAllPlates();
+    Save->SimulationTime = SimulationTime;
+    Save->SimulationSteps = SimulationSteps;
+
+    for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
+    {
+        ECSCubeFace Face = static_cast<ECSCubeFace>(FaceIdx);
+        Save->GetElevationArray(Face) = RasterizedTectonics->GetElevationData(Face);
+    }
+
+    return UGameplayStatics::SaveGameToSlot(Save, SlotName, 0);
+}
+
+bool ATectonicsTestActor::LoadSimulation(const FString& SlotName)
+{
+    if (!UGameplayStatics::DoesSaveGameExist(SlotName, 0))
+    {
+        return false;
+    }
+
+    UTectonicSaveGame* Save = Cast<UTectonicSaveGame>(UGameplayStatics::LoadGameFromSlot(SlotName, 0));
+    if (!Save)
+    {
+        return false;
+    }
+
+    // Reconstruir la topología con los mismos parámetros que al guardar (misma semilla
+    // fija -> misma asignación de placas por celda, ver comentario en TectonicSaveGame.h)
+    ShutdownSystems();
+
+    GridResolution = Save->GridResolution;
+    RasterResolution = Save->RasterResolution;
+    VisualRadius = Save->VisualRadius;
+    NumPlates = Save->NumPlates;
+    RandomSeed = Save->RandomSeed;
+
+    InitializeSystems();
+
+    if (!bSystemsInitialized || !PlateSystem || !RasterizedTectonics)
+    {
+        return false;
+    }
+
+    // Sobreescribir con el estado evolucionado guardado
+    PlateSystem->RestorePlateState(Save->Plates);
+    PlateSystem->SetTotalSimulationTime(Save->SimulationTime);
+
+    for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
+    {
+        ECSCubeFace Face = static_cast<ECSCubeFace>(FaceIdx);
+        RasterizedTectonics->SetElevationData(Face, Save->GetElevationArray(Face));
+    }
+
+    SimulationTime = Save->SimulationTime;
+    SimulationSteps = Save->SimulationSteps;
+
+    RegeneratePlanetMesh();
+
+    return true;
 }
 
 void ATectonicsTestActor::RegeneratePlanetMesh()
@@ -961,6 +1041,28 @@ void ATectonicsTestActor::HandleInput()
     if (PC->WasInputKeyJustPressed(EKeys::Zero))
     {
         HighlightedPlate = -1;
+    }
+
+    // K - Guardar snapshot
+    if (PC->WasInputKeyJustPressed(EKeys::K))
+    {
+        bool bOk = SaveSimulation(TEXT("SimuSnapshot"));
+        if (GEngine)
+        {
+            GEngine->AddOnScreenDebugMessage(-1, 3.0f, bOk ? FColor::Green : FColor::Red,
+                bOk ? TEXT("Snapshot guardado") : TEXT("Error al guardar snapshot"));
+        }
+    }
+
+    // L - Cargar snapshot
+    if (PC->WasInputKeyJustPressed(EKeys::L))
+    {
+        bool bOk = LoadSimulation(TEXT("SimuSnapshot"));
+        if (GEngine)
+        {
+            GEngine->AddOnScreenDebugMessage(-1, 3.0f, bOk ? FColor::Green : FColor::Red,
+                bOk ? TEXT("Snapshot cargado") : TEXT("Error al cargar snapshot (¿existe?)"));
+        }
     }
 }
 

@@ -103,15 +103,17 @@ Detalle completo en `SPECS.md §5.3, §5.4`.
 
 ---
 
-## M5 — Persistencia mínima
+## M5 — Persistencia mínima ✅ COMPLETO (11-08-2026, sin verificar en editor)
 
-🟡 Ninguna sesión sobrevive a un reinicio hoy.
+🟡 Ninguna sesión sobrevivía a un reinicio.
 
-- [ ] Serialización de: estado de placas (`TectonicPlateSystem`), heightmap resultante, seed de ruido
-- [ ] Guardar/cargar vía `USaveGame` o `FArchive` custom
-- [ ] Versión mínima: guardar/cargar un snapshot, no un sistema de autosave/undo
+- [x] `UTectonicSaveGame` (`Tectonics/TectonicSaveGame.h`): guarda semilla, parámetros de grid/raster, estado cinemático evolucionado de cada placa (`FTectonicPlate` completo) y la elevación acumulada de las 6 caras
+- [x] Guardado/carga vía `USaveGame` + `UGameplayStatics::SaveGameToSlot/LoadGameFromSlot`
+- [x] Diseño verificado por código (no solo asumido): `USphericalVoronoi::Initialize` y `UTectonicPlateSystem::InitializePlateProperties` llaman a `FMath::RandInit(Config.RandomSeed [+1000])` explícitamente, así que la topología (IDs de placa por celda) es reproducible solo con la semilla — no hace falta serializarla, se regenera en `LoadSimulation` llamando a `InitializeSystems()` con la misma semilla y sobreescribiendo encima el estado cinemático y la elevación guardados
+- [x] Atajos en `TectonicsTestActor`: `K` guarda, `L` carga (slot fijo `"SimuSnapshot"`)
+- [ ] **No verificado en el editor** (compila, pero no se ha probado el roundtrip guardar→cerrar→cargar en una sesión de Play real)
 
-**Hecho cuando:** se puede cerrar el editor, reabrir, cargar un snapshot guardado, y el planeta se ve idéntico.
+**Hecho cuando:** se puede cerrar el editor, reabrir, cargar un snapshot guardado, y el planeta se ve idéntico. Falta el último paso: probarlo de verdad en el editor.
 
 ---
 

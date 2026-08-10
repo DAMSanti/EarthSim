@@ -242,6 +242,13 @@ public:
     void SetElevationAt(ECSCubeFace Face, int32 X, int32 Y, float Elevation);
 
     /**
+     * Reemplazar de golpe todos los datos de elevación de una cara (para restaurar un
+     * snapshot guardado; ver ROADMAP.md M5). InData debe tener Resolution*Resolution
+     * elementos - si no coincide, no hace nada.
+     */
+    void SetElevationData(ECSCubeFace Face, const TArray<float>& InData);
+
+    /**
      * Obtener ID de placa en una posición
      */
     UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics")

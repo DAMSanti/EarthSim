@@ -128,6 +128,27 @@ public:
     UFUNCTION(BlueprintCallable, Category = "Tectonics")
     float GetTotalSimulationTime() const { return TotalSimulationTime; }
 
+    /**
+     * Restaurar el estado cinemático evolucionado de las placas desde un snapshot
+     * guardado (ver ROADMAP.md M5). Debe llamarse DESPUÉS de Initialize()+GeneratePlates()
+     * con la MISMA semilla fija, para que la topología (IDs de placa por celda) coincida
+     * con la del momento del guardado - esto solo sobreescribe el estado cinemático
+     * (EulerPole, AngularVelocity, Age, Centroid...) de cada placa por índice, no la
+     * topología, que se asume reproducible de forma determinista a partir de la semilla.
+     */
+    void RestorePlateState(const TArray<FTectonicPlate>& SavedPlates)
+    {
+        for (int32 i = 0; i < SavedPlates.Num() && i < Plates.Num(); ++i)
+        {
+            Plates[i] = SavedPlates[i];
+        }
+    }
+
+    /**
+     * Establecer el tiempo total de simulación (para restaurar un snapshot)
+     */
+    void SetTotalSimulationTime(float InTime) { TotalSimulationTime = InTime; }
+
     // --- Debug y visualización ---
 
     /**
