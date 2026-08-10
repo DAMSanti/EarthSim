@@ -100,8 +100,9 @@ Detalle completo en `SPECS.md §5.3, §5.4`.
 - [x] Test de regresión para `PlateKinematics` (rotación por cuaterniones sobre un polo de Euler conocido — 90° sobre +Z lleva (1,0,0)→(0,1,0) — y caso DeltaTime=0 = identidad)
 - [x] Test de `ClassifyBoundaryType` (convergente/divergente/transformante/ninguno según los 4 casos analíticos de velocidad relativa vs. normal)
 - [x] Test de regresión directo del bug de esta sesión: corre `RasterizedTectonics::Step` 500 veces y verifica que la elevación se mantiene acotada (≤12000m, ≥-12000m) **y** que sigue habiendo variación de relieve (>100m entre min y max) — falla tanto si vuelve el bug de picos infinitos como si vuelve la sobrecorrección que aplana el planeta
-- [ ] Tests de `BoundaryInteractions` específicos (subducción/orogenia/spreading/transformante) con casos sintéticos — pendiente, cobertura parcial vía el test de elevación acotada arriba
-- [ ] Test de conservación de masa de corteza — pendiente
+- [x] Test de sanidad de `BoundaryInteractions`: corre `PlateSystem->Step` 50 veces (que internamente llama a `BoundaryInteractions::ProcessAllBoundaries`) y verifica que `SlabDepth`/`AccumulatedStress` se mantienen finitos - guarda contra NaN/Inf silenciosos en las fórmulas de subducción/orogenia
+- [ ] Tests específicos por tipo de frontera (subducción/orogenia/spreading/transformante) con casos sintéticos de placas conocidas — pendiente, cobertura hoy es de sanidad general, no por caso
+- [ ] Test de conservación de masa de corteza — pendiente. Nota: la implementación actual de `CreateNewCrust` no tiene una operación de destrucción de corteza equivalente (ver TODO en `BoundaryInteractions.cpp:609`), así que un test de conservación estricto fallaría hoy por diseño incompleto, no por bug - escribirlo tendría más sentido junto con esa implementación pendiente
 
 **Hecho cuando:** existe `Tests/TectonicsTests.cpp` corriendo en el framework de Automation de UE. ✅ (cobertura ampliable después, no bloquea)
 

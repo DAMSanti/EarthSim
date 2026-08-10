@@ -6,6 +6,7 @@
 #include "Tectonics/PlateKinematics.h"
 #include "Tectonics/TectonicPlateSystem.h"
 #include "Tectonics/RasterizedTectonics.h"
+#include "Tectonics/BoundaryInteractions.h"
 
 // ============================================================
 // Rotación por cuaterniones: resultado verificable analíticamente
@@ -123,6 +124,58 @@ bool FRasterizedTectonicsElevationBoundsTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("Elevacion maxima no supera el tope fisico (12000m)"), MaxElevation <= 12000.0f + KINDA_SMALL_NUMBER);
     TestTrue(TEXT("Elevacion no diverge por debajo de valores geologicamente razonables"), MinElevation >= -12000.0f);
     TestTrue(TEXT("Sigue habiendo variacion de relieve (no se aplano todo a un valor)"), (MaxElevation - MinElevation) > 100.0f);
+
+    return true;
+}
+
+// ============================================================
+// Sanidad de BoundaryInteractions: tras varios pasos con el motor "oficial"
+// (PlateSystem->Step, que internamente llama a BoundaryInteractions), el estado
+// acumulado (SlabDepth, AccumulatedStress) debe seguir siendo finito - guarda contra
+// NaN/Inf silenciosos en las fórmulas de subducción/orogenia.
+// ============================================================
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBoundaryInteractionsSanityTest,
+    "Simu.Tectonics.BoundaryInteractionsSanity",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FBoundaryInteractionsSanityTest::RunTest(const FString& Parameters)
+{
+    UCubeSphereGrid* Grid = NewObject<UCubeSphereGrid>();
+    Grid->Initialize(32, 637100000.0f);
+
+    FPlateGenerationConfig Config;
+    Config.NumPlates = 6;
+    Config.bUseFixedSeed = true;
+    Config.RandomSeed = 7;
+
+    UTectonicPlateSystem* PlateSystem = NewObject<UTectonicPlateSystem>();
+    PlateSystem->Initialize(Grid, Config);
+    if (!TestTrue(TEXT("GeneratePlates debe tener exito"), PlateSystem->GeneratePlates()))
+    {
+        return false;
+    }
+
+    UBoundaryInteractions* Boundaries = PlateSystem->GetBoundaryInteractions();
+    if (!TestNotNull(TEXT("BoundaryInteractionSystem debe existir tras GeneratePlates"), Boundaries))
+    {
+        return false;
+    }
+
+    for (int32 i = 0; i < 50; ++i)
+    {
+        PlateSystem->Step(0.1f);
+    }
+
+    bool bAllFinite = true;
+    for (const FConvergentInteraction& Interaction : Boundaries->GetConvergentInteractions())
+    {
+        if (!FMath::IsFinite(Interaction.SlabDepth) || !FMath::IsFinite(Interaction.AccumulatedStress))
+        {
+            bAllFinite = false;
+            break;
+        }
+    }
+    TestTrue(TEXT("SlabDepth y AccumulatedStress se mantienen finitos tras 50 pasos"), bAllFinite);
 
     return true;
 }
