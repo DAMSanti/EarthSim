@@ -496,12 +496,10 @@ void ATectonicsTestActor::CreatePlanetMesh()
                     Elevation = RasterizedTectonics->GetElevationBilinear(DominantFace, TexU, TexV);
                 }
                 
-                // Aplicar elevación RELATIVA al radio del planeta
-                // Elevación en metros, ElevationScale controla exageración
-                // Normalizar: 10000m de montaña = ElevationScale% del radio
-                // Con ElevationScale=50, una montaña de 10km sería 5% del radio
-                float ElevationNormalized = Elevation / 10000.0f;  // Normalizar a rango ~[-0.4, 1.0]
-                float ElevationOffset = ElevationNormalized * (Radius * ElevationScale / 100.0f);
+                // Elevación en metros reales -> cm (unidades de Unreal), con exageración
+                // directa. Independiente del radio del planeta (antes escalaba con
+                // Radius, lo que rompía la exageración al usar el radio real de la Tierra).
+                float ElevationOffset = Elevation * 100.0f * ElevationScale;
                 FVector Position = Normal * (Radius + ElevationOffset);
 
                 MeshVertices.Add(Position);
@@ -718,8 +716,9 @@ void ATectonicsTestActor::UpdateMeshColors()
                 // Actualizar posición del vértice con la elevación
                 if (bShowElevation && VertexIndex < MeshVertices.Num())
                 {
-                    float ElevationNormalized = Elevation / 10000.0f;
-                    float ElevationOffset = ElevationNormalized * (Radius * ElevationScale / 100.0f);
+                    // Ver comentario equivalente en CreatePlanetMesh(): metros reales -> cm,
+                    // exageración directa, independiente del radio del planeta.
+                    float ElevationOffset = Elevation * 100.0f * ElevationScale;
                     MeshVertices[VertexIndex] = Normal * (Radius + ElevationOffset);
                 }
 

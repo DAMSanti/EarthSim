@@ -393,11 +393,45 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
     // Relajación difusiva: sin esto, la elevación en celdas de frontera (incrementada
     // arriba) crece cada paso hasta el tope de 12000m mientras las celdas vecinas no
     // afectadas se quedan en la base, formando paredes casi verticales de una celda de
-    // ancho. Este término reparte esa diferencia de forma continua, como parte del
-    // modelo físico (no un suavizado puntual de inicialización).
-    if (Params.RelaxationIterationsPerStep > 0)
+    // ancho. Se mezcla solo una fracción (Params.DiffusionRate) hacia el valor
+    // suavizado localmente en vez de reemplazarlo por completo: aplicado cada paso
+    // durante miles de pasos, un reemplazo completo aplana el planeta entero.
+    if (Params.DiffusionRate > 0.0f)
     {
-        SmoothElevation(Params.RelaxationIterationsPerStep);
+        const float Kernel[3][3] = {
+            { 1.0f/16.0f, 2.0f/16.0f, 1.0f/16.0f },
+            { 2.0f/16.0f, 4.0f/16.0f, 2.0f/16.0f },
+            { 1.0f/16.0f, 2.0f/16.0f, 1.0f/16.0f }
+        };
+
+        for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
+        {
+            TArray<float>& ElevData = FaceData[FaceIdx].ElevationData;
+            TArray<float> TempData;
+            TempData.SetNumUninitialized(ElevData.Num());
+
+            for (int32 Y = 0; Y < Resolution; ++Y)
+            {
+                for (int32 X = 0; X < Resolution; ++X)
+                {
+                    float Sum = 0.0f;
+                    for (int32 KY = -1; KY <= 1; ++KY)
+                    {
+                        for (int32 KX = -1; KX <= 1; ++KX)
+                        {
+                            int32 SampleX = FMath::Clamp(X + KX, 0, Resolution - 1);
+                            int32 SampleY = FMath::Clamp(Y + KY, 0, Resolution - 1);
+                            Sum += ElevData[GetLinearIndex(SampleX, SampleY)] * Kernel[KY + 1][KX + 1];
+                        }
+                    }
+
+                    const int32 Idx = GetLinearIndex(X, Y);
+                    TempData[Idx] = FMath::Lerp(ElevData[Idx], Sum, Params.DiffusionRate);
+                }
+            }
+
+            ElevData = MoveTemp(TempData);
+        }
     }
 
     TotalSimulationTime += DeltaTimeScaled;

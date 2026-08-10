@@ -53,9 +53,9 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tectonics|Grid", meta=(ClampMin="8", ClampMax="256"))
     int32 GridResolution = 128;
 
-    /** Radio del planeta para visualización (cm) */
+    /** Radio del planeta para visualización (cm). 637100000 = radio real de la Tierra (6371 km) */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tectonics|Grid", meta=(ClampMin="100"))
-    float VisualRadius = 50000.0f;
+    float VisualRadius = 637100000.0f;
 
     /** Número de placas tectónicas */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tectonics|Plates", meta=(ClampMin="2", ClampMax="20"))
@@ -73,9 +73,15 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tectonics|Raster", meta=(ClampMin="0", ClampMax="10"))
     int32 ElevationSmoothingIterations = 5;
 
-    /** Escala de tiempo (1.0 = tiempo real geológico) */
+    /**
+     * Multiplicador de velocidad de la simulación. AVISO: no está calibrado contra
+     * velocidades reales de placas (~2-10 cm/año) - las constantes de OrogenyFactor,
+     * SpreadingFactor, etc. son valores de "sensación" ajustados a ojo, no física
+     * medida. 1.0 no significa "tiempo geológico real", solo "sin multiplicador
+     * extra". Ajusta libremente para lo que se vea bien.
+     */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tectonics|Simulation", meta=(ClampMin="0.01", ClampMax="1000.0"))
-    float TimeScale = 100.0f;
+    float TimeScale = 1.0f;
 
     /** Simulación activa */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tectonics|Simulation")
@@ -86,15 +92,16 @@ public:
     bool bAutoStart = true;
 
     /**
-     * Cada cuántos pasos de simulación se reconstruye la malla visual a partir de la
-     * elevación actual. La malla se genera una sola vez al inicializar y por defecto
-     * nunca se refresca, así que sin esto el terreno visible queda congelado en el
-     * estado inicial aunque la simulación siga avanzando por detrás. 0 = nunca
-     * (comportamiento anterior). Reconstruir la malla es costoso (recorre las 6 caras
-     * a GridResolution), de ahí que sea cada N pasos y no cada frame.
+     * Cada cuántos pasos de simulación se fuerza una reconstrucción COMPLETA de la
+     * malla (recrea topología/triángulos desde cero para las 6 caras). Corrección: al
+     * revisar el código con más cuidado, UpdateMeshColors() YA actualiza posición de
+     * vértices + UpdateMeshSection() cada 10 frames de forma más barata (sin recrear
+     * triángulos), así que esto es redundante para el caso normal - lo dejo disponible
+     * (0 = desactivado, por defecto) por si algún día cambia la topología en caliente
+     * (p.ej. resolución de grid dinámica) y hace falta un rebuild completo.
      */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tectonics|Simulation", meta=(ClampMin="0"))
-    int32 MeshRegenerationIntervalSteps = 20;
+    int32 MeshRegenerationIntervalSteps = 0;
 
     // ============================================================
     // VISUALIZACIÓN
@@ -120,9 +127,15 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tectonics|Visualization")
     bool bShowElevation = true;
 
-    /** Escala de exageración de elevación (1.0 = metros reales, 10.0 = 10x exagerado) */
+    /**
+     * Exageración de elevación: 1.0 = metros reales (a escala de la Tierra, casi
+     * imperceptible desde lejos - el Everest son 8.8km sobre un radio de 6371km,
+     * igual que en fotos reales desde el espacio), 10.0 = 10x. La fórmula ya no
+     * depende de VisualRadius (antes sí, y se rompía al usar el radio real de la
+     * Tierra), es un multiplicador directo sobre la elevación real en metros.
+     */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tectonics|Visualization", meta=(ClampMin="0.0", ClampMax="1000.0"))
-    float ElevationScale = 50.0f;
+    float ElevationScale = 15.0f;
 
     /** Escala de los vectores de velocidad */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tectonics|Visualization", meta=(ClampMin="0.1", ClampMax="100.0"))

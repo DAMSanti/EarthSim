@@ -74,14 +74,19 @@ struct CUBESPHERE_API FPlateMovementParams
     UPROPERTY(EditAnywhere, BlueprintReadWrite)
     float OceanicBaseElevation = -3800.0f;
 
-    // Iteraciones de relajación difusiva (thermal erosion / mass wasting) aplicadas
-    // cada paso. Sin esto, la elevación en celdas de frontera crece sin control hacia
-    // el tope (12000m) mientras las celdas vecinas no-frontera quedan en la base,
-    // formando paredes casi verticales de una celda de ancho. Es un término físico
-    // independiente y anterior a la erosión hidráulica (Fase 4): esa se sumará encima
-    // de este, no lo sustituye. 0 = desactivado.
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0", ClampMax = "5"))
-    int32 RelaxationIterationsPerStep = 1;
+    // Tasa de relajación difusiva (thermal erosion / mass wasting) aplicada cada paso,
+    // como fracción de mezcla hacia el valor suavizado localmente (0 = desactivado,
+    // 1 = reemplazo total cada paso). Sin esto, la elevación en celdas de frontera
+    // crece sin control hacia el tope (12000m) mientras las celdas vecinas no-frontera
+    // quedan en la base, formando paredes casi verticales de una celda de ancho. Un
+    // valor demasiado alto tiene el problema opuesto: aplicado cada paso durante miles
+    // de pasos, aplana el planeta entero hasta dejarlo casi perfectamente liso. Es un
+    // término físico independiente y anterior a la erosión hidráulica (Fase 4): esa se
+    // sumará encima de este, no lo sustituye. Requiere calibrarse por observación
+    // (equilibrio entre esta tasa y OrogenyFactor/SpreadingFactor), no hay un valor
+    // "correcto" universal.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float DiffusionRate = 0.02f;
 };
 
 /**
