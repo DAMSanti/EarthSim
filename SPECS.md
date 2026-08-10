@@ -100,6 +100,10 @@ Al probar `TectonicsTestActor` en el editor apareció un planeta con relieve ext
 
 **Nota de rendimiento sin resolver:** `GridResolution = 128` por cara sobre un radio de 6371 km implica celdas de ~100 km de lado — muy grueso para relieve realista. Subir la resolución multiplica el coste de `RasterizedTectonics::Step()`, la difusión y la generación de malla de forma cuadrática; no se ha tocado porque es una decisión de compromiso rendimiento/fidelidad, no un bug.
 
+### 5.5 Cámara de aproximación (M1.6, 11-08-2026)
+
+**Implementado, sin verificar en editor** — `Simu/PlanetApproachPawn.h/.cpp`: pawn de cámara libre con velocidad log-interpolada según altitud, y "colisión" por consulta de altura contra `ATectonicsTestActor::GetSurfaceRadiusAtDirection()` (nueva, reutiliza la fórmula de elevación de la malla) en vez de colisión física real — la malla se genera deliberadamente sin colisión (`TectonicsTestActor.cpp:576`, demasiado cara de recalcular en cada regeneración). `Simu/SimuGameMode.h/.cpp` + `GlobalDefaultGameMode` en `Config/DefaultEngine.ini` lo fijan como pawn por defecto. Ver `ROADMAP.md` M1.6 para el aviso sobre overrides de GameMode a nivel de World Settings.
+
 ## 6. Simulación de flujo simple
 
 **Prueba de concepto, no producción** — `SimpleFlowSimulation.cpp/h` (400/193 líneas).
