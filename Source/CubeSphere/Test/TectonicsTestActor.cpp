@@ -282,6 +282,13 @@ void ATectonicsTestActor::StepSimulation(float DeltaTime)
 
     SimulationTime += DeltaTime;
     SimulationSteps++;
+
+    // 3. Refrescar la malla visual periódicamente para reflejar la elevación actual
+    // (por defecto la malla se genera una vez y queda congelada, ver comentario en el header)
+    if (bShowPlanetMesh && MeshRegenerationIntervalSteps > 0 && SimulationSteps % MeshRegenerationIntervalSteps == 0)
+    {
+        RegeneratePlanetMesh();
+    }
 }
 
 FString ATectonicsTestActor::GetPlateInfo(int32 PlateIndex) const

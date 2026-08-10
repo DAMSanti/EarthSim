@@ -85,6 +85,17 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tectonics|Simulation")
     bool bAutoStart = true;
 
+    /**
+     * Cada cuántos pasos de simulación se reconstruye la malla visual a partir de la
+     * elevación actual. La malla se genera una sola vez al inicializar y por defecto
+     * nunca se refresca, así que sin esto el terreno visible queda congelado en el
+     * estado inicial aunque la simulación siga avanzando por detrás. 0 = nunca
+     * (comportamiento anterior). Reconstruir la malla es costoso (recorre las 6 caras
+     * a GridResolution), de ahí que sea cada N pasos y no cada frame.
+     */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tectonics|Simulation", meta=(ClampMin="0"))
+    int32 MeshRegenerationIntervalSteps = 20;
+
     // ============================================================
     // VISUALIZACIÓN
     // ============================================================
