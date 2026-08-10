@@ -55,7 +55,7 @@ Los 4 TODOs pendientes son de **correctness/performance**, no cosméticos: sin c
 **Parcial** — `Nanite/PlanetNaniteMesh.cpp` (840 líneas).
 
 - Genera parches reales de `UStaticMesh`, gestiona un pool de `UStaticMeshComponent`, configura Nanite build settings correctamente.
-- **Gap crítico:** `GenerateProceduralHeightmap` (líneas 434-473) rellena el heightmap con `Sin(X)*Cos(Y)` — comentario explícito "Por ahora, datos de placeholder" (:452, :463). **No usa** ni `Noise/SimplexNoise.cpp` (completo pero huérfano) ni la elevación calculada por el motor de tectónica. Esto significa que **el planeta que se renderiza hoy no refleja la simulación tectónica** que corre por debajo.
+- **Gap parcialmente cerrado (11-08-2026):** `GenerateProceduralHeightmap` ya no usa `Sin(X)*Cos(Y)` (placeholder discontinuo entre parches/caras) — ahora usa `FSimplexNoise::SphereFractalNoise` sobre la dirección 3D real en la esfera (continuo, sin costuras). Sigue sin usar la elevación calculada por la simulación tectónica: **el planeta que se renderiza sigue sin reflejar la tectónica**, solo dejó de ser un placeholder con costuras visibles. Conectar datos reales requiere primero confirmar en el editor que el material WPO (`NaniteConfig.PlanetMaterial`) existe y aplica displacement — no verificable desde esta sesión (ver `ROADMAP.md` M1).
 - El plan original en `docs/08-renderizado-visualizacion.md` describe desplazamiento vía World Position Offset (WPO) en shader sobre Nanite; la implementación actual en cambio genera geometría desplazada en CPU al construir la malla. Es una decisión válida, pero diverge del documento original y debería quedar explícita ahí también.
 
 ## 5. Tectónica de placas

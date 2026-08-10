@@ -10,6 +10,7 @@
 #include "StaticMeshAttributes.h"
 #include "Engine/Texture2D.h"
 #include "DrawDebugHelpers.h"
+#include "Noise/SimplexNoise.h"
 
 UPlanetNaniteMesh::UPlanetNaniteMesh()
 {
@@ -448,21 +449,50 @@ UTexture2D* UPlanetNaniteMesh::GenerateProceduralHeightmap(const FQuadTreeNodeId
         Heightmap->VirtualTextureStreaming = true;
     }
     
-    // Generar datos de altura procedurales (simplex noise, etc.)
-    // Por ahora, datos de placeholder
+    // Bounds UV [-1,1] del nodo en su cara, para ubicar cada texel en la esfera real
+    // en vez de en espacio de textura local (que es lo que hacía el placeholder
+    // anterior Sin(X)*Cos(Y) - discontinuo entre parches y entre caras del cubo).
+    FQuadTreeBounds NodeUVBounds(FVector2D(-1.0, -1.0), FVector2D(1.0, 1.0));
+    if (LODController)
+    {
+        NodeUVBounds = LODController->GetQuadTree().GetFaceQuadTree(NodeId.Face).GetNodeBounds(NodeId);
+    }
+
     FTexture2DMipMap& Mip = Heightmap->GetPlatformData()->Mips[0];
     Mip.BulkData.Lock(LOCK_READ_WRITE);
-    
+
     void* RawData = Mip.BulkData.Realloc(Resolution * Resolution * sizeof(uint16));
     uint16* Data = reinterpret_cast<uint16*>(RawData);
-    
+
     for (int32 Y = 0; Y < Resolution; ++Y)
     {
         for (int32 X = 0; X < Resolution; ++X)
         {
-            // Simple placeholder: variación suave
-            float Value = FMath::Sin(X * 0.1f) * FMath::Cos(Y * 0.1f) * 0.5f + 0.5f;
-            Data[Y * Resolution + X] = static_cast<uint16>(Value * 65535.0f);
+            double U = FMath::Lerp(NodeUVBounds.Min.X, NodeUVBounds.Max.X, (X + 0.5) / static_cast<double>(Resolution));
+            double V = FMath::Lerp(NodeUVBounds.Min.Y, NodeUVBounds.Max.Y, (Y + 0.5) / static_cast<double>(Resolution));
+
+            // Mismo mapeo cara-UV -> punto de cubo que FCubeFaceQuadTree::GetNodeCenterOnSphere
+            FVector CubePoint;
+            switch (NodeId.Face)
+            {
+            case ECSCubeFace::PositiveX: CubePoint = FVector(1.0, U, V); break;
+            case ECSCubeFace::NegativeX: CubePoint = FVector(-1.0, -U, V); break;
+            case ECSCubeFace::PositiveY: CubePoint = FVector(-U, 1.0, V); break;
+            case ECSCubeFace::NegativeY: CubePoint = FVector(U, -1.0, V); break;
+            case ECSCubeFace::PositiveZ: CubePoint = FVector(-U, -V, 1.0); break;
+            case ECSCubeFace::NegativeZ: CubePoint = FVector(-U, V, -1.0); break;
+            default: CubePoint = FVector(1.0, U, V); break;
+            }
+            FVector Direction = CubePoint.GetSafeNormal();
+
+            // Ruido fractal real (antes huérfano, ver SPECS.md); función de la dirección
+            // 3D en la esfera, así que es continuo entre parches y caras sin costuras.
+            // Pendiente (ROADMAP.md M1): conectar además la elevación de la simulación
+            // tectónica en vez de solo ruido - requiere revisar/crear el material WPO
+            // en el editor, fuera de lo verificable sin abrirlo.
+            float NoiseValue = FSimplexNoise::SphereFractalNoise(Direction, 4.0f, 6, 2.0f, 0.5f);
+            float Normalized = FMath::Clamp(NoiseValue * 0.5f + 0.5f, 0.0f, 1.0f);
+            Data[Y * Resolution + X] = static_cast<uint16>(Normalized * 65535.0f);
         }
     }
     

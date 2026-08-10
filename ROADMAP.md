@@ -21,15 +21,16 @@
 
 ---
 
-## M1 — Cerrar la brecha Simulación ↔ Render
+## M1 — Cerrar la brecha Simulación ↔ Render 🟡 PARCIAL (11-08-2026)
 
 🔴 Es la brecha de mayor impacto (ver `SPECS.md §4, §10.1`): hoy el planeta que se ve no es el planeta que se simula. **Importante: esto es sobre el pipeline Nanite (`PlanetNaniteMesh`/`NanitePlanetActor`), un actor distinto de `TectonicsTestActor`. Nada de lo hecho el 10-08 en `TectonicsTestActor` (ver M1.5) resuelve esto.**
 
-- [ ] Sustituir el heightmap placeholder (`Sin(X)*Cos(Y)`) por muestreo real de `SimplexNoise` para el terreno base — `Nanite/PlanetNaniteMesh.cpp:434-473`
-- [ ] Conectar la elevación calculada por la simulación tectónica al heightmap que consume `PlanetNaniteMesh`
-- [ ] Verificar visualmente: mover placas y confirmar que la malla Nanite se deforma en consecuencia
+- [x] Sustituir el heightmap placeholder (`Sin(X)*Cos(Y)`) por muestreo real de `FSimplexNoise::SphereFractalNoise` — `Nanite/PlanetNaniteMesh.cpp:GenerateProceduralHeightmap`. Bonus: el placeholder anterior era además discontinuo entre parches/caras (ruido en espacio de textura, no en la esfera); la versión nueva usa la dirección 3D real, sin costuras.
+- [ ] Conectar la elevación calculada por la simulación tectónica al heightmap (todavía es ruido, no datos de `RasterizedTectonics`)
+- [ ] Verificar visualmente en editor que el heightmap sin costuras se ve bien
+- [ ] **Bloqueador identificado para completar esto**: el heightmap generado se consume vía material WPO (`NaniteConfig.PlanetMaterial`, parámetro de textura `"Heightmap"`) — no se pudo verificar desde esta sesión si ese material existe/está asignado en el proyecto ni si su grafo de shader realmente aplica displacement. Revisar en el editor antes de invertir más en generar datos de elevación reales si el lado del material no está conectado, sería trabajo ciego.
 
-**Hecho cuando:** al correr la simulación de placas, las montañas/cordilleras generadas por colisión son visibles en la malla Nanite renderizada, sin pasos manuales.
+**Hecho cuando:** al correr la simulación de placas, las montañas/cordilleras generadas por colisión son visibles en la malla Nanite renderizada, sin pasos manuales. (Sigue sin cumplirse — falta el lado del material y conectar datos reales, no solo ruido.)
 
 ---
 
