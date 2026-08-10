@@ -92,16 +92,17 @@ Detalle completo en `SPECS.md §5.3, §5.4`.
 
 ---
 
-## M4 — Cobertura de test para el subsistema más grande
+## M4 — Cobertura de test para el subsistema más grande ✅ NÚCLEO COMPLETO (11-08-2026)
 
-🟡 Hoy solo `CubeSphereGrid` tiene tests automatizados. Tectónica —el subsistema con más ramas lógicas— no tiene ninguno, y hoy sabemos (M1.5) que los bugs ahí son sutiles y fáciles de confundir con "así es como se ve".
+🟡 Hoy solo `CubeSphereGrid` tenía tests automatizados. Creado `Tests/TectonicsTests.cpp` con 3 suites:
 
-- [ ] Tests de `BoundaryInteractions` (subducción, orogenia, spreading, transformante) con casos sintéticos de placas conocidas
-- [ ] Test de conservación (masa de corteza no debería desaparecer al colisionar/divergir, salvo por las reglas explícitas del modelo)
-- [ ] Test de regresión para `PlateKinematics` (rotación por cuaterniones sobre un polo de Euler conocido, resultado verificable analíticamente)
-- [ ] Test de equilibrio para `DiffusionRate`: dado un `OrogenyFactor` fijo, la elevación máxima en un boundary convergente debe estabilizarse (no crecer sin límite ni converger a 0) tras N pasos
+- [x] Test de regresión para `PlateKinematics` (rotación por cuaterniones sobre un polo de Euler conocido — 90° sobre +Z lleva (1,0,0)→(0,1,0) — y caso DeltaTime=0 = identidad)
+- [x] Test de `ClassifyBoundaryType` (convergente/divergente/transformante/ninguno según los 4 casos analíticos de velocidad relativa vs. normal)
+- [x] Test de regresión directo del bug de esta sesión: corre `RasterizedTectonics::Step` 500 veces y verifica que la elevación se mantiene acotada (≤12000m, ≥-12000m) **y** que sigue habiendo variación de relieve (>100m entre min y max) — falla tanto si vuelve el bug de picos infinitos como si vuelve la sobrecorrección que aplana el planeta
+- [ ] Tests de `BoundaryInteractions` específicos (subducción/orogenia/spreading/transformante) con casos sintéticos — pendiente, cobertura parcial vía el test de elevación acotada arriba
+- [ ] Test de conservación de masa de corteza — pendiente
 
-**Hecho cuando:** existe `Tests/TectonicsTests.cpp` (o equivalente) corriendo en el framework de Automation de UE.
+**Hecho cuando:** existe `Tests/TectonicsTests.cpp` corriendo en el framework de Automation de UE. ✅ (cobertura ampliable después, no bloquea)
 
 ---
 
