@@ -17,7 +17,7 @@
 
 - [x] `git init` + `.gitignore` (excluye `Binaries/`, `Intermediate/`, `Saved/`, `DerivedDataCache/`, `.vs/`, `.claude/`)
 - [x] Primer commit con el baseline completo
-- [ ] Decidir remoto (GitHub privado, etc.) — backup fuera de la máquina local, sigue pendiente
+- [x] Remoto en GitHub ya existente (confirmado por el usuario, 11-08-2026). Desarrollo sigue siendo local por ahora — no se hace `git push` automáticamente desde aquí sin que se pida explícitamente
 
 ---
 
@@ -54,17 +54,17 @@ Detalle completo en `SPECS.md §5.3, §5.4`.
 
 ---
 
-## M1.6 — Cámara de aproximación al planeta, con colisión
+## M1.6 — Cámara de aproximación al planeta, con colisión ✅ IMPLEMENTADO (11-08-2026, sin verificar en editor)
 
-🟡 Pedido explícitamente el 10-08-2026: con relieve realista (poco visible desde lejos, ver M1.5), hace falta poder acercarse a la superficie para juzgar el terreno de verdad — tanto para seguir depurando la simulación como para el producto final.
+🟡 Pedido explícitamente el 10-08-2026: con relieve realista (poco visible desde lejos, ver M1.5), hace falta poder acercarse a la superficie para juzgar el terreno de verdad.
 
-- [ ] Pawn/cámara con velocidad de movimiento adaptativa a la distancia (escala logarítmica/exponencial): a escala real de la Tierra, la misma velocidad que sirve en órbita (miles de km) es inutilizable a pie de superficie, y viceversa
-- [ ] Colisión contra el terreno. Punto de partida importante: hoy `PlanetMesh->CreateMeshSection(...)` se llama explícitamente con colisión desactivada — `TectonicsTestActor.cpp:576`, comentario `false // No crear colisión, es muy pesado`. Dos rutas:
-  - Colisión real sobre la malla (`bCreateCollision = true`): más simple, pero cara de recalcular cada vez que `UpdateMeshColors`/`RegeneratePlanetMesh` cambian la geometría
-  - Seguimiento de superficie por raycast (la cámara consulta altura local vía `RasterizedTectonics::GetElevationBilinear` en vez de colisión física real): más barato, no requiere geometría de colisión actualizada, patrón común en cámaras planetarias
-- [ ] Probar: descender desde vista de planeta completo hasta la superficie y recorrerla sin atravesar montañas ni quedarse enganchado
+- [x] `Simu/PlanetApproachPawn.h/.cpp`: pawn de cámara libre con velocidad interpolada **logarítmicamente** entre `MinSpeed`/`MaxSpeed` según la altitud sobre el terreno local (altitud varía en varios órdenes de magnitud - metros a miles de km - así que interpolación lineal habría dejado casi todo el rango útil comprimido en unos pocos frames)
+- [x] "Colisión" elegida: **Ruta B (consulta de altura)**, no colisión física real. Nuevo método `ATectonicsTestActor::GetSurfaceRadiusAtDirection()` reutiliza exactamente la misma fórmula que `CreatePlanetMesh`/`UpdateMeshColors` (nunca se desincroniza de lo que se ve), y el pawn recorta radialmente su posición si intenta meterse por debajo. Justificación: la malla se regenera con colisión desactivada a propósito (`TectonicsTestActor.cpp:576`, "es muy pesado") - recalcular colisión física real cada vez sería justo el problema de rendimiento que ese comentario evita
+- [x] Input por sondeo directo de teclado/ratón (mismo patrón que `TectonicsTestActor::HandleInput`), sin depender de assets de Enhanced Input que no se pueden crear sin el editor: WASD mueve, Q/E baja/sube, ratón mira
+- [x] `Simu/SimuGameMode.h/.cpp` + `GlobalDefaultGameMode` en `Config/DefaultEngine.ini` para que este pawn sea el que se posee al darle a Play (no se pudo hacer solo con .ini porque `AGameModeBase::DefaultPawnClass` no está marcado `config` en el motor)
+- [ ] **No verificado en el editor.** Aviso importante: si el nivel `test.umap` tiene un GameMode Override en World Settings, ese override gana sobre `GlobalDefaultGameMode` del proyecto y el pawn nuevo no se usaría - si al darle a Play sigue apareciendo `DefaultPawn`, revisar World Settings > GameMode Override y ponerlo a "None" (o a `SimuGameMode` explícitamente)
 
-**Hecho cuando:** se puede pasar de vista orbital a estar de pie sobre una montaña generada por la simulación, sin clipping ni cambios manuales de velocidad de cámara.
+**Hecho cuando:** se puede pasar de vista orbital a estar de pie sobre una montaña generada por la simulación, sin clipping ni cambios manuales de velocidad de cámara. Código completo; falta la prueba real en editor.
 
 ---
 

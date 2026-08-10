@@ -253,6 +253,15 @@ public:
     UFUNCTION(BlueprintCallable, Category = "Tectonics")
     void RegeneratePlanetMesh();
 
+    /**
+     * Radio real de la superficie (cm, incluyendo elevacion) en una direccion dada
+     * desde el centro del planeta. Usa exactamente la misma formula que
+     * CreatePlanetMesh/UpdateMeshColors, para que una camara que consulte esto nunca
+     * se desincronice de lo que se ve (ver ROADMAP.md M1.6).
+     */
+    UFUNCTION(BlueprintCallable, Category = "Tectonics")
+    float GetSurfaceRadiusAtDirection(const FVector& Direction) const;
+
     /** Guardar un snapshot de la simulación actual (ROADMAP.md M5). Tecla K en runtime. */
     UFUNCTION(BlueprintCallable, Category = "Tectonics|Persistence")
     bool SaveSimulation(const FString& SlotName);

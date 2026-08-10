@@ -348,6 +348,50 @@ FString ATectonicsTestActor::GetGlobalStats() const
     );
 }
 
+float ATectonicsTestActor::GetSurfaceRadiusAtDirection(const FVector& Direction) const
+{
+    if (!RasterizedTectonics || !RasterizedTectonics->IsInitialized())
+    {
+        return VisualRadius;
+    }
+
+    FVector Normal = Direction.GetSafeNormal();
+    FVector AbsNormal = Normal.GetAbs();
+    ECSCubeFace DominantFace;
+    float FaceU, FaceV;
+
+    // Misma logica de cara dominante que UpdateMeshColors, para muestrear exactamente
+    // la misma elevacion que se esta renderizando.
+    if (AbsNormal.X >= AbsNormal.Y && AbsNormal.X >= AbsNormal.Z)
+    {
+        DominantFace = Normal.X >= 0 ? ECSCubeFace::PositiveX : ECSCubeFace::NegativeX;
+        float Scale = 1.0f / AbsNormal.X;
+        if (Normal.X >= 0) { FaceU = Normal.Y * Scale; FaceV = Normal.Z * Scale; }
+        else { FaceU = -Normal.Y * Scale; FaceV = Normal.Z * Scale; }
+    }
+    else if (AbsNormal.Y >= AbsNormal.X && AbsNormal.Y >= AbsNormal.Z)
+    {
+        DominantFace = Normal.Y >= 0 ? ECSCubeFace::PositiveY : ECSCubeFace::NegativeY;
+        float Scale = 1.0f / AbsNormal.Y;
+        if (Normal.Y >= 0) { FaceU = -Normal.X * Scale; FaceV = Normal.Z * Scale; }
+        else { FaceU = Normal.X * Scale; FaceV = Normal.Z * Scale; }
+    }
+    else
+    {
+        DominantFace = Normal.Z >= 0 ? ECSCubeFace::PositiveZ : ECSCubeFace::NegativeZ;
+        float Scale = 1.0f / AbsNormal.Z;
+        if (Normal.Z >= 0) { FaceU = Normal.X * Scale; FaceV = -Normal.Y * Scale; }
+        else { FaceU = Normal.X * Scale; FaceV = Normal.Y * Scale; }
+    }
+
+    float TexU = (FaceU + 1.0f) * 0.5f;
+    float TexV = (FaceV + 1.0f) * 0.5f;
+    float Elevation = RasterizedTectonics->GetElevationBilinear(DominantFace, TexU, TexV);
+
+    float ElevationOffset = Elevation * 100.0f * ElevationScale;
+    return VisualRadius + ElevationOffset;
+}
+
 bool ATectonicsTestActor::SaveSimulation(const FString& SlotName)
 {
     if (!bSystemsInitialized || !PlateSystem || !RasterizedTectonics)
