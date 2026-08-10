@@ -223,9 +223,12 @@ void USphericalVoronoi::JFAPass(int32 StepSize)
                     }
                     else
                     {
-                        // Vecino en otra cara - usar adyacencia del Grid
-                        // Para simplificar, solo propagamos dentro de cada cara por ahora
-                        // TODO: Implementar propagación cross-face
+                        // Vecino en otra cara: esta pasada JFA no cruza caras, pero la
+                        // segunda pasada de abajo (propagación de bordes vía
+                        // Grid->GetNeighborCell) sí resuelve la continuidad cross-face
+                        // para el resultado final. Esto solo significa que la
+                        // convergencia de JFA cerca de bordes de cara puede tardar
+                        // alguna iteración extra, no que el resultado final sea incorrecto.
                     }
                 }
 

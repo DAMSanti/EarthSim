@@ -211,6 +211,13 @@ FVector FCubeFaceQuadTree::GetNodeCenterOnSphere(const FQuadTreeNodeId& NodeId, 
     return CubePoint.GetSafeNormal() * Radius;
 }
 
+float FCubeFaceQuadTree::GetNodeBoundingRadius(const FQuadTreeNodeId& NodeId, double Radius) const
+{
+    FQuadTreeBounds Bounds = GetNodeBounds(NodeId);
+    double DiagonalUV = FVector2D(Bounds.GetWidth(), Bounds.GetHeight()).Size();
+    return static_cast<float>(0.5 * DiagonalUV * Radius);
+}
+
 bool FCubeFaceQuadTree::NodeExists(const FQuadTreeNodeId& NodeId) const
 {
     return Nodes.Contains(NodeId);
@@ -508,8 +515,11 @@ void FCubeSphereQuadTree::UpdateAllFaces(const FVector& CameraPosition)
 
 void FCubeSphereQuadTree::UpdateVisibleFaces(const FVector& CameraPosition, const FConvexVolume& ViewFrustum)
 {
-    // Por ahora, actualizar todas las caras
-    // TODO: Implementar frustum culling por cara
+    // Ningún caller usa este método hoy (grep confirmado 10-08-2026) - el culling real y
+    // usado en producción vive en UCubeLODController::IsInFrustum, que hace un test de
+    // cono por nodo (más barato que un frustum de 6 planos y no requiere reconstruir
+    // matrices de vista aquí). Si en el futuro se necesita culling a nivel de cara
+    // completa con un FConvexVolume real, implementarlo aquí contra ViewFrustum.
     UpdateAllFaces(CameraPosition);
 }
 
@@ -581,34 +591,139 @@ FQuadTreeNodeId FCubeSphereQuadTree::FindLeafContainingPoint(const FVector& Worl
     return FaceQuadTrees[static_cast<int32>(Face)].FindLeafContaining(FaceCoord);
 }
 
+namespace
+{
+    // Misma tabla que UCubeSphereGrid::InitializeEdgeConnections (CubeSphereGrid.cpp),
+    // duplicada aquí en vez de añadir una dependencia del Quadtree hacia el Grid.
+    FFaceEdgeConnection GetQuadTreeEdgeConnection(ECSCubeFace Face, ENeighborDirection Dir)
+    {
+        switch (Face)
+        {
+        case ECSCubeFace::PositiveX:
+            switch (Dir)
+            {
+            case ENeighborDirection::Up:    return FFaceEdgeConnection(ECSCubeFace::PositiveZ, 1);
+            case ENeighborDirection::Down:  return FFaceEdgeConnection(ECSCubeFace::NegativeZ, 3);
+            case ENeighborDirection::Left:  return FFaceEdgeConnection(ECSCubeFace::PositiveY, 0);
+            default:                        return FFaceEdgeConnection(ECSCubeFace::NegativeY, 0);
+            }
+        case ECSCubeFace::NegativeX:
+            switch (Dir)
+            {
+            case ENeighborDirection::Up:    return FFaceEdgeConnection(ECSCubeFace::PositiveZ, 3);
+            case ENeighborDirection::Down:  return FFaceEdgeConnection(ECSCubeFace::NegativeZ, 1);
+            case ENeighborDirection::Left:  return FFaceEdgeConnection(ECSCubeFace::NegativeY, 0);
+            default:                        return FFaceEdgeConnection(ECSCubeFace::PositiveY, 0);
+            }
+        case ECSCubeFace::PositiveY:
+            switch (Dir)
+            {
+            case ENeighborDirection::Up:    return FFaceEdgeConnection(ECSCubeFace::PositiveZ, 0);
+            case ENeighborDirection::Down:  return FFaceEdgeConnection(ECSCubeFace::NegativeZ, 0);
+            case ENeighborDirection::Left:  return FFaceEdgeConnection(ECSCubeFace::NegativeX, 0);
+            default:                        return FFaceEdgeConnection(ECSCubeFace::PositiveX, 0);
+            }
+        case ECSCubeFace::NegativeY:
+            switch (Dir)
+            {
+            case ENeighborDirection::Up:    return FFaceEdgeConnection(ECSCubeFace::PositiveZ, 2);
+            case ENeighborDirection::Down:  return FFaceEdgeConnection(ECSCubeFace::NegativeZ, 2);
+            case ENeighborDirection::Left:  return FFaceEdgeConnection(ECSCubeFace::PositiveX, 0);
+            default:                        return FFaceEdgeConnection(ECSCubeFace::NegativeX, 0);
+            }
+        case ECSCubeFace::PositiveZ:
+            switch (Dir)
+            {
+            case ENeighborDirection::Up:    return FFaceEdgeConnection(ECSCubeFace::NegativeY, 2);
+            case ENeighborDirection::Down:  return FFaceEdgeConnection(ECSCubeFace::PositiveY, 0);
+            case ENeighborDirection::Left:  return FFaceEdgeConnection(ECSCubeFace::NegativeX, 1);
+            default:                        return FFaceEdgeConnection(ECSCubeFace::PositiveX, 3);
+            }
+        default: // NegativeZ
+            switch (Dir)
+            {
+            case ENeighborDirection::Up:    return FFaceEdgeConnection(ECSCubeFace::PositiveY, 0);
+            case ENeighborDirection::Down:  return FFaceEdgeConnection(ECSCubeFace::NegativeY, 2);
+            case ENeighborDirection::Left:  return FFaceEdgeConnection(ECSCubeFace::NegativeX, 3);
+            default:                        return FFaceEdgeConnection(ECSCubeFace::PositiveX, 1);
+            }
+        }
+    }
+
+    // Versión continua (UV en [-1,1]) de la misma transformación que
+    // UCubeSphereGrid::GetNeighborCell aplica en índices discretos: dado un punto a lo
+    // largo del borde cruzado (S en [-1,1]) y los pasos de rotación de la conexión,
+    // devuelve la UV correspondiente en la cara vecina.
+    FVector2D MapEdgeCoordToNeighborUV(ENeighborDirection Dir, double S, int32 RotationSteps)
+    {
+        const double Flip = -S;
+        switch (RotationSteps)
+        {
+        case 0:
+            switch (Dir)
+            {
+            case ENeighborDirection::Up:    return FVector2D(S, -1.0);
+            case ENeighborDirection::Down:  return FVector2D(S, 1.0);
+            case ENeighborDirection::Left:  return FVector2D(1.0, S);
+            default:                        return FVector2D(-1.0, S);
+            }
+        case 1:
+            switch (Dir)
+            {
+            case ENeighborDirection::Up:    return FVector2D(1.0, S);
+            case ENeighborDirection::Down:  return FVector2D(-1.0, Flip);
+            case ENeighborDirection::Left:  return FVector2D(S, 1.0);
+            default:                        return FVector2D(Flip, -1.0);
+            }
+        case 2:
+            switch (Dir)
+            {
+            case ENeighborDirection::Up:    return FVector2D(Flip, 1.0);
+            case ENeighborDirection::Down:  return FVector2D(Flip, -1.0);
+            case ENeighborDirection::Left:  return FVector2D(-1.0, Flip);
+            default:                        return FVector2D(1.0, Flip);
+            }
+        default: // 3
+            switch (Dir)
+            {
+            case ENeighborDirection::Up:    return FVector2D(-1.0, Flip);
+            case ENeighborDirection::Down:  return FVector2D(1.0, S);
+            case ENeighborDirection::Left:  return FVector2D(Flip, -1.0);
+            default:                        return FVector2D(S, 1.0);
+            }
+        }
+    }
+}
+
 TArray<FQuadTreeNodeId> FCubeSphereQuadTree::GetCrossFaceNeighbors(const FQuadTreeNodeId& NodeId) const
 {
     TArray<FQuadTreeNodeId> Neighbors;
-    
+
     const FCubeFaceQuadTree& FaceTree = GetFaceQuadTree(NodeId.Face);
     FQuadTreeBounds Bounds = FaceTree.GetNodeBounds(NodeId);
-    
-    // Verificar si el nodo toca algún borde de la cara
+
+    // Verificar si el nodo toca algún borde de la cara, y con qué rango a lo largo de él
     const double EdgeThreshold = 0.99;
-    bool TouchesLeft = Bounds.Min.X <= -EdgeThreshold;
-    bool TouchesRight = Bounds.Max.X >= EdgeThreshold;
-    bool TouchesBottom = Bounds.Min.Y <= -EdgeThreshold;
-    bool TouchesTop = Bounds.Max.Y >= EdgeThreshold;
+    struct FTouchedEdge { ENeighborDirection Dir; double SMid; };
+    TArray<FTouchedEdge> TouchedEdges;
 
-    if (!TouchesLeft && !TouchesRight && !TouchesBottom && !TouchesTop)
+    if (Bounds.Min.Y <= -EdgeThreshold) TouchedEdges.Add({ ENeighborDirection::Down, (Bounds.Min.X + Bounds.Max.X) * 0.5 });
+    if (Bounds.Max.Y >= EdgeThreshold)  TouchedEdges.Add({ ENeighborDirection::Up,   (Bounds.Min.X + Bounds.Max.X) * 0.5 });
+    if (Bounds.Min.X <= -EdgeThreshold) TouchedEdges.Add({ ENeighborDirection::Left, (Bounds.Min.Y + Bounds.Max.Y) * 0.5 });
+    if (Bounds.Max.X >= EdgeThreshold)  TouchedEdges.Add({ ENeighborDirection::Right,(Bounds.Min.Y + Bounds.Max.Y) * 0.5 });
+
+    for (const FTouchedEdge& Edge : TouchedEdges)
     {
-        return Neighbors;  // No toca ningún borde
+        FFaceEdgeConnection Connection = GetQuadTreeEdgeConnection(NodeId.Face, Edge.Dir);
+        FVector2D NeighborUV = MapEdgeCoordToNeighborUV(Edge.Dir, Edge.SMid, Connection.RotationSteps);
+
+        const FCubeFaceQuadTree& NeighborTree = GetFaceQuadTree(Connection.NeighborFace);
+        FQuadTreeNodeId NeighborLeaf = NeighborTree.FindLeafContaining(NeighborUV);
+        if (NeighborLeaf.IsValid())
+        {
+            Neighbors.AddUnique(NeighborLeaf);
+        }
     }
-
-    // Obtener puntos de muestreo en los bordes
-    FVector2D Center = Bounds.GetCenter();
-    double Epsilon = 0.01;
-
-    // Para cada borde, encontrar el nodo correspondiente en la cara adyacente
-    // Esto requiere la tabla de conexiones de CubeSphereGrid
-    // Por simplicidad, aquí solo indicamos que hay vecinos cross-face
-    
-    // TODO: Implementar mapeo completo usando la tabla EdgeConnections de CubeSphereGrid
 
     return Neighbors;
 }

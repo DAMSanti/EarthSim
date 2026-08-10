@@ -79,16 +79,16 @@ Detalle completo en `SPECS.md §5.3, §5.4`.
 
 ---
 
-## M3 — Cerrar los TODOs de correctness en LOD/QuadTree
+## M3 — Cerrar los TODOs de correctness en LOD/QuadTree ✅ COMPLETO (11-08-2026)
 
 🟡 Afecta rendimiento (culling) y corrección visual (grietas entre caras).
 
-- [ ] Culling de frustum por nodo del quadtree — `QuadTree/CubeSphereQuadTree.cpp:512`
-- [ ] Mapeo de aristas entre caras del cubo — `QuadTree/CubeSphereQuadTree.cpp:611`
-- [ ] Test de frustum contra bounding sphere en el LOD controller — `LOD/CubeLODController.cpp:155`
-- [ ] Propagación de Voronoi entre caras — `Tectonics/SphericalVoronoi.cpp:228`
+- [x] Culling de frustum por nodo — implementado en `UCubeLODController::IsInFrustum` (test de cono cámara/nodo con bounding sphere conservador), no en `UpdateVisibleFaces` (confirmado sin callers, dejado como no-op documentado)
+- [x] Mapeo de aristas entre caras del cubo — `FCubeSphereQuadTree::GetCrossFaceNeighbors` implementado, portando la tabla de conexión y la transformación de rotación de `UCubeSphereGrid::GetNeighborCell` a coordenadas UV continuas
+- [x] Test de frustum contra bounding sphere en el LOD controller — mismo fix que el primer punto (es la misma función)
+- [x] Propagación de Voronoi entre caras — confirmado que la segunda pasada de `USphericalVoronoi::GenerateVoronoiTessellation` ya la resuelve correctamente; el TODO era una nota obsoleta sobre la primera pasada (JFA), no un bug real. Comentario corregido.
 
-**Hecho cuando:** los 4 TODOs están resueltos o convertidos en tickets explícitos con justificación de por qué se posponen.
+**Hecho cuando:** los 4 TODOs están resueltos o convertidos en tickets explícitos con justificación de por qué se posponen. ✅ Compilado y verificado sin errores nuevos.
 
 ---
 

@@ -60,6 +60,12 @@ public:
     // Obtener posición 3D del centro del nodo en la esfera
     FVector GetNodeCenterOnSphere(const FQuadTreeNodeId& NodeId, double Radius) const;
 
+    // Radio de una esfera acotante conservadora para el nodo (para culling).
+    // Aproximación por diagonal en UV escalada por el radio del planeta: no es exacta
+    // (la proyección cubo->esfera no es lineal) pero sobreestima ligeramente, que es la
+    // dirección segura para culling.
+    float GetNodeBoundingRadius(const FQuadTreeNodeId& NodeId, double Radius) const;
+
     // Verificar si un nodo existe
     bool NodeExists(const FQuadTreeNodeId& NodeId) const;
 

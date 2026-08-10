@@ -44,8 +44,8 @@ Diseño de referencia ampliado en [`docs/02-estructura-datos-espaciales.md`](doc
 
 **Implementado, con deuda técnica marcada:**
 
-- `QuadTree/CubeSphereQuadTree.cpp` (656 líneas): árbol de subdivisión/colapso por cara. TODO: culling de frustum por nodo (`:512`), mapeo de aristas entre caras (`:611`).
-- `LOD/CubeLODController.cpp` (499 líneas): selección de LOD por distancia con `TickComponent`. TODO: test de frustum contra bounding sphere del nodo (`:155`).
+- `QuadTree/CubeSphereQuadTree.cpp` (~770 líneas): árbol de subdivisión/colapso por cara. Culling de frustum y mapeo de aristas entre caras **resueltos el 11-08-2026** (ver `ROADMAP.md` M3).
+- `LOD/CubeLODController.cpp` (~520 líneas): selección de LOD por distancia con `TickComponent`. Frustum culling por cono implementado en `IsInFrustum` (11-08-2026).
 - `Streaming/ChunkStreamingManager.cpp` (738 líneas): carga/descarga de chunks con `Tick`. No hay streaming asíncrono más allá de los mecanismos estándar de UE.
 
 Los 4 TODOs pendientes son de **correctness/performance**, no cosméticos: sin culling de frustum el coste de LOD escala con el planeta completo, no con lo visible; sin mapeo de aristas entre caras el LOD puede generar grietas (T-junctions) en los bordes del cubo.

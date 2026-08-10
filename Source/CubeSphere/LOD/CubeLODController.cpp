@@ -57,6 +57,11 @@ void UCubeLODController::UpdateLOD()
 
     FVector CameraPos = GetCameraPosition();
 
+    // Refrescar caché de cámara para el test de frustum (cono) de este frame
+    CachedCameraForward = GetCameraForward();
+    CachedHalfFOVRad = FMath::DegreesToRadians(LODConfig.FieldOfView * 0.5f);
+    bFrustumValid = true;
+
     // Recolectar candidatos
     CollectSplitCandidates(CameraPos);
     CollectCollapseCandidates(CameraPos);
@@ -147,14 +152,28 @@ float UCubeLODController::CalculateScreenSpaceError(const FQuadTreeNodeId& NodeI
 
 bool UCubeLODController::IsInFrustum(const FQuadTreeNodeId& NodeId) const
 {
-    if (!LODConfig.bUseFrustumCulling)
+    if (!LODConfig.bUseFrustumCulling || !bFrustumValid)
     {
         return true;
     }
 
-    // TODO: Implementar test de frustum con bounding sphere del nodo
-    // Por ahora, asumir visible
-    return true;
+    const FCubeFaceQuadTree& FaceTree = QuadTree.GetFaceQuadTree(NodeId.Face);
+    const FVector NodeCenter = FaceTree.GetNodeCenterOnSphere(NodeId, PlanetRadius);
+    const float NodeRadius = FaceTree.GetNodeBoundingRadius(NodeId, PlanetRadius);
+
+    const FVector CameraPos = GetCameraPosition();
+    const FVector ToNode = NodeCenter - CameraPos;
+    const float Dist = ToNode.Size();
+    if (Dist <= NodeRadius)
+    {
+        return true;  // Cámara dentro (o casi) del nodo
+    }
+
+    const FVector DirToNode = ToNode / Dist;
+    const float AngleToNode = FMath::Acos(FMath::Clamp(FVector::DotProduct(CachedCameraForward, DirToNode), -1.0f, 1.0f));
+    const float AngularMargin = FMath::Atan2(NodeRadius, Dist);
+
+    return AngleToNode <= (CachedHalfFOVRad + AngularMargin);
 }
 
 bool UCubeLODController::IsOccludedByHorizon(const FQuadTreeNodeId& NodeId, const FVector& CameraPos) const

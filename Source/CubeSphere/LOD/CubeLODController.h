@@ -231,8 +231,10 @@ private:
     FCubeSphereQuadTree QuadTree;
     double PlanetRadius;
     
-    // Caché de frustum para culling
-    FConvexVolume CachedFrustum;
+    // Caché de cámara para culling por cono (más barato que un frustum completo de 6
+    // planos, y no requiere construir matrices de vista/proyección aquí)
+    FVector CachedCameraForward = FVector::ForwardVector;
+    float CachedHalfFOVRad = FMath::DegreesToRadians(45.0f);
     bool bFrustumValid;
 
     // Estado anterior para histéresis
