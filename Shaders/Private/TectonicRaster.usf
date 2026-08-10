@@ -1,0 +1,457 @@
+// Copyright (c) 2024 Simu Project. All Rights Reserved.
+// TectonicRaster.usf - Compute Shaders para tectónica rasterizada
+
+#include "/Engine/Private/Common.ush"
+
+// ============================================================
+// ESTRUCTURAS
+// ============================================================
+
+struct FPlateData
+{
+    float3 CenterPosition;
+    float Density;
+    float3 AngularVelocity;
+    int PlateID;
+    float Thickness;
+    int bIsContinental;
+    int CellCount;
+    float Padding;
+};
+
+// ============================================================
+// PARÁMETROS UNIFORMES
+// ============================================================
+
+float DeltaTime;
+float PlanetRadius;
+float TimeScale;
+float OrogenyFactor;
+float SpreadingFactor;
+float SubductionRate;
+float ContinentalBaseElevation;
+float OceanicBaseElevation;
+int TextureResolution;
+int FaceIndex;
+int NumPlates;
+
+// ============================================================
+// TEXTURAS Y BUFFERS
+// ============================================================
+
+// Texturas de entrada (SRV)
+Texture2D<uint> PlateIDTextureSRV;
+Texture2D<float> ElevationTextureSRV;
+Texture2D<float2> VelocityTextureSRV;
+Texture2D<uint> CrustTypeTextureSRV;
+
+// Texturas de salida (UAV)
+RWTexture2D<uint> PlateIDTextureUAV;
+RWTexture2D<float> ElevationTextureUAV;
+RWTexture2D<float2> VelocityTextureUAV;
+RWTexture2D<float> CrustAgeTextureUAV;
+RWTexture2D<uint> CrustTypeTextureUAV;
+
+// Buffer de datos de placas
+StructuredBuffer<FPlateData> PlateDataBuffer;
+
+// Sampler
+SamplerState LinearSampler;
+
+// ============================================================
+// FUNCIONES HELPER
+// ============================================================
+
+/**
+ * Convertir coordenada de textura UV a posición 3D en la esfera
+ * Face: 0=Front(+X), 1=Back(-X), 2=Right(+Y), 3=Left(-Y), 4=Top(+Z), 5=Bottom(-Z)
+ */
+float3 UVToSpherePosition(float2 UV, int Face)
+{
+    // Convertir UV [0,1] a coordenadas de cara [-1, 1]
+    float u = UV.x * 2.0 - 1.0;
+    float v = UV.y * 2.0 - 1.0;
+    
+    float3 CubePos;
+    
+    switch (Face)
+    {
+        case 0: CubePos = float3(1.0, u, v); break;     // Front (+X)
+        case 1: CubePos = float3(-1.0, -u, v); break;   // Back (-X)
+        case 2: CubePos = float3(-u, 1.0, v); break;    // Right (+Y)
+        case 3: CubePos = float3(u, -1.0, v); break;    // Left (-Y)
+        case 4: CubePos = float3(u, -v, 1.0); break;    // Top (+Z)
+        case 5: CubePos = float3(u, v, -1.0); break;    // Bottom (-Z)
+        default: CubePos = float3(0, 0, 1.0); break;
+    }
+    
+    // Normalizar a esfera y escalar por radio
+    return normalize(CubePos) * PlanetRadius;
+}
+
+/**
+ * Calcular velocidad tangencial en un punto de la esfera
+ * basado en la velocidad angular de la placa
+ */
+float3 CalculateTangentialVelocity(float3 Position, float3 AngularVelocity)
+{
+    // v = ω × r
+    return cross(AngularVelocity, Position);
+}
+
+/**
+ * Proyectar velocidad 3D a velocidad 2D tangencial en la cara del cubo
+ */
+float2 ProjectVelocityToFace(float3 Velocity3D, float3 Position, int Face)
+{
+    // Normal de la esfera en este punto
+    float3 Normal = normalize(Position);
+    
+    // Proyectar velocidad al plano tangente
+    float3 TangentVel = Velocity3D - dot(Velocity3D, Normal) * Normal;
+    
+    // Bases tangentes según la cara
+    float3 TangentU, TangentV;
+    
+    switch (Face)
+    {
+        case 0: // Front (+X)
+            TangentU = float3(0, 1, 0);
+            TangentV = float3(0, 0, 1);
+            break;
+        case 1: // Back (-X)
+            TangentU = float3(0, -1, 0);
+            TangentV = float3(0, 0, 1);
+            break;
+        case 2: // Right (+Y)
+            TangentU = float3(-1, 0, 0);
+            TangentV = float3(0, 0, 1);
+            break;
+        case 3: // Left (-Y)
+            TangentU = float3(1, 0, 0);
+            TangentV = float3(0, 0, 1);
+            break;
+        case 4: // Top (+Z)
+            TangentU = float3(1, 0, 0);
+            TangentV = float3(0, -1, 0);
+            break;
+        case 5: // Bottom (-Z)
+            TangentU = float3(1, 0, 0);
+            TangentV = float3(0, 1, 0);
+            break;
+        default:
+            TangentU = float3(1, 0, 0);
+            TangentV = float3(0, 1, 0);
+            break;
+    }
+    
+    return float2(dot(TangentVel, TangentU), dot(TangentVel, TangentV));
+}
+
+/**
+ * Verificar si dos placas están colisionando (convergentes)
+ */
+bool AreConverging(uint PlateID1, uint PlateID2, float2 Vel1, float2 Vel2, float2 Direction)
+{
+    // Direction apunta de PlateID1 a PlateID2
+    float ApproachRate1 = dot(Vel1, Direction);
+    float ApproachRate2 = dot(Vel2, -Direction);
+    
+    // Si la suma es positiva, se están acercando
+    return (ApproachRate1 + ApproachRate2) > 0.0;
+}
+
+/**
+ * Verificar si dos placas están divergiendo
+ */
+bool AreDiverging(uint PlateID1, uint PlateID2, float2 Vel1, float2 Vel2, float2 Direction)
+{
+    float ApproachRate1 = dot(Vel1, Direction);
+    float ApproachRate2 = dot(Vel2, -Direction);
+    
+    return (ApproachRate1 + ApproachRate2) < 0.0;
+}
+
+// ============================================================
+// CS_MovePixels - Shader de movimiento de píxeles
+// ============================================================
+
+#ifndef THREADGROUP_SIZE
+#define THREADGROUP_SIZE 8
+#endif
+
+[numthreads(THREADGROUP_SIZE, THREADGROUP_SIZE, 1)]
+void CS_MovePixels(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    int2 PixelCoord = int2(DispatchThreadId.xy);
+    
+    // Verificar límites
+    if (PixelCoord.x >= TextureResolution || PixelCoord.y >= TextureResolution)
+    {
+        return;
+    }
+    
+    // Leer datos actuales
+    uint CurrentPlateID = PlateIDTextureSRV.Load(int3(PixelCoord, 0));
+    float CurrentElevation = ElevationTextureSRV.Load(int3(PixelCoord, 0));
+    
+    // Verificar que el ID de placa sea válido
+    if (CurrentPlateID >= (uint)NumPlates)
+    {
+        return;
+    }
+    
+    // Obtener datos de la placa
+    FPlateData Plate = PlateDataBuffer[CurrentPlateID];
+    
+    // Calcular posición 3D
+    float2 UV = (float2(PixelCoord) + 0.5) / float(TextureResolution);
+    float3 Position = UVToSpherePosition(UV, FaceIndex);
+    
+    // Calcular velocidad tangencial
+    float3 Velocity3D = CalculateTangentialVelocity(Position, Plate.AngularVelocity);
+    float2 Velocity2D = ProjectVelocityToFace(Velocity3D, Position, FaceIndex);
+    
+    // Escalar velocidad por tiempo
+    float2 Displacement = Velocity2D * DeltaTime * TimeScale;
+    
+    // Convertir desplazamiento a píxeles
+    // Asumiendo que la textura cubre 90° (π/2 radianes) de arco
+    float PixelsPerRadian = float(TextureResolution) / (3.14159265 * 0.5);
+    float2 PixelDisplacement = Displacement / PlanetRadius * PixelsPerRadian;
+    
+    // Calcular posición fuente (de dónde viene este material)
+    float2 SourceUV = UV - PixelDisplacement / float(TextureResolution);
+    
+    // Clamp a límites válidos
+    SourceUV = saturate(SourceUV);
+    int2 SourceCoord = int2(SourceUV * float(TextureResolution));
+    SourceCoord = clamp(SourceCoord, int2(0, 0), int2(TextureResolution - 1, TextureResolution - 1));
+    
+    // Leer datos de la posición fuente
+    uint SourcePlateID = PlateIDTextureSRV.Load(int3(SourceCoord, 0));
+    float SourceElevation = ElevationTextureSRV.Load(int3(SourceCoord, 0));
+    
+    // Si el material viene de la misma placa, conservar
+    // Si viene de otra placa, hay interacción en el boundary
+    if (SourcePlateID == CurrentPlateID)
+    {
+        // Advección simple - el material se mueve con la placa
+        PlateIDTextureUAV[PixelCoord] = SourcePlateID;
+        ElevationTextureUAV[PixelCoord] = SourceElevation;
+    }
+    else
+    {
+        // Zona de frontera - mantener por ahora, el shader de colisión procesará
+        PlateIDTextureUAV[PixelCoord] = CurrentPlateID;
+        ElevationTextureUAV[PixelCoord] = CurrentElevation;
+    }
+    
+    // Actualizar velocidad
+    VelocityTextureUAV[PixelCoord] = Velocity2D;
+}
+
+// ============================================================
+// CS_CollisionElevation - Shader de colisión y orogénesis
+// ============================================================
+
+[numthreads(THREADGROUP_SIZE, THREADGROUP_SIZE, 1)]
+void CS_CollisionElevation(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    int2 PixelCoord = int2(DispatchThreadId.xy);
+    
+    if (PixelCoord.x >= TextureResolution || PixelCoord.y >= TextureResolution)
+    {
+        return;
+    }
+    
+    uint CurrentPlateID = PlateIDTextureSRV.Load(int3(PixelCoord, 0));
+    float CurrentElevation = ElevationTextureSRV.Load(int3(PixelCoord, 0));
+    float2 CurrentVelocity = VelocityTextureSRV.Load(int3(PixelCoord, 0));
+    uint CurrentCrustType = CrustTypeTextureSRV.Load(int3(PixelCoord, 0));
+    
+    // Verificar vecinos para detectar fronteras
+    int2 Offsets[8] = {
+        int2(-1, -1), int2(0, -1), int2(1, -1),
+        int2(-1,  0),              int2(1,  0),
+        int2(-1,  1), int2(0,  1), int2(1,  1)
+    };
+    
+    float ElevationChange = 0.0;
+    bool bAtBoundary = false;
+    int ConvergentNeighbors = 0;
+    int DivergentNeighbors = 0;
+    
+    for (int i = 0; i < 8; i++)
+    {
+        int2 NeighborCoord = PixelCoord + Offsets[i];
+        
+        // Verificar límites
+        if (NeighborCoord.x < 0 || NeighborCoord.x >= TextureResolution ||
+            NeighborCoord.y < 0 || NeighborCoord.y >= TextureResolution)
+        {
+            continue;
+        }
+        
+        uint NeighborPlateID = PlateIDTextureSRV.Load(int3(NeighborCoord, 0));
+        
+        if (NeighborPlateID != CurrentPlateID)
+        {
+            bAtBoundary = true;
+            
+            float2 NeighborVelocity = VelocityTextureSRV.Load(int3(NeighborCoord, 0));
+            float2 Direction = normalize(float2(Offsets[i]));
+            
+            // Calcular velocidad relativa
+            float2 RelativeVelocity = CurrentVelocity - NeighborVelocity;
+            float Convergence = -dot(RelativeVelocity, Direction);
+            
+            if (Convergence > 0.01) // Convergente
+            {
+                ConvergentNeighbors++;
+                
+                // Obtener tipos de corteza
+                uint NeighborCrustType = CrustTypeTextureSRV.Load(int3(NeighborCoord, 0));
+                float NeighborElevation = ElevationTextureSRV.Load(int3(NeighborCoord, 0));
+                
+                // Orogénesis - acumulación de elevación
+                if (CurrentCrustType == 1 && NeighborCrustType == 1)
+                {
+                    // Continental-Continental: Formación de montañas grandes (Himalaya)
+                    ElevationChange += Convergence * OrogenyFactor * 2.0 * DeltaTime * TimeScale;
+                }
+                else if (CurrentCrustType == 1 && NeighborCrustType == 0)
+                {
+                    // Continental-Oceánica: Subducción, arco volcánico
+                    // Elevación moderada por volcanismo
+                    ElevationChange += Convergence * OrogenyFactor * 0.5 * DeltaTime * TimeScale;
+                }
+                else if (CurrentCrustType == 0 && NeighborCrustType == 0)
+                {
+                    // Oceánica-Oceánica: Subducción con arco de islas
+                    ElevationChange += Convergence * OrogenyFactor * 0.3 * DeltaTime * TimeScale;
+                }
+            }
+            else if (Convergence < -0.01) // Divergente
+            {
+                DivergentNeighbors++;
+                // Las zonas divergentes se procesan en CS_GenerateCrust
+            }
+        }
+    }
+    
+    // Aplicar cambio de elevación
+    float NewElevation = CurrentElevation + ElevationChange;
+    
+    // Limitar elevación máxima
+    const float MaxMountainHeight = 12000.0; // metros sobre nivel del mar
+    const float MinOceanDepth = -11000.0;    // Fosa de las Marianas
+    NewElevation = clamp(NewElevation, MinOceanDepth, MaxMountainHeight);
+    
+    // Aplicar erosión suave en zonas de alta elevación
+    if (NewElevation > 5000.0)
+    {
+        float ErosionRate = (NewElevation - 5000.0) / 10000.0 * 0.01;
+        NewElevation -= ErosionRate * DeltaTime * TimeScale;
+    }
+    
+    // Aplicar sedimentación en zonas bajas
+    if (bAtBoundary && CurrentCrustType == 0 && NewElevation < -4000.0)
+    {
+        // Sedimentos de erosión se acumulan en fosas
+        NewElevation += 0.001 * DeltaTime * TimeScale;
+    }
+    
+    ElevationTextureUAV[PixelCoord] = NewElevation;
+}
+
+// ============================================================
+// CS_GenerateCrust - Shader de generación de nueva corteza
+// ============================================================
+
+[numthreads(THREADGROUP_SIZE, THREADGROUP_SIZE, 1)]
+void CS_GenerateCrust(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    int2 PixelCoord = int2(DispatchThreadId.xy);
+    
+    if (PixelCoord.x >= TextureResolution || PixelCoord.y >= TextureResolution)
+    {
+        return;
+    }
+    
+    uint CurrentPlateID = PlateIDTextureSRV.Load(int3(PixelCoord, 0));
+    float2 CurrentVelocity = VelocityTextureSRV.Load(int3(PixelCoord, 0));
+    
+    // Verificar vecinos para detectar zonas divergentes
+    int2 Offsets[4] = {
+        int2(-1, 0), int2(1, 0),
+        int2(0, -1), int2(0, 1)
+    };
+    
+    bool bAtDivergentBoundary = false;
+    float MaxDivergence = 0.0;
+    
+    for (int i = 0; i < 4; i++)
+    {
+        int2 NeighborCoord = PixelCoord + Offsets[i];
+        
+        if (NeighborCoord.x < 0 || NeighborCoord.x >= TextureResolution ||
+            NeighborCoord.y < 0 || NeighborCoord.y >= TextureResolution)
+        {
+            continue;
+        }
+        
+        uint NeighborPlateID = PlateIDTextureSRV.Load(int3(NeighborCoord, 0));
+        
+        if (NeighborPlateID != CurrentPlateID)
+        {
+            float2 NeighborVelocity = VelocityTextureSRV.Load(int3(NeighborCoord, 0));
+            float2 Direction = normalize(float2(Offsets[i]));
+            
+            // Calcular divergencia
+            float2 RelativeVelocity = CurrentVelocity - NeighborVelocity;
+            float Divergence = dot(RelativeVelocity, Direction);
+            
+            if (Divergence > 0.01)
+            {
+                bAtDivergentBoundary = true;
+                MaxDivergence = max(MaxDivergence, Divergence);
+            }
+        }
+    }
+    
+    if (bAtDivergentBoundary)
+    {
+        // Zona de spreading - generar nueva corteza oceánica
+        float CrustGenerationRate = MaxDivergence * SpreadingFactor * DeltaTime * TimeScale;
+        
+        // La nueva corteza es oceánica y comienza a nivel del fondo oceánico
+        CrustTypeTextureUAV[PixelCoord] = 0; // Oceánica
+        
+        // Elevación típica de dorsal oceánica (-2500m) que se profundiza con la edad
+        float RidgeElevation = OceanicBaseElevation + 1300.0; // -2500m aprox
+        ElevationTextureUAV[PixelCoord] = RidgeElevation;
+        
+        // Edad = 0 para corteza nueva
+        CrustAgeTextureUAV[PixelCoord] = 0.0;
+    }
+    else
+    {
+        // No está en zona divergente - envejecer corteza
+        float CurrentAge = ElevationTextureSRV.Load(int3(PixelCoord, 0)); // Temporal: usar el mismo buffer
+        // Incrementar edad
+        float NewAge = CurrentAge + DeltaTime * TimeScale;
+        
+        // La corteza oceánica se hunde con la edad (subsidencia térmica)
+        uint CrustType = CrustTypeTextureSRV.Load(int3(PixelCoord, 0));
+        if (CrustType == 0) // Oceánica
+        {
+            float CurrentElevation = ElevationTextureSRV.Load(int3(PixelCoord, 0));
+            // Subsidencia: ~sqrt(age) hasta ~180 Ma
+            float SubsidenceRate = 0.001 / (sqrt(NewAge + 1.0));
+            float NewElevation = CurrentElevation - SubsidenceRate * DeltaTime * TimeScale;
+            NewElevation = max(NewElevation, -6000.0); // Límite de profundidad
+            ElevationTextureUAV[PixelCoord] = NewElevation;
+        }
+    }
+}

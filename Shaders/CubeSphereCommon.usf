@@ -1,0 +1,458 @@
+// CubeSphereCommon.usf
+// Funciones HLSL para Cubo Esférico - Uso en Compute Shaders
+// Sprint 1.1 - Base para simulación GPU
+
+#pragma once
+
+// ============================================================
+// CONSTANTES
+// ============================================================
+
+#define CUBESPHERE_FACE_POSITIVE_X 0
+#define CUBESPHERE_FACE_NEGATIVE_X 1
+#define CUBESPHERE_FACE_POSITIVE_Y 2
+#define CUBESPHERE_FACE_NEGATIVE_Y 3
+#define CUBESPHERE_FACE_POSITIVE_Z 4
+#define CUBESPHERE_FACE_NEGATIVE_Z 5
+
+#define NEIGHBOR_UP    0
+#define NEIGHBOR_DOWN  1
+#define NEIGHBOR_LEFT  2
+#define NEIGHBOR_RIGHT 3
+
+#define PI 3.14159265358979323846
+#define HALF_PI 1.57079632679489661923
+#define TWO_PI 6.28318530717958647692
+
+// ============================================================
+// PARÁMETROS DEL GRID (Uniform Buffer)
+// ============================================================
+
+cbuffer CubeSphereParams
+{
+    int Resolution;
+    float PlanetRadius;
+    float InvResolution;
+    float CellSize;
+};
+
+// Textura de tabla de adyacencia (6 caras x 4 direcciones)
+// Cada entrada: (NeighborFace << 4) | RotationSteps
+Buffer<uint> AdjacencyTable;
+
+// ============================================================
+// ESTRUCTURAS
+// ============================================================
+
+struct CubeSphereCell
+{
+    uint Face;
+    int U;
+    int V;
+};
+
+struct GeographicCoords
+{
+    float Latitude;
+    float Longitude;
+};
+
+// ============================================================
+// PROYECCIÓN CUBO ↔ ESFERA
+// ============================================================
+
+/**
+ * Proyecta un punto del cubo a la esfera unitaria (normalización)
+ */
+float3 CubeToSphere(float3 CubePoint)
+{
+    return normalize(CubePoint);
+}
+
+/**
+ * Proyecta un punto de la esfera al cubo
+ */
+float3 SphereToCube(float3 SpherePoint)
+{
+    float3 AbsPoint = abs(SpherePoint);
+    float MaxComponent = max(max(AbsPoint.x, AbsPoint.y), AbsPoint.z);
+    
+    if (MaxComponent < 0.0001)
+        return float3(0, 0, 0);
+    
+    return SpherePoint / MaxComponent;
+}
+
+/**
+ * Determina la cara dominante para un punto 3D
+ */
+uint GetDominantFace(float3 Point)
+{
+    float3 AbsPoint = abs(Point);
+    
+    if (AbsPoint.x >= AbsPoint.y && AbsPoint.x >= AbsPoint.z)
+    {
+        return Point.x >= 0 ? CUBESPHERE_FACE_POSITIVE_X : CUBESPHERE_FACE_NEGATIVE_X;
+    }
+    else if (AbsPoint.y >= AbsPoint.x && AbsPoint.y >= AbsPoint.z)
+    {
+        return Point.y >= 0 ? CUBESPHERE_FACE_POSITIVE_Y : CUBESPHERE_FACE_NEGATIVE_Y;
+    }
+    else
+    {
+        return Point.z >= 0 ? CUBESPHERE_FACE_POSITIVE_Z : CUBESPHERE_FACE_NEGATIVE_Z;
+    }
+}
+
+// ============================================================
+// EJES DE CARA
+// ============================================================
+
+/**
+ * Obtiene los ejes locales de una cara del cubo
+ */
+void GetFaceAxes(uint Face, out float3 AxisU, out float3 AxisV, out float3 Normal)
+{
+    switch (Face)
+    {
+        case CUBESPHERE_FACE_POSITIVE_X:
+            Normal = float3(1, 0, 0);
+            AxisU = float3(0, 1, 0);
+            AxisV = float3(0, 0, 1);
+            break;
+        case CUBESPHERE_FACE_NEGATIVE_X:
+            Normal = float3(-1, 0, 0);
+            AxisU = float3(0, -1, 0);
+            AxisV = float3(0, 0, 1);
+            break;
+        case CUBESPHERE_FACE_POSITIVE_Y:
+            Normal = float3(0, 1, 0);
+            AxisU = float3(-1, 0, 0);
+            AxisV = float3(0, 0, 1);
+            break;
+        case CUBESPHERE_FACE_NEGATIVE_Y:
+            Normal = float3(0, -1, 0);
+            AxisU = float3(1, 0, 0);
+            AxisV = float3(0, 0, 1);
+            break;
+        case CUBESPHERE_FACE_POSITIVE_Z:
+            Normal = float3(0, 0, 1);
+            AxisU = float3(1, 0, 0);
+            AxisV = float3(0, 1, 0);
+            break;
+        case CUBESPHERE_FACE_NEGATIVE_Z:
+        default:
+            Normal = float3(0, 0, -1);
+            AxisU = float3(1, 0, 0);
+            AxisV = float3(0, -1, 0);
+            break;
+    }
+}
+
+// ============================================================
+// CONVERSIÓN DE COORDENADAS
+// ============================================================
+
+/**
+ * Convierte UV [0,1] y cara a punto en el cubo [-1,1]
+ */
+float3 FaceUVToCubePoint(uint Face, float2 UV)
+{
+    float LocalU = UV.x * 2.0 - 1.0;
+    float LocalV = UV.y * 2.0 - 1.0;
+    
+    float3 AxisU, AxisV, Normal;
+    GetFaceAxes(Face, AxisU, AxisV, Normal);
+    
+    return Normal + AxisU * LocalU + AxisV * LocalV;
+}
+
+/**
+ * Convierte punto normalizado a celda
+ */
+CubeSphereCell PointToCell(float3 NormalizedPoint)
+{
+    CubeSphereCell Cell;
+    
+    // Determinar cara
+    Cell.Face = GetDominantFace(NormalizedPoint);
+    
+    // Proyectar al cubo
+    float3 CubePoint = SphereToCube(NormalizedPoint);
+    
+    // Obtener ejes
+    float3 AxisU, AxisV, Normal;
+    GetFaceAxes(Cell.Face, AxisU, AxisV, Normal);
+    
+    // Coordenadas locales [-1, 1]
+    float LocalU = dot(CubePoint, AxisU);
+    float LocalV = dot(CubePoint, AxisV);
+    
+    // Convertir a UV [0, 1]
+    float U = (LocalU + 1.0) * 0.5;
+    float V = (LocalV + 1.0) * 0.5;
+    
+    // Convertir a índices
+    Cell.U = clamp(int(U * Resolution), 0, Resolution - 1);
+    Cell.V = clamp(int(V * Resolution), 0, Resolution - 1);
+    
+    return Cell;
+}
+
+/**
+ * Convierte celda a punto 3D en la esfera
+ */
+float3 CellToPoint(CubeSphereCell Cell)
+{
+    // Centro de la celda
+    float2 CenterUV = float2(
+        (Cell.U + 0.5) * InvResolution,
+        (Cell.V + 0.5) * InvResolution
+    );
+    
+    float3 CubePoint = FaceUVToCubePoint(Cell.Face, CenterUV);
+    return CubeToSphere(CubePoint) * PlanetRadius;
+}
+
+/**
+ * Convierte celda a punto normalizado (radio = 1)
+ */
+float3 CellToNormalizedPoint(CubeSphereCell Cell)
+{
+    float2 CenterUV = float2(
+        (Cell.U + 0.5) * InvResolution,
+        (Cell.V + 0.5) * InvResolution
+    );
+    
+    float3 CubePoint = FaceUVToCubePoint(Cell.Face, CenterUV);
+    return CubeToSphere(CubePoint);
+}
+
+// ============================================================
+// COORDENADAS GEOGRÁFICAS
+// ============================================================
+
+/**
+ * Convierte lat/lon a punto cartesiano normalizado
+ */
+float3 GeographicToPoint(GeographicCoords Coords)
+{
+    float CosLat = cos(Coords.Latitude);
+    
+    return float3(
+        CosLat * cos(Coords.Longitude),
+        CosLat * sin(Coords.Longitude),
+        sin(Coords.Latitude)
+    );
+}
+
+/**
+ * Convierte punto normalizado a lat/lon
+ */
+GeographicCoords PointToGeographic(float3 NormalizedPoint)
+{
+    GeographicCoords Coords;
+    Coords.Latitude = asin(clamp(NormalizedPoint.z, -1.0, 1.0));
+    Coords.Longitude = atan2(NormalizedPoint.y, NormalizedPoint.x);
+    return Coords;
+}
+
+// ============================================================
+// ADYACENCIA
+// ============================================================
+
+/**
+ * Obtiene la celda vecina en una dirección
+ * Maneja cruces entre caras del cubo
+ */
+CubeSphereCell GetNeighbor(CubeSphereCell Cell, uint Direction)
+{
+    int NewU = Cell.U;
+    int NewV = Cell.V;
+    uint NewFace = Cell.Face;
+    
+    // Calcular nueva posición
+    switch (Direction)
+    {
+        case NEIGHBOR_UP:    NewV = Cell.V + 1; break;
+        case NEIGHBOR_DOWN:  NewV = Cell.V - 1; break;
+        case NEIGHBOR_LEFT:  NewU = Cell.U - 1; break;
+        case NEIGHBOR_RIGHT: NewU = Cell.U + 1; break;
+    }
+    
+    // Verificar cruce de borde
+    bool CrossedBorder = false;
+    uint CrossDirection = Direction;
+    
+    if (NewU < 0)
+    {
+        CrossedBorder = true;
+        CrossDirection = NEIGHBOR_LEFT;
+        NewU = 0;
+    }
+    else if (NewU >= Resolution)
+    {
+        CrossedBorder = true;
+        CrossDirection = NEIGHBOR_RIGHT;
+        NewU = Resolution - 1;
+    }
+    else if (NewV < 0)
+    {
+        CrossedBorder = true;
+        CrossDirection = NEIGHBOR_DOWN;
+        NewV = 0;
+    }
+    else if (NewV >= Resolution)
+    {
+        CrossedBorder = true;
+        CrossDirection = NEIGHBOR_UP;
+        NewV = Resolution - 1;
+    }
+    
+    if (CrossedBorder)
+    {
+        // Leer tabla de adyacencia
+        uint TableIndex = Cell.Face * 4 + CrossDirection;
+        uint Packed = AdjacencyTable[TableIndex];
+        NewFace = Packed >> 4;
+        uint Rotation = Packed & 0xF;
+        
+        // Coordenada a lo largo del borde
+        int EdgeCoord = (CrossDirection == NEIGHBOR_UP || CrossDirection == NEIGHBOR_DOWN) 
+                        ? Cell.U : Cell.V;
+        
+        int MaxIdx = Resolution - 1;
+        int RotatedU, RotatedV;
+        
+        // Aplicar rotación (versión simplificada)
+        switch (Rotation)
+        {
+            case 0:
+                if (CrossDirection == NEIGHBOR_UP) { RotatedU = EdgeCoord; RotatedV = 0; }
+                else if (CrossDirection == NEIGHBOR_DOWN) { RotatedU = EdgeCoord; RotatedV = MaxIdx; }
+                else if (CrossDirection == NEIGHBOR_LEFT) { RotatedU = MaxIdx; RotatedV = EdgeCoord; }
+                else { RotatedU = 0; RotatedV = EdgeCoord; }
+                break;
+            case 1:
+                if (CrossDirection == NEIGHBOR_UP) { RotatedU = 0; RotatedV = MaxIdx - EdgeCoord; }
+                else if (CrossDirection == NEIGHBOR_DOWN) { RotatedU = MaxIdx; RotatedV = MaxIdx - EdgeCoord; }
+                else if (CrossDirection == NEIGHBOR_LEFT) { RotatedU = EdgeCoord; RotatedV = 0; }
+                else { RotatedU = MaxIdx - EdgeCoord; RotatedV = MaxIdx; }
+                break;
+            case 2:
+                if (CrossDirection == NEIGHBOR_UP) { RotatedU = MaxIdx - EdgeCoord; RotatedV = MaxIdx; }
+                else if (CrossDirection == NEIGHBOR_DOWN) { RotatedU = MaxIdx - EdgeCoord; RotatedV = 0; }
+                else if (CrossDirection == NEIGHBOR_LEFT) { RotatedU = 0; RotatedV = MaxIdx - EdgeCoord; }
+                else { RotatedU = MaxIdx; RotatedV = MaxIdx - EdgeCoord; }
+                break;
+            case 3:
+            default:
+                if (CrossDirection == NEIGHBOR_UP) { RotatedU = MaxIdx; RotatedV = EdgeCoord; }
+                else if (CrossDirection == NEIGHBOR_DOWN) { RotatedU = 0; RotatedV = EdgeCoord; }
+                else if (CrossDirection == NEIGHBOR_LEFT) { RotatedU = MaxIdx - EdgeCoord; RotatedV = MaxIdx; }
+                else { RotatedU = EdgeCoord; RotatedV = 0; }
+                break;
+        }
+        
+        NewU = RotatedU;
+        NewV = RotatedV;
+    }
+    
+    CubeSphereCell Result;
+    Result.Face = NewFace;
+    Result.U = NewU;
+    Result.V = NewV;
+    return Result;
+}
+
+// ============================================================
+// FACTOR DE ÁREA (CORRECCIÓN DE DISTORSIÓN)
+// ============================================================
+
+/**
+ * Calcula el factor de distorsión métrica para una celda
+ * Usado para conservación de masa en simulaciones de fluidos
+ */
+float GetCellAreaFactor(CubeSphereCell Cell)
+{
+    float2 UV = float2(
+        (Cell.U + 0.5) * InvResolution,
+        (Cell.V + 0.5) * InvResolution
+    );
+    
+    // Convertir a [-1, 1]
+    float X = UV.x * 2.0 - 1.0;
+    float Y = UV.y * 2.0 - 1.0;
+    
+    // Factor basado en Jacobiano de la proyección
+    float R2 = X * X + Y * Y;
+    return 1.0 / pow(1.0 + R2, 1.5);
+}
+
+/**
+ * Calcula el área real de una celda en metros cuadrados
+ */
+float GetCellAreaSquareMeters(CubeSphereCell Cell)
+{
+    float TotalSurfaceArea = 4.0 * PI * PlanetRadius * PlanetRadius;
+    float TotalCells = 6.0 * Resolution * Resolution;
+    float BaseCellArea = TotalSurfaceArea / TotalCells;
+    
+    return BaseCellArea * GetCellAreaFactor(Cell);
+}
+
+// ============================================================
+// ÍNDICES LINEALES
+// ============================================================
+
+/**
+ * Convierte celda a índice lineal único
+ */
+uint CellToLinearIndex(CubeSphereCell Cell)
+{
+    uint CellsPerFace = Resolution * Resolution;
+    return Cell.Face * CellsPerFace + Cell.V * Resolution + Cell.U;
+}
+
+/**
+ * Convierte índice lineal a celda
+ */
+CubeSphereCell LinearIndexToCell(uint LinearIndex)
+{
+    uint CellsPerFace = Resolution * Resolution;
+    
+    CubeSphereCell Cell;
+    Cell.Face = LinearIndex / CellsPerFace;
+    uint CellIndexInFace = LinearIndex % CellsPerFace;
+    Cell.U = CellIndexInFace % Resolution;
+    Cell.V = CellIndexInFace / Resolution;
+    
+    return Cell;
+}
+
+// ============================================================
+// SAMPLING DE TEXTURAS EN CUBE MAP
+// ============================================================
+
+/**
+ * Convierte celda a coordenadas de sampling para TextureCubeArray
+ */
+float3 CellToCubeMapCoords(CubeSphereCell Cell)
+{
+    float2 UV = float2(
+        (Cell.U + 0.5) * InvResolution,
+        (Cell.V + 0.5) * InvResolution
+    );
+    
+    float3 CubePoint = FaceUVToCubePoint(Cell.Face, UV);
+    return normalize(CubePoint);
+}
+
+/**
+ * Sample de una textura Cube usando una celda
+ */
+float4 SampleCubeTexture(TextureCube CubeTex, SamplerState Sampler, CubeSphereCell Cell)
+{
+    float3 Coords = CellToCubeMapCoords(Cell);
+    return CubeTex.SampleLevel(Sampler, Coords, 0);
+}

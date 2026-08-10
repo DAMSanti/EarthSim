@@ -1,0 +1,274 @@
+// Copyright (c) 2024 Simu Project. All Rights Reserved.
+// Shader de displacement para terreno planetario con Nanite
+// Usar en Material Editor como Custom Node o Material Function
+
+// =============================================================================
+// PLANET DISPLACEMENT
+// Aplica desplazamiento radial basado en heightmap
+// =============================================================================
+
+// Inputs esperados del Material:
+// - WorldPosition: Posición en espacio mundo
+// - PlanetCenter: Centro del planeta (normalmente 0,0,0)
+// - PlanetRadius: Radio base del planeta
+// - HeightmapTexture: Textura de altura
+// - HeightmapSampler: Sampler de la textura
+// - HeightMin: Altura mínima (metros)
+// - HeightMax: Altura máxima (metros)
+// - ChunkUVMin: UV mínimo del chunk en la cara
+// - ChunkUVMax: UV máximo del chunk en la cara
+
+// -----------------------------------------------------------------------------
+// Función principal de displacement
+// Para usar en World Position Offset del material
+// -----------------------------------------------------------------------------
+
+/*
+// HLSL para Custom Node "PlanetDisplacement"
+
+float3 ToPlanetCenter = WorldPosition - PlanetCenter;
+float CurrentRadius = length(ToPlanetCenter);
+float3 Normal = ToPlanetCenter / CurrentRadius;
+
+// Calcular UV para el heightmap basado en la posición esférica
+// Usamos coordenadas esféricas normalizadas
+float3 AbsNormal = abs(Normal);
+
+float2 FaceUV;
+int FaceIndex;
+
+// Determinar en qué cara del cubo estamos
+if (AbsNormal.x >= AbsNormal.y && AbsNormal.x >= AbsNormal.z)
+{
+    FaceIndex = (Normal.x > 0) ? 0 : 1;
+    FaceUV = (Normal.x > 0) 
+        ? float2(Normal.y, Normal.z) / AbsNormal.x
+        : float2(-Normal.y, Normal.z) / AbsNormal.x;
+}
+else if (AbsNormal.y >= AbsNormal.z)
+{
+    FaceIndex = (Normal.y > 0) ? 2 : 3;
+    FaceUV = (Normal.y > 0)
+        ? float2(-Normal.x, Normal.z) / AbsNormal.y
+        : float2(Normal.x, Normal.z) / AbsNormal.y;
+}
+else
+{
+    FaceIndex = (Normal.z > 0) ? 4 : 5;
+    FaceUV = (Normal.z > 0)
+        ? float2(-Normal.x, -Normal.y) / AbsNormal.z
+        : float2(-Normal.x, Normal.y) / AbsNormal.z;
+}
+
+// Mapear de [-1,1] a [0,1] y aplicar límites del chunk
+FaceUV = FaceUV * 0.5 + 0.5;
+float2 ChunkUV = lerp(ChunkUVMin, ChunkUVMax, FaceUV);
+
+// Samplear heightmap
+float HeightValue = HeightmapTexture.SampleLevel(HeightmapSampler, ChunkUV, 0).r;
+
+// Convertir a altura en metros
+float Height = lerp(HeightMin, HeightMax, HeightValue);
+
+// Calcular nuevo radio
+float NewRadius = PlanetRadius + Height;
+
+// Displacement en dirección radial
+float3 Displacement = Normal * (NewRadius - CurrentRadius);
+
+return Displacement;
+*/
+
+// -----------------------------------------------------------------------------
+// Variante con corrección de curvatura para grandes escalas
+// -----------------------------------------------------------------------------
+
+/*
+// HLSL para Custom Node "PlanetDisplacementWithCurvature"
+
+float3 ToPlanetCenter = WorldPosition - PlanetCenter;
+float CurrentRadius = length(ToPlanetCenter);
+float3 Normal = ToPlanetCenter / CurrentRadius;
+
+// ... (mismo código de UV que arriba) ...
+
+float HeightValue = HeightmapTexture.SampleLevel(HeightmapSampler, ChunkUV, 0).r;
+float Height = lerp(HeightMin, HeightMax, HeightValue);
+
+// Aplicar corrección de curvatura
+// A grandes distancias, el displacement afecta la tangente, no solo la normal
+float CurvatureFactor = 1.0 / (1.0 + (Height / PlanetRadius));
+
+float3 Displacement = Normal * Height * CurvatureFactor;
+
+// Corrección de escala métrica (Jacobiano del cubo esférico)
+float3 AbsNorm = abs(Normal);
+float MaxComp = max(max(AbsNorm.x, AbsNorm.y), AbsNorm.z);
+float JacobianCorrection = MaxComp * MaxComp * MaxComp;
+Displacement *= JacobianCorrection;
+
+return Displacement;
+*/
+
+// =============================================================================
+// NORMAL CALCULATION
+// Calcula normales basadas en el heightmap
+// =============================================================================
+
+/*
+// HLSL para Custom Node "PlanetNormalFromHeight"
+
+// Tamaño del texel para diferencias finitas
+float2 TexelSize = 1.0 / HeightmapSize;
+
+// Samplear vecinos
+float H_L = HeightmapTexture.SampleLevel(HeightmapSampler, ChunkUV - float2(TexelSize.x, 0), 0).r;
+float H_R = HeightmapTexture.SampleLevel(HeightmapSampler, ChunkUV + float2(TexelSize.x, 0), 0).r;
+float H_D = HeightmapTexture.SampleLevel(HeightmapSampler, ChunkUV - float2(0, TexelSize.y), 0).r;
+float H_U = HeightmapTexture.SampleLevel(HeightmapSampler, ChunkUV + float2(0, TexelSize.y), 0).r;
+
+// Gradiente
+float dHdx = (H_R - H_L) * (HeightMax - HeightMin);
+float dHdy = (H_U - H_D) * (HeightMax - HeightMin);
+
+// Escala del texel en espacio mundo (aproximación)
+float TexelWorldSize = (PlanetRadius * 2.0 * 3.14159 / 4.0) / HeightmapSize; // Aprox para una cara
+
+// Normal en espacio tangente
+float3 TangentNormal = normalize(float3(-dHdx / TexelWorldSize, -dHdy / TexelWorldSize, 1.0));
+
+// Transformar a espacio mundo
+// Necesita tangente y bitangente del vértice
+float3 WorldNormal = TangentNormal.x * Tangent + TangentNormal.y * Bitangent + TangentNormal.z * VertexNormal;
+
+return normalize(WorldNormal);
+*/
+
+// =============================================================================
+// MATERIAL BLENDING POR ALTURA Y PENDIENTE
+// =============================================================================
+
+/*
+// HLSL para Custom Node "TerrainMaterialBlend"
+
+// Inputs:
+// - Height: altura actual en metros
+// - Slope: pendiente (0 = horizontal, 1 = vertical)
+// - Latitude: latitud (-1 a 1, polos a ecuador)
+
+// Definir umbrales
+float SnowLine = 3000.0 + (1.0 - abs(Latitude)) * 2000.0; // Más alto en ecuador
+float TreeLine = 2500.0;
+float BeachLine = 50.0;
+float OceanLine = 0.0;
+
+// Calcular pesos de materiales
+float4 MaterialWeights = float4(0, 0, 0, 0); // Rock, Grass, Snow, Sand
+
+// Océano bajo 0
+if (Height < OceanLine)
+{
+    return float4(0, 0, 0, 0); // Manejado por shader de agua separado
+}
+
+// Playa
+if (Height < BeachLine)
+{
+    MaterialWeights.w = 1.0; // Sand
+}
+// Zona vegetación
+else if (Height < TreeLine)
+{
+    float T = saturate((Height - BeachLine) / (TreeLine - BeachLine));
+    MaterialWeights.y = 1.0 - Slope; // Grass en áreas planas
+    MaterialWeights.x = Slope;       // Rock en pendientes
+}
+// Zona alpina
+else if (Height < SnowLine)
+{
+    float T = saturate((Height - TreeLine) / (SnowLine - TreeLine));
+    MaterialWeights.x = 1.0 - T; // Rock
+    MaterialWeights.z = T;       // Transición a nieve
+}
+// Nieve
+else
+{
+    MaterialWeights.z = 1.0 - Slope * 0.5; // Nieve (menos en pendientes)
+    MaterialWeights.x = Slope * 0.5;       // Rock expuesto
+}
+
+return MaterialWeights;
+*/
+
+// =============================================================================
+// ATMOSPHERIC SCATTERING PARA VISTA ORBITAL
+// =============================================================================
+
+/*
+// HLSL para Custom Node "AtmosphericHaze"
+
+// Inputs:
+// - ViewDirection: dirección de vista normalizada
+// - SurfaceNormal: normal de la superficie
+// - AtmosphereHeight: altura de la atmósfera (ej: 100000 metros)
+// - SunDirection: dirección al sol
+// - CameraAltitude: altura de la cámara sobre superficie
+
+// Parámetros de scattering
+float3 RayleighCoeff = float3(5.8e-6, 13.5e-6, 33.1e-6); // Azul scatters más
+float MieCoeff = 2.0e-5;
+
+// Calcular path length a través de atmósfera
+float CosAngle = dot(ViewDirection, SurfaceNormal);
+float OpticalDepth = AtmosphereHeight / max(CosAngle, 0.1);
+
+// Rayleigh scattering
+float3 RayleighColor = exp(-RayleighCoeff * OpticalDepth);
+
+// Mie scattering (forward scattering hacia el sol)
+float CosSun = dot(ViewDirection, SunDirection);
+float MiePhase = (1.0 + CosSun * CosSun) / (4.0 * 3.14159);
+float3 MieColor = exp(-MieCoeff * OpticalDepth) * MiePhase;
+
+// Color final
+float3 HazeColor = (1.0 - RayleighColor) * float3(0.3, 0.5, 0.9) + MieColor * float3(1.0, 0.9, 0.7);
+
+// Falloff por altitud de cámara
+float AtmosphereFade = saturate(1.0 - CameraAltitude / (AtmosphereHeight * 2.0));
+
+return float4(HazeColor * AtmosphereFade, AtmosphereFade);
+*/
+
+// =============================================================================
+// OCEAN SHADER HELPERS
+// =============================================================================
+
+/*
+// HLSL para Custom Node "OceanWaveDisplacement"
+
+// Inputs:
+// - WorldPosition
+// - Time
+// - WindDirection
+// - WindSpeed
+// - WaveScale
+
+// Gerstner waves simplificado
+float3 Displacement = float3(0, 0, 0);
+
+// Múltiples frecuencias de olas
+for (int i = 0; i < 4; i++)
+{
+    float Freq = WaveScale * pow(2.0, i);
+    float Amp = WaveScale / pow(2.0, i);
+    float Phase = Time * WindSpeed * (i + 1) * 0.3;
+    
+    float2 Dir = rotate2D(WindDirection, i * 0.5);
+    float Wave = sin(dot(WorldPosition.xy, Dir) * Freq + Phase);
+    
+    Displacement.z += Wave * Amp;
+    Displacement.xy += Dir * cos(dot(WorldPosition.xy, Dir) * Freq + Phase) * Amp * 0.5;
+}
+
+return Displacement;
+*/

@@ -1,0 +1,302 @@
+// PlateMovement.usf
+// Compute Shader for parallel plate movement simulation
+// Sprint 2.2 - Cinemática de Placas
+
+#include "/Engine/Public/Platform.ush"
+
+// ============================================================
+// ESTRUCTURAS DE DATOS
+// ============================================================
+
+// Datos de una placa tectónica (alineado a 16 bytes)
+struct FPlateData
+{
+    float3 EulerPole;       // Polo de Euler (eje de rotación)
+    float AngularVelocity;  // Velocidad angular (rad/s)
+    float3 Centroid;        // Centroide de la placa
+    float Density;          // Densidad de la corteza
+    uint PlateID;           // ID de la placa
+    uint CrustType;         // 0 = Oceánica, 1 = Continental, 2 = Mixta
+    float Thickness;        // Grosor de la corteza
+    float Age;              // Edad de la corteza
+};
+
+// Datos de colisión detectada
+struct FCollisionData
+{
+    uint PlateA;
+    uint PlateB;
+    float3 Position;
+    float3 RelativeVelocity;
+    float Intensity;
+    uint BoundaryType;  // 0=None, 1=Convergent, 2=Divergent, 3=Transform
+};
+
+// ============================================================
+// BUFFERS DE ENTRADA/SALIDA
+// ============================================================
+
+// Parámetros uniformes
+float DeltaTime;
+float PlanetRadius;
+uint Resolution;
+uint NumPlates;
+
+// Textura de IDs de placa (6 caras empaquetadas en array)
+Texture2DArray<uint> PlateIDTexture;
+RWTexture2DArray<uint> PlateIDTextureRW;
+
+// Buffer de datos de placas
+StructuredBuffer<FPlateData> PlateDataBuffer;
+
+// Textura de elevación
+Texture2DArray<float> ElevationTexture;
+RWTexture2DArray<float> ElevationTextureRW;
+
+// Buffer de colisiones de salida (append buffer)
+RWStructuredBuffer<FCollisionData> CollisionBuffer;
+RWBuffer<uint> CollisionCountBuffer;
+
+// ============================================================
+// FUNCIONES AUXILIARES
+// ============================================================
+
+// Convertir coordenadas UV y cara a punto 3D en la esfera
+float3 FaceUVToCartesian(uint FaceIndex, float2 UV)
+{
+    // UV en rango [0,1] -> [-1,1]
+    float2 XY = UV * 2.0f - 1.0f;
+    
+    float3 CubePoint;
+    
+    // Mapear según la cara
+    switch (FaceIndex)
+    {
+        case 0: CubePoint = float3(1.0f, XY.x, XY.y); break;   // +X
+        case 1: CubePoint = float3(-1.0f, -XY.x, XY.y); break; // -X
+        case 2: CubePoint = float3(XY.x, 1.0f, XY.y); break;   // +Y
+        case 3: CubePoint = float3(-XY.x, -1.0f, XY.y); break; // -Y
+        case 4: CubePoint = float3(XY.x, -XY.y, 1.0f); break;  // +Z
+        case 5: CubePoint = float3(XY.x, XY.y, -1.0f); break;  // -Z
+        default: CubePoint = float3(0, 0, 1); break;
+    }
+    
+    // Normalizar para proyectar a esfera
+    return normalize(CubePoint);
+}
+
+// Rotar un vector usando cuaternión (representado como axis + angle)
+float3 RotateByAxisAngle(float3 V, float3 Axis, float Angle)
+{
+    // Quaternion: q = cos(θ/2) + sin(θ/2) * axis
+    float HalfAngle = Angle * 0.5f;
+    float S = sin(HalfAngle);
+    float C = cos(HalfAngle);
+    
+    float4 Q = float4(Axis * S, C);
+    
+    // Rotar: v' = q * v * q^-1
+    // Optimizado: v' = v + 2 * w * (axis × v) + 2 * (axis × (axis × v))
+    float3 T = 2.0f * cross(Q.xyz, V);
+    return V + Q.w * T + cross(Q.xyz, T);
+}
+
+// Calcular velocidad en un punto de la superficie
+float3 CalculateVelocityAtPoint(float3 Point, FPlateData Plate)
+{
+    // v = ω × r
+    float3 Omega = normalize(Plate.EulerPole) * Plate.AngularVelocity;
+    float3 R = Point * PlanetRadius;
+    return cross(Omega, R);
+}
+
+// Clasificar tipo de límite
+uint ClassifyBoundary(float3 RelativeVelocity, float3 BoundaryNormal)
+{
+    if (length(RelativeVelocity) < 0.0001f)
+        return 0; // None
+    
+    float NormalComponent = dot(normalize(RelativeVelocity), BoundaryNormal);
+    
+    if (NormalComponent < -0.5f)
+        return 1; // Convergent
+    else if (NormalComponent > 0.5f)
+        return 2; // Divergent
+    else
+        return 3; // Transform
+}
+
+// ============================================================
+// COMPUTE SHADERS
+// ============================================================
+
+// Kernel 1: Calcular nuevas posiciones de puntos según rotación de placa
+[numthreads(8, 8, 1)]
+void CS_RotatePlatePoints(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    uint X = DispatchThreadId.x;
+    uint Y = DispatchThreadId.y;
+    uint FaceIndex = DispatchThreadId.z;
+    
+    if (X >= Resolution || Y >= Resolution || FaceIndex >= 6)
+        return;
+    
+    // Leer ID de placa actual
+    uint PlateID = PlateIDTexture.Load(int4(X, Y, FaceIndex, 0));
+    
+    if (PlateID >= NumPlates)
+        return;
+    
+    // Obtener datos de la placa
+    FPlateData Plate = PlateDataBuffer[PlateID];
+    
+    // Calcular posición 3D del centro de la celda
+    float2 UV = (float2(X, Y) + 0.5f) / float(Resolution);
+    float3 Point = FaceUVToCartesian(FaceIndex, UV);
+    
+    // Rotar el punto según el movimiento de la placa
+    float3 NewPoint = RotateByAxisAngle(Point, normalize(Plate.EulerPole), 
+                                         Plate.AngularVelocity * DeltaTime);
+    
+    // El ID de placa se mantiene - la reasignación se hace en otro paso
+    // Aquí solo calculamos la nueva posición para advección de propiedades
+}
+
+// Kernel 2: Detectar colisiones en celdas de borde
+[numthreads(8, 8, 1)]
+void CS_DetectCollisions(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    uint X = DispatchThreadId.x;
+    uint Y = DispatchThreadId.y;
+    uint FaceIndex = DispatchThreadId.z;
+    
+    if (X >= Resolution || Y >= Resolution || FaceIndex >= 6)
+        return;
+    
+    uint MyPlateID = PlateIDTexture.Load(int4(X, Y, FaceIndex, 0));
+    
+    if (MyPlateID >= NumPlates)
+        return;
+    
+    // Direcciones de vecinos (4-conectividad)
+    int2 Offsets[4] = { int2(1,0), int2(0,1), int2(-1,0), int2(0,-1) };
+    
+    for (int i = 0; i < 4; i++)
+    {
+        int2 NeighborCoord = int2(X, Y) + Offsets[i];
+        
+        // Manejar bordes (simplificación: solo dentro de la misma cara)
+        if (NeighborCoord.x < 0 || NeighborCoord.x >= (int)Resolution ||
+            NeighborCoord.y < 0 || NeighborCoord.y >= (int)Resolution)
+            continue;
+        
+        uint NeighborPlateID = PlateIDTexture.Load(int4(NeighborCoord.x, NeighborCoord.y, FaceIndex, 0));
+        
+        if (NeighborPlateID != MyPlateID && NeighborPlateID < NumPlates)
+        {
+            // Calcular posición del punto de colisión
+            float2 UV = (float2(X, Y) + 0.5f) / float(Resolution);
+            float3 Point = FaceUVToCartesian(FaceIndex, UV);
+            
+            // Obtener datos de ambas placas
+            FPlateData PlateA = PlateDataBuffer[MyPlateID];
+            FPlateData PlateB = PlateDataBuffer[NeighborPlateID];
+            
+            // Calcular velocidades
+            float3 VelA = CalculateVelocityAtPoint(Point, PlateA);
+            float3 VelB = CalculateVelocityAtPoint(Point, PlateB);
+            float3 RelVel = VelA - VelB;
+            
+            // Calcular normal del límite (hacia el vecino)
+            float2 NeighborUV = (float2(NeighborCoord) + 0.5f) / float(Resolution);
+            float3 NeighborPoint = FaceUVToCartesian(FaceIndex, NeighborUV);
+            float3 Direction = NeighborPoint - Point;
+            
+            // Proyectar en plano tangente
+            float3 RadialDir = normalize(Point);
+            float3 BoundaryNormal = normalize(Direction - RadialDir * dot(Direction, RadialDir));
+            
+            // Clasificar y agregar colisión
+            FCollisionData Collision;
+            Collision.PlateA = MyPlateID;
+            Collision.PlateB = NeighborPlateID;
+            Collision.Position = Point;
+            Collision.RelativeVelocity = RelVel;
+            Collision.Intensity = length(RelVel);
+            Collision.BoundaryType = ClassifyBoundary(RelVel, BoundaryNormal);
+            
+            // Append a buffer (usando atomic para índice)
+            uint CollisionIndex;
+            InterlockedAdd(CollisionCountBuffer[0], 1, CollisionIndex);
+            
+            if (CollisionIndex < 65536) // Límite de buffer
+            {
+                CollisionBuffer[CollisionIndex] = Collision;
+            }
+        }
+    }
+}
+
+// Kernel 3: Calcular campo de velocidades (para visualización)
+[numthreads(8, 8, 1)]
+void CS_CalculateVelocityField(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    uint X = DispatchThreadId.x;
+    uint Y = DispatchThreadId.y;
+    uint FaceIndex = DispatchThreadId.z;
+    
+    if (X >= Resolution || Y >= Resolution || FaceIndex >= 6)
+        return;
+    
+    uint PlateID = PlateIDTexture.Load(int4(X, Y, FaceIndex, 0));
+    
+    if (PlateID >= NumPlates)
+        return;
+    
+    FPlateData Plate = PlateDataBuffer[PlateID];
+    
+    float2 UV = (float2(X, Y) + 0.5f) / float(Resolution);
+    float3 Point = FaceUVToCartesian(FaceIndex, UV);
+    
+    float3 Velocity = CalculateVelocityAtPoint(Point, Plate);
+    
+    // Almacenar magnitud de velocidad en textura de elevación temporalmente
+    // (En producción, usar una textura de velocidad dedicada)
+    // ElevationTextureRW[int3(X, Y, FaceIndex)] = length(Velocity);
+}
+
+// Kernel 4: Advección de elevación según movimiento de placas
+[numthreads(8, 8, 1)]
+void CS_AdvectElevation(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    uint X = DispatchThreadId.x;
+    uint Y = DispatchThreadId.y;
+    uint FaceIndex = DispatchThreadId.z;
+    
+    if (X >= Resolution || Y >= Resolution || FaceIndex >= 6)
+        return;
+    
+    uint PlateID = PlateIDTexture.Load(int4(X, Y, FaceIndex, 0));
+    
+    if (PlateID >= NumPlates)
+        return;
+    
+    FPlateData Plate = PlateDataBuffer[PlateID];
+    
+    // Posición actual
+    float2 UV = (float2(X, Y) + 0.5f) / float(Resolution);
+    float3 Point = FaceUVToCartesian(FaceIndex, UV);
+    
+    // Calcular de dónde vino este punto (advección hacia atrás)
+    float3 PrevPoint = RotateByAxisAngle(Point, normalize(Plate.EulerPole), 
+                                          -Plate.AngularVelocity * DeltaTime);
+    
+    // Convertir de vuelta a coordenadas de textura (simplificación: misma cara)
+    // En producción, necesitaríamos manejar cambios de cara
+    
+    // Interpolar elevación del punto anterior
+    float CurrentElevation = ElevationTexture.Load(int4(X, Y, FaceIndex, 0));
+    
+    // Escribir (por ahora, mantener la misma elevación)
+    ElevationTextureRW[int3(X, Y, FaceIndex)] = CurrentElevation;
+}
