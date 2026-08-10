@@ -111,9 +111,10 @@ Detalle completo en `SPECS.md §5.3, §5.4`.
 - [x] Guardado/carga vía `USaveGame` + `UGameplayStatics::SaveGameToSlot/LoadGameFromSlot`
 - [x] Diseño verificado por código (no solo asumido): `USphericalVoronoi::Initialize` y `UTectonicPlateSystem::InitializePlateProperties` llaman a `FMath::RandInit(Config.RandomSeed [+1000])` explícitamente, así que la topología (IDs de placa por celda) es reproducible solo con la semilla — no hace falta serializarla, se regenera en `LoadSimulation` llamando a `InitializeSystems()` con la misma semilla y sobreescribiendo encima el estado cinemático y la elevación guardados
 - [x] Atajos en `TectonicsTestActor`: `K` guarda, `L` carga (slot fijo `"SimuSnapshot"`)
-- [ ] **No verificado en el editor** (compila, pero no se ha probado el roundtrip guardar→cerrar→cargar en una sesión de Play real)
+- [x] Verificado en editor (11-08-2026): `K` guarda y `L` carga sin errores en una sesión de Play real
+- [ ] Falta confirmar que el estado restaurado es visualmente idéntico al guardado (no solo "sin errores") — pendiente de respuesta del usuario
 
-**Hecho cuando:** se puede cerrar el editor, reabrir, cargar un snapshot guardado, y el planeta se ve idéntico. Falta el último paso: probarlo de verdad en el editor.
+**Hecho cuando:** se puede cerrar el editor, reabrir, cargar un snapshot guardado, y el planeta se ve idéntico. Guardar/cargar funciona sin errores; falta confirmar fidelidad visual.
 
 ---
 
