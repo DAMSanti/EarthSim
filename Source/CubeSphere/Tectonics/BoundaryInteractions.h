@@ -363,6 +363,15 @@ public:
     // ============================================================
 
     /**
+     * DECISIÓN (ROADMAP.md M2, 11-08-2026): ningún caller consume ElevationRateMaps hoy
+     * (ApplyElevationChanges está vacía; confirmado por grep en toda la sesión). La
+     * fuente de verdad para elevación es URasterizedTectonics::Step(), que hace su
+     * propia detección de fronteras más simple directamente sobre las texturas. Esta
+     * clase sigue siendo necesaria por su otra lógica (SlabDepth, AccumulatedStress,
+     * generación de vulcanismo, clasificación de tipo de frontera), pero el cálculo de
+     * ElevationRateMaps de abajo es código muerto pendiente de conectar o borrar - no
+     * asumir que afecta a lo que se ve en pantalla.
+     *
      * Aplicar cambios de elevación por todas las interacciones
      */
     UFUNCTION(BlueprintCallable, Category = "Boundaries")

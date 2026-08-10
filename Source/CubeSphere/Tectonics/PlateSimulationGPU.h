@@ -14,7 +14,15 @@ class UCubeSphereGrid;
 
 /**
  * UPlateSimulationGPU
- * 
+ *
+ * DECISIÓN (ROADMAP.md M2, 11-08-2026): esta clase NO está en el camino de ejecución
+ * activo. Los `Dispatch*Shader` son stubs (ver PlateSimulationGPU.cpp) - la tectónica
+ * corre 100% en CPU vía RasterizedTectonics/TectonicPlateSystem, que ya cumple el
+ * rendimiento necesario. Se decidió no invertir en completar el dispatch real (Ruta A
+ * del roadmap) mientras no haya evidencia de que CPU sea insuficiente - perfilar antes
+ * de retomar esto, no asumir. Se mantiene el código (Ruta B: aislar y documentar, no
+ * borrar) por si se retoma más adelante.
+ *
  * Ejecutor de simulación de placas en GPU usando Compute Shaders.
  * Maneja la creación de recursos GPU, dispatch de shaders y lectura de resultados.
  */

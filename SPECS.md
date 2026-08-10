@@ -80,7 +80,7 @@ Los 4 TODOs pendientes son de **correctness/performance**, no cosméticos: sin c
 - `Tectonics/RasterizedTectonics.cpp` (673) repite el mismo patrón: creación de texturas/buffers en GPU real, pero el path de cómputo son TODOs (`:100, 107, 113, 326, 405, 411`).
 - `Shaders/Private/TectonicRaster.usf` (457 líneas) sólo se referencia en un comentario (`TectonicTypes.h:227`), nunca se despacha desde C++.
 
-**Conclusión verificable:** hoy la tectónica corre **100% en CPU**. La decisión arquitectónica documentada en `docs/03-geodinamica-tectonica.md` y `docs/09-stack-tecnologico.md` ("Compute Shaders GPU" como pieza central) no está realizada en código, pese a que existen ~1300 líneas de infraestructura GPU parcialmente construida.
+**Conclusión verificable:** hoy la tectónica corre **100% en CPU**. La decisión arquitectónica documentada en `docs/03-geodinamica-tectonica.md` y `docs/09-stack-tecnologico.md` ("Compute Shaders GPU" como pieza central) no está realizada en código, pese a que existen ~1300 líneas de infraestructura GPU parcialmente construida. **Decisión formal (ROADMAP.md M2, 11-08-2026): se queda así (Ruta B) hasta que perfilar demuestre que CPU es insuficiente** — documentado directamente en `PlateSimulationGPU.h` y `RasterizedTectonics.h`, no solo aquí.
 
 ### 5.3 Dos pipelines CPU redundantes ejecutándose a la vez (hallazgo del 10-08-2026)
 

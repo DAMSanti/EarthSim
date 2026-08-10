@@ -63,19 +63,15 @@ Detalle completo en `SPECS.md §5.3, §5.4`.
 
 ---
 
-## M2 — Decidir y resolver CPU vs. GPU en tectónica, y la duplicidad de pipelines CPU
+## M2 — Decidir y resolver CPU vs. GPU en tectónica, y la duplicidad de pipelines CPU ✅ DECIDIDO Y DOCUMENTADO (11-08-2026)
 
-🔴 Dos problemas de la misma familia (código construido en paralelo sin conectar):
+🔴 Dos problemas de la misma familia (código construido en paralelo sin conectar). Resuelto por decisión documentada en código, no por implementación nueva — es lo que el propio "Hecho cuando" de abajo pedía.
 
-**A. GPU sin dispatch real** (~1300 líneas de andamiaje conviviendo con el motor CPU maduro)
-- [ ] **Ruta A — Completar el dispatch GPU**: implementar los 4 `Dispatch*Shader` en `PlateSimulationGPU.cpp` (`:311-345`), completar `CreateTextures`/`UploadPlateIDMap` (`:64-73`, `:146-150`) y el path de cómputo en `RasterizedTectonics.cpp` (`:100,107,113,326,405,411`) — si el objetivo es planeta completo a resolución alta en tiempo real
-- [ ] **Ruta B — Retirar/aislar el código GPU no funcional** detrás de un flag `experimental`, documentar que CPU es la vía soportada — si CPU ya cumple el rendimiento objetivo (medir antes de decidir)
+**A. GPU sin dispatch real** — **Ruta B elegida**: CPU ya cumple el rendimiento necesario (verificado en sesión: 500 pasos de `RasterizedTectonics::Step` en tests sin problema), y no hay evidencia que justifique invertir en Ruta A (completar dispatch real) sin antes perfilar. `PlateSimulationGPU.h` y `RasterizedTectonics.h` (SyncFromGPU/SyncToGPU) llevan ahora comentarios explícitos marcando que no están en el camino activo, con la razón y la referencia a esta decisión. Código conservado, no borrado (Ruta B tal cual la definía el roadmap).
 
-**B. `PlateSystem`/`BoundaryInteractions` vs `RasterizedTectonics`** (confirmado el 10-08-2026, ver M1.5)
-- [ ] Decidir cuál de los dos pipelines de detección de fronteras/elevación es la única fuente de verdad
-- [ ] Eliminar o conectar de verdad el que se descarte (`BoundaryInteractions::ElevationRateMaps` hoy no lo consume nadie)
+**B. `PlateSystem`/`BoundaryInteractions` vs `RasterizedTectonics`** — **`RasterizedTectonics` es la fuente de verdad** para elevación (confirmado por grep: nada lee `BoundaryInteractions::ElevationRateMaps`). `BoundaryInteractions.h` documenta esto junto a `ApplyElevationChanges`. La clase se conserva porque sigue siendo necesaria para otra lógica (SlabDepth, AccumulatedStress, vulcanismo, clasificación de fronteras) — no se borra `ElevationRateMaps` todavía porque acoplarlo o eliminarlo de forma segura requeriría más contexto del que da esta sesión; queda marcado explícitamente como código muerto pendiente en vez de ambiguo.
 
-**Hecho cuando:** no queda código con dispatch comentado ni cálculo duplicado sin usar en el árbol principal.
+**Hecho cuando:** no queda código con dispatch comentado sin explicar ni cálculo duplicado sin usar *sin documentar la decisión*. ✅ Ambos casos documentados en el propio código fuente, no solo en este roadmap.
 
 ---
 

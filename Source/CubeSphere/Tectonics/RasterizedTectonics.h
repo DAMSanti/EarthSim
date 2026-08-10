@@ -186,6 +186,12 @@ public:
     void Step(const FPlateMovementParams& Params);
 
     /**
+     * DECISIÓN (ROADMAP.md M2, 11-08-2026): SyncFromGPU/SyncToGPU y las texturas GPU
+     * creadas por CreateTextures son no-op hoy (ver .cpp) - Step() arriba corre en CPU
+     * sobre los arrays de FTectonicFaceTextureData y es la ruta activa real. Se
+     * mantienen estas firmas por si se retoma la vía GPU (Ruta A del roadmap), no
+     * llamarlas esperando que hagan algo todavía.
+     *
      * Sincronizar texturas CPU ← GPU (para lectura)
      */
     UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics")
