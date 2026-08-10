@@ -49,6 +49,20 @@ Detalle completo en `SPECS.md §5.3, §5.4`.
 
 ---
 
+## M1.6 — Cámara de aproximación al planeta, con colisión
+
+🟡 Pedido explícitamente el 10-08-2026: con relieve realista (poco visible desde lejos, ver M1.5), hace falta poder acercarse a la superficie para juzgar el terreno de verdad — tanto para seguir depurando la simulación como para el producto final.
+
+- [ ] Pawn/cámara con velocidad de movimiento adaptativa a la distancia (escala logarítmica/exponencial): a escala real de la Tierra, la misma velocidad que sirve en órbita (miles de km) es inutilizable a pie de superficie, y viceversa
+- [ ] Colisión contra el terreno. Punto de partida importante: hoy `PlanetMesh->CreateMeshSection(...)` se llama explícitamente con colisión desactivada — `TectonicsTestActor.cpp:576`, comentario `false // No crear colisión, es muy pesado`. Dos rutas:
+  - Colisión real sobre la malla (`bCreateCollision = true`): más simple, pero cara de recalcular cada vez que `UpdateMeshColors`/`RegeneratePlanetMesh` cambian la geometría
+  - Seguimiento de superficie por raycast (la cámara consulta altura local vía `RasterizedTectonics::GetElevationBilinear` en vez de colisión física real): más barato, no requiere geometría de colisión actualizada, patrón común en cámaras planetarias
+- [ ] Probar: descender desde vista de planeta completo hasta la superficie y recorrerla sin atravesar montañas ni quedarse enganchado
+
+**Hecho cuando:** se puede pasar de vista orbital a estar de pie sobre una montaña generada por la simulación, sin clipping ni cambios manuales de velocidad de cámara.
+
+---
+
 ## M2 — Decidir y resolver CPU vs. GPU en tectónica, y la duplicidad de pipelines CPU
 
 🔴 Dos problemas de la misma familia (código construido en paralelo sin conectar):
