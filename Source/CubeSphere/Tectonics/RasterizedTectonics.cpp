@@ -390,6 +390,16 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
         }
     }
 
+    // Relajación difusiva: sin esto, la elevación en celdas de frontera (incrementada
+    // arriba) crece cada paso hasta el tope de 12000m mientras las celdas vecinas no
+    // afectadas se quedan en la base, formando paredes casi verticales de una celda de
+    // ancho. Este término reparte esa diferencia de forma continua, como parte del
+    // modelo físico (no un suavizado puntual de inicialización).
+    if (Params.RelaxationIterationsPerStep > 0)
+    {
+        SmoothElevation(Params.RelaxationIterationsPerStep);
+    }
+
     TotalSimulationTime += DeltaTimeScaled;
     StepCount++;
 

@@ -82,6 +82,15 @@ Los 4 TODOs pendientes son de **correctness/performance**, no cosméticos: sin c
 
 **Conclusión verificable:** hoy la tectónica corre **100% en CPU**. La decisión arquitectónica documentada en `docs/03-geodinamica-tectonica.md` y `docs/09-stack-tecnologico.md` ("Compute Shaders GPU" como pieza central) no está realizada en código, pese a que existen ~1300 líneas de infraestructura GPU parcialmente construida.
 
+### 5.3 Dos pipelines CPU redundantes ejecutándose a la vez (hallazgo del 10-08-2026)
+
+Al probar `TectonicsTestActor` en el editor apareció un planeta con relieve extremo (paredes casi verticales, visualmente como "dos esferas anidadas": el cuerpo base y una corona de picos). La causa raíz, verificada en código:
+
+- `TectonicsTestActor::Tick` invoca **dos sistemas de tectónica independientes cada paso** (`Test/TectonicsTestActor.cpp:267,280`): `PlateSystem->Step(DeltaTime)` (el motor "oficial" de §5.1, cuyo resultado de elevación — `BoundaryInteractions::ElevationRateMaps` — nunca se consume, ver `ApplyElevationChanges` vacío en `BoundaryInteractions.cpp:626-633`) y, en paralelo, `RasterizedTectonics->Step(Params)`, que hace su **propia** detección de fronteras (comparando IDs de placa entre los 4 vecinos directos en la textura, `RasterizedTectonics.cpp:341-390`) y es el que sí escribe la elevación real que se visualiza.
+- Ese segundo pathway sumaba elevación en cada celda de frontera cada paso, con tope en 12000m (`:377`), pero **sin ningún término que reparta esa diferencia con las celdas vecinas** durante la simulación — `SmoothElevation()` solo se invocaba una vez, al inicializar (`TectonicsTestActor.cpp:153-155`). Resultado: tras cientos de pasos, celdas de frontera de 1 píxel de ancho llegaban al tope de 12km junto a vecinas en la base oceánica (-3800m), generando paredes casi verticales que a distancia se emborronan en la "segunda esfera" observada.
+- **Corregido** (`RasterizedTectonics.h` — nuevo campo `FPlateMovementParams::RelaxationIterationsPerStep`; `RasterizedTectonics.cpp::Step()`): se añadió un término de relajación difusiva (thermal erosion / mass wasting) ejecutado cada paso como parte permanente del modelo físico — no un parche del actor de test. Es un término distinto y anterior a la erosión hidráulica real de la Fase 4 (`docs/05-hidrosfera-erosion.md`), que se sumará encima de este cuando exista, no lo sustituye.
+- **Sigue sin resolver:** la duplicidad de pipelines en sí (`PlateSystem`/`BoundaryInteractions` calculando datos que nadie lee, mientras `RasterizedTectonics` reimplementa su propia detección de fronteras más simple). Es el mismo patrón que la duplicidad CPU/GPU de §5.2 — código construido en paralelo sin conectar — y no se ha resuelto todavía qué pipeline debería ser la única fuente de verdad.
+
 ## 6. Simulación de flujo simple
 
 **Prueba de concepto, no producción** — `SimpleFlowSimulation.cpp/h` (400/193 líneas).

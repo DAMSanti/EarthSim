@@ -73,6 +73,15 @@ struct CUBESPHERE_API FPlateMovementParams
     // Elevación base de corteza oceánica (metros, negativo = bajo nivel del mar)
     UPROPERTY(EditAnywhere, BlueprintReadWrite)
     float OceanicBaseElevation = -3800.0f;
+
+    // Iteraciones de relajación difusiva (thermal erosion / mass wasting) aplicadas
+    // cada paso. Sin esto, la elevación en celdas de frontera crece sin control hacia
+    // el tope (12000m) mientras las celdas vecinas no-frontera quedan en la base,
+    // formando paredes casi verticales de una celda de ancho. Es un término físico
+    // independiente y anterior a la erosión hidráulica (Fase 4): esa se sumará encima
+    // de este, no lo sustituye. 0 = desactivado.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0", ClampMax = "5"))
+    int32 RelaxationIterationsPerStep = 1;
 };
 
 /**
