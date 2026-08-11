@@ -67,6 +67,16 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tectonics|Debug")
     bool bShowPlateBoundaries = true;
 
+    /**
+     * Mostrar info de simulacion en pantalla (mismo estilo que ATectonicsTestActor,
+     * pedido el 11-08-2026 para poder confirmar si el actor terminó de inicializar).
+     * Aviso: la construccion Nanite en InitializePlanet() es sincrona y bloquea el
+     * hilo principal (ver ROADMAP.md M1), asi que este texto NO puede aparecer
+     * mientras carga - solo se vera una vez que el bloqueo termine.
+     */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tectonics|Debug")
+    bool bShowDebugInfo = true;
+
     // --- Control Manual ---
 
     /** Inicializar el planeta manualmente */
@@ -121,4 +131,7 @@ protected:
 private:
     bool bIsInitialized = false;
     float AccumulatedTime = 0.0f;
+    int32 SimulationSteps = 0;
+
+    void DrawScreenDebugInfo() const;
 };

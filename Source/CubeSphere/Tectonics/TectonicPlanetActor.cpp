@@ -38,7 +38,17 @@ void ATectonicPlanetActor::Tick(float DeltaTime)
 {
     Super::Tick(DeltaTime);
 
-    if (!bIsInitialized || !bAutoSimulate)
+    if (!bIsInitialized)
+    {
+        return;
+    }
+
+    if (bShowDebugInfo)
+    {
+        DrawScreenDebugInfo();
+    }
+
+    if (!bAutoSimulate)
     {
         return;
     }
@@ -60,6 +70,22 @@ void ATectonicPlanetActor::Tick(float DeltaTime)
         StepSimulation(StepInterval);
         AccumulatedTime -= StepInterval;
     }
+}
+
+void ATectonicPlanetActor::DrawScreenDebugInfo() const
+{
+    if (!GEngine)
+    {
+        return;
+    }
+
+    const float SimTime = PlateSystem ? PlateSystem->GetTotalSimulationTime() : 0.0f;
+    const FString Msg = FString::Printf(
+        TEXT("=== TECTONIC PLANET ACTOR ===\nInicializado: SI\nTiempo: %.2f Ma | Pasos: %d\nPlacas: %d | Radio: %.0f km\nAuto-simular: %s"),
+        SimTime, SimulationSteps, PlateSystem ? PlateSystem->GetNumPlates() : 0,
+        PlanetRadius / 100000.0f, bAutoSimulate ? TEXT("SI") : TEXT("NO"));
+
+    GEngine->AddOnScreenDebugMessage(4269, 0.0f, FColor::Green, Msg);
 }
 
 void ATectonicPlanetActor::InitializePlanet()
@@ -104,6 +130,13 @@ void ATectonicPlanetActor::InitializePlanet()
     bIsInitialized = true;
 
     UE_LOG(LogTemp, Log, TEXT("TectonicPlanet: Initialization complete"));
+    if (GEngine)
+    {
+        // Este mensaje solo puede aparecer DESPUES del bloqueo sincrono de arriba
+        // (construccion Nanite) - no hay forma de mostrar progreso "en vivo" mientras
+        // carga sin hacer ese build asincrono (ver ROADMAP.md M1).
+        GEngine->AddOnScreenDebugMessage(-1, 5.0f, FColor::Cyan, TEXT("TectonicPlanetActor: inicializacion completa"));
+    }
 }
 
 void ATectonicPlanetActor::GeneratePlates()
@@ -154,6 +187,7 @@ void ATectonicPlanetActor::StepSimulation(float DeltaTime)
     }
 
     PlateSystem->Step(DeltaTime);
+    SimulationSteps++;
 }
 
 void ATectonicPlanetActor::RegeneratePlates(int32 NewSeed)
