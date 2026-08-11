@@ -103,26 +103,25 @@ void ATectonicPlanetActor::InitializePlanet()
         NaniteMeshComponent->InitializePlanet(PlanetRadius, 6);
     }
 
-    // Sin esto, NaniteMeshComponent nunca genera patches ni llama a GetPatchMaterial()
-    // (ver ROADMAP.md M1)
+    // DESACTIVADO (11-08-2026, ver ROADMAP.md M1): conectar el LODController hace que
+    // NaniteMeshComponent genere parches Nanite reales. Se probo dos veces - primero
+    // sin limite de subdivision (congelacion total, "0.00001 FPS") y despues con
+    // LODConfig.MaxSplitsPerFrame = 0 para fijar solo 6 parches raiz sin subdividir
+    // (SIGUE congelado, "0.001 FPS", confirmado por el usuario). Que el segundo intento
+    // tambien se cuelgue indica que el problema no es (solo) la cascada de creacion de
+    // parches que arreglaba el primer fix, sino algo mas caro y aun sin diagnosticar -
+    // candidato mas probable: coste de renderizado de Nanite Displacement en si mismo
+    // (re-teselado por frame segun la vista), pero no se puede confirmar sin perfilar
+    // con el editor abierto. Seguir iterando a ciegas con mas mitigaciones no es
+    // razonable - desactivado por completo hasta que se pueda diagnosticar de verdad.
+    /*
     if (LODControllerComponent && NaniteMeshComponent)
     {
         LODControllerComponent->Initialize(PlanetRadius);
-
-        // CRITICO: UPlanetNaniteMesh::SyncWithQuadTree() construye una malla Nanite real
-        // (StaticMesh::Build completo) de forma SINCRONA en el hilo principal por cada
-        // hoja nueva del quadtree, sin ningun limite propio. Con subdivision activa
-        // cerca de un planeta de miles de km, el LODController pide muchisimos niveles
-        // de detalle en cascada -> decenas/cientos de builds Nanite sincronos por
-        // segundo -> congelacion total (confirmado: "0.00001 FPS", 11-08-2026).
-        // Desactivar splits mantiene los 6 parches raiz (uno por cara del cubo) sin
-        // subdividir nunca - suficiente para verificar si el material se ve, pero NO
-        // es una solucion real. El problema de fondo (build Nanite sincrono por parche)
-        // sigue sin resolver, ver ROADMAP.md M1.
         LODControllerComponent->LODConfig.MaxSplitsPerFrame = 0;
-
         NaniteMeshComponent->SetLODController(LODControllerComponent);
     }
+    */
 
     // Generar placas
     GeneratePlates();
