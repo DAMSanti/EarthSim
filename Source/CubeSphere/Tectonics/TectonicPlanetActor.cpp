@@ -5,6 +5,7 @@
 #include "TectonicVisualizerComponent.h"
 #include "../CubeSphereGrid.h"
 #include "../Nanite/PlanetNaniteMesh.h"
+#include "../LOD/CubeLODController.h"
 
 ATectonicPlanetActor::ATectonicPlanetActor()
 {
@@ -20,6 +21,9 @@ ATectonicPlanetActor::ATectonicPlanetActor()
 
     // Crear componente de visualización de tectónica
     VisualizerComponent = CreateDefaultSubobject<UTectonicVisualizerComponent>(TEXT("TectonicVisualizer"));
+
+    // Sin esto, UPlanetNaniteMesh::SyncWithQuadTree() nunca se ejecuta (ver comentario en el header)
+    LODControllerComponent = CreateDefaultSubobject<UCubeLODController>(TEXT("LODController"));
 }
 
 void ATectonicPlanetActor::BeginPlay()
@@ -71,6 +75,14 @@ void ATectonicPlanetActor::InitializePlanet()
     if (NaniteMeshComponent)
     {
         NaniteMeshComponent->InitializePlanet(PlanetRadius, 6);
+    }
+
+    // Sin esto, NaniteMeshComponent nunca genera patches ni llama a GetPatchMaterial()
+    // (ver ROADMAP.md M1)
+    if (LODControllerComponent && NaniteMeshComponent)
+    {
+        LODControllerComponent->Initialize(PlanetRadius);
+        NaniteMeshComponent->SetLODController(LODControllerComponent);
     }
 
     // Generar placas

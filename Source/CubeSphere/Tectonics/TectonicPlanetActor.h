@@ -10,6 +10,7 @@ class UCubeSphereGrid;
 class UTectonicPlateSystem;
 class UPlanetNaniteMesh;
 class UTectonicVisualizerComponent;
+class UCubeLODController;
 
 /**
  * ATectonicPlanetActor
@@ -93,6 +94,16 @@ protected:
 
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
     UTectonicVisualizerComponent* VisualizerComponent;
+
+    /**
+     * Requerido para que UPlanetNaniteMesh::SyncWithQuadTree() se ejecute alguna vez -
+     * sin un LODController asignado, TickComponent nunca llama a SyncWithQuadTree, y
+     * por tanto nunca se generan patches ni se llama a GetPatchMaterial() (ver
+     * ROADMAP.md M1: esto es lo que impedia que se creara el material de displacement
+     * incluso con este actor colocado en el nivel).
+     */
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+    UCubeLODController* LODControllerComponent;
 
     // Sistemas internos
     UPROPERTY()
