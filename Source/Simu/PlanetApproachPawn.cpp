@@ -6,6 +6,8 @@
 #include "Kismet/GameplayStatics.h"
 #include "CubeSphere/Test/TectonicsTestActor.h"
 #include "CubeSphere/Tectonics/TectonicPlanetActor.h"
+#include "DrawDebugHelpers.h"
+#include "Engine/Engine.h"
 
 APlanetApproachPawn::APlanetApproachPawn()
 {
@@ -67,6 +69,44 @@ void APlanetApproachPawn::Tick(float DeltaTime)
     HandleLook(DeltaTime);
     HandleMovement(DeltaTime);
     ApplyHeightClamp();
+
+    if (bShowPlanetCompass)
+    {
+        DrawPlanetCompass();
+    }
+}
+
+void APlanetApproachPawn::DrawPlanetCompass() const
+{
+    if (!TargetPlanet || !Camera)
+    {
+        return;
+    }
+
+    const FVector CameraLocation = Camera->GetComponentLocation();
+    const FVector CameraForward = Camera->GetForwardVector();
+    const FVector ToPlanet = TargetPlanet->GetActorLocation() - CameraLocation;
+    const float Distance = ToPlanet.Size();
+    if (Distance < KINDA_SMALL_NUMBER)
+    {
+        return;
+    }
+    const FVector DirectionToPlanet = ToPlanet / Distance;
+
+    // Flecha anclada a un punto fijo delante de la camara (no al planeta): asi
+    // siempre esta en pantalla, gire la camara hacia donde gire, y su orientacion es
+    // lo que indica hacia donde esta el planeta - como una aguja de brujula.
+    const FVector ArrowStart = CameraLocation + CameraForward * 500.0f;
+    const FVector ArrowEnd = ArrowStart + DirectionToPlanet * 300.0f;
+
+    DrawDebugDirectionalArrow(GetWorld(), ArrowStart, ArrowEnd, 40.0f, FColor::Red, false, -1.0f, 0, 8.0f);
+
+    if (GEngine)
+    {
+        const float DistanceKm = Distance / 100000.0f;
+        GEngine->AddOnScreenDebugMessage(4270, 0.0f, FColor::Red,
+            FString::Printf(TEXT("Planeta a %.1f km"), DistanceKm));
+    }
 }
 
 void APlanetApproachPawn::HandleLook(float DeltaTime)

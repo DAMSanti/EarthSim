@@ -86,6 +86,16 @@ public:
     UPROPERTY(EditAnywhere, Category = "Movement")
     float MouseLookSpeed = 2.5f;
 
+    /**
+     * Flecha de depuracion que siempre apunta hacia TargetPlanet, dibujada a una
+     * distancia fija delante de la camara (por eso siempre esta en pantalla,
+     * independientemente de hacia donde mires) - util a escala planetaria donde es
+     * facil no saber si el planeta esta simplemente fuera de encuadre o no se ve por
+     * otra razon (pedido explicitamente, 11-08-2026).
+     */
+    UPROPERTY(EditAnywhere, Category = "Debug")
+    bool bShowPlanetCompass = true;
+
 protected:
     UPROPERTY(VisibleAnywhere, Category = "Components")
     USceneComponent* PawnRoot;
@@ -105,4 +115,7 @@ private:
 
     /** Radio de superficie en una direccion, delegando al tipo real de TargetPlanet */
     float GetTargetSurfaceRadius(const FVector& Direction) const;
+
+    /** Dibuja la flecha de compas hacia TargetPlanet y un texto con la distancia */
+    void DrawPlanetCompass() const;
 };
