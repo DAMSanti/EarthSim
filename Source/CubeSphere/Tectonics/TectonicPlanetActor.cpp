@@ -82,6 +82,19 @@ void ATectonicPlanetActor::InitializePlanet()
     if (LODControllerComponent && NaniteMeshComponent)
     {
         LODControllerComponent->Initialize(PlanetRadius);
+
+        // CRITICO: UPlanetNaniteMesh::SyncWithQuadTree() construye una malla Nanite real
+        // (StaticMesh::Build completo) de forma SINCRONA en el hilo principal por cada
+        // hoja nueva del quadtree, sin ningun limite propio. Con subdivision activa
+        // cerca de un planeta de miles de km, el LODController pide muchisimos niveles
+        // de detalle en cascada -> decenas/cientos de builds Nanite sincronos por
+        // segundo -> congelacion total (confirmado: "0.00001 FPS", 11-08-2026).
+        // Desactivar splits mantiene los 6 parches raiz (uno por cara del cubo) sin
+        // subdividir nunca - suficiente para verificar si el material se ve, pero NO
+        // es una solucion real. El problema de fondo (build Nanite sincrono por parche)
+        // sigue sin resolver, ver ROADMAP.md M1.
+        LODControllerComponent->LODConfig.MaxSplitsPerFrame = 0;
+
         NaniteMeshComponent->SetLODController(LODControllerComponent);
     }
 
