@@ -31,13 +31,16 @@ public class CubeSphere : ModuleRules
             "RHICore"
         });
 
-        // For Nanite mesh generation in editor
+        // For Nanite mesh generation in editor, and programmatic material creation
+        // (PlanetMaterialGenerator.cpp, ROADMAP.md M1)
         if (Target.bBuildEditor)
         {
             PrivateDependencyModuleNames.AddRange(new string[]
             {
                 "UnrealEd",
-                "MeshBuilder"
+                "MeshBuilder",
+                "MaterialEditor",
+                "AssetRegistry"
             });
         }
 

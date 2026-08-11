@@ -57,13 +57,21 @@ public:
     UPROPERTY(EditAnywhere, Category = "Movement", meta = (ClampMin = "1.0"))
     float MinSpeed = 2000.0f;
 
-    /** Velocidad maxima (cm/s), en vista orbital lejana */
+    /**
+     * Velocidad maxima (cm/s), en vista orbital lejana: 2000 km/s, cruza una distancia
+     * orbital tipica (~15000km) en ~7.5s. El valor anterior (30 km/s) se sentia "MUY
+     * lento" ahi, porque cruzar esos 15000km tardaba varios minutos a esa velocidad.
+     */
     UPROPERTY(EditAnywhere, Category = "Movement", meta = (ClampMin = "1.0"))
-    float MaxSpeed = 3000000.0f;
+    float MaxSpeed = 200000000.0f;
 
-    /** Altitud (cm) a partir de la cual se alcanza MaxSpeed */
+    /**
+     * Altitud (cm) a partir de la cual se alcanza MaxSpeed. Por defecto ~1.5x el radio
+     * de la Tierra - antes se saturaba a solo 20km de altitud, dejando toda la vista
+     * orbital (miles de km) a velocidad constante y demasiado baja.
+     */
     UPROPERTY(EditAnywhere, Category = "Movement", meta = (ClampMin = "1.0"))
-    float MaxSpeedAltitude = 2000000.0f;
+    float MaxSpeedAltitude = 1000000000.0f;
 
     UPROPERTY(EditAnywhere, Category = "Movement")
     float MouseLookSpeed = 2.5f;

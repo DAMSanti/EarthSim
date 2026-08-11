@@ -11,6 +11,7 @@
 #include "Engine/Texture2D.h"
 #include "DrawDebugHelpers.h"
 #include "Noise/SimplexNoise.h"
+#include "PlanetMaterialGenerator.h"
 
 UPlanetNaniteMesh::UPlanetNaniteMesh()
 {
@@ -511,10 +512,23 @@ UMaterialInstanceDynamic* UPlanetNaniteMesh::GetPatchMaterial(const FQuadTreeNod
     }
     
     // Crear nuevo material dinámico
-    UMaterialInterface* BaseMat = NaniteConfig.PlanetMaterial.IsValid() 
-        ? NaniteConfig.PlanetMaterial.LoadSynchronous() 
+    UMaterialInterface* BaseMat = NaniteConfig.PlanetMaterial.IsValid()
+        ? NaniteConfig.PlanetMaterial.LoadSynchronous()
         : nullptr;
-    
+
+#if WITH_EDITOR
+    if (!BaseMat)
+    {
+        // No había ningún material configurado (ver ROADMAP.md M1) - crear/cargar el
+        // de displacement generado por código y recordarlo para no regenerarlo cada vez
+        BaseMat = GetOrCreatePlanetDisplacementMaterial();
+        if (BaseMat)
+        {
+            NaniteConfig.PlanetMaterial = BaseMat;
+        }
+    }
+#endif
+
     if (!BaseMat)
     {
         // Usar material por defecto si no hay uno configurado
