@@ -65,10 +65,25 @@ void ATectonicPlanetActor::Tick(float DeltaTime)
 
     // Step cada cierto intervalo (10ms de tiempo simulado)
     const float StepInterval = 0.01f;
-    while (AccumulatedTime >= StepInterval)
+
+    // Espiral de la muerte (encontrada 11-08-2026, ver ROADMAP.md M1): si un frame va
+    // lento, DeltaTime es grande, así que este bucle intenta compensar todo el tiempo
+    // perdido de golpe - lo que tarda más, hace el siguiente frame aún más lento, etc.
+    // Acotar cuántos pasos se hacen por frame rompe el ciclo: el tiempo simulado se
+    // queda atrás en vez de intentar ponerse al día a cualquier precio.
+    const int32 MaxStepsPerFrame = 10;
+    int32 StepsThisFrame = 0;
+    while (AccumulatedTime >= StepInterval && StepsThisFrame < MaxStepsPerFrame)
     {
         StepSimulation(StepInterval);
         AccumulatedTime -= StepInterval;
+        StepsThisFrame++;
+    }
+    if (StepsThisFrame >= MaxStepsPerFrame)
+    {
+        // Se descarta el resto del tiempo acumulado en vez de arrastrarlo al siguiente
+        // frame (que volvería a disparar el mismo problema)
+        AccumulatedTime = 0.0f;
     }
 }
 

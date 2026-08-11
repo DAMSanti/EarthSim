@@ -63,9 +63,20 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tectonics|Debug")
     bool bShowVelocityVectors = false;
 
-    /** Mostrar límites de placas */
+    /**
+     * Mostrar límites de placas. OJO (11-08-2026): UTectonicVisualizerComponent::
+     * DrawPlateBoundaries() recorre la rejilla ENTERA (6 caras x GridResolution^2, sin
+     * caché) cada Tick para redibujar las líneas - con GridResolution=256 son ~390.000
+     * celdas por frame, con varias llamadas a GetPlateIDAt/CellToPoint cada una. Es el
+     * mayor coste de rendimiento identificado en esta sesión (~2-3 FPS con esto activo
+     * tras arreglar la espiral de simulación). Desactivado por defecto hasta que se
+     * optimice (cachear las líneas y recalcular solo cuando cambian las placas, no
+     * cada frame). Si ya tienes un TectonicPlanetActor colocado en el nivel, este
+     * cambio de default NO le afecta retroactivamente - desmárcalo a mano en el
+     * Details panel.
+     */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tectonics|Debug")
-    bool bShowPlateBoundaries = true;
+    bool bShowPlateBoundaries = false;
 
     /**
      * Mostrar info de simulacion en pantalla (mismo estilo que ATectonicsTestActor,
