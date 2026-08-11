@@ -5,6 +5,7 @@
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
 #include "CubeSphere/Test/TectonicsTestActor.h"
+#include "CubeSphere/Tectonics/TectonicPlanetActor.h"
 
 APlanetApproachPawn::APlanetApproachPawn()
 {
@@ -25,7 +26,7 @@ void APlanetApproachPawn::BeginPlay()
 
     if (!TargetPlanet)
     {
-        TargetPlanet = Cast<ATectonicsTestActor>(UGameplayStatics::GetActorOfClass(this, ATectonicsTestActor::StaticClass()));
+        TargetPlanet = FindTargetPlanet();
     }
 
     CurrentSpeed = MinSpeed;
@@ -37,7 +38,7 @@ void APlanetApproachPawn::Tick(float DeltaTime)
 
     if (!TargetPlanet)
     {
-        TargetPlanet = Cast<ATectonicsTestActor>(UGameplayStatics::GetActorOfClass(this, ATectonicsTestActor::StaticClass()));
+        TargetPlanet = FindTargetPlanet();
     }
 
     if (TargetPlanet)
@@ -46,7 +47,7 @@ void APlanetApproachPawn::Tick(float DeltaTime)
         const float DistanceFromCenter = FMath::Max(ToPawn.Size(), 1.0f);
         const FVector Direction = ToPawn / DistanceFromCenter;
 
-        const float SurfaceRadius = TargetPlanet->GetSurfaceRadiusAtDirection(Direction);
+        const float SurfaceRadius = GetTargetSurfaceRadius(Direction);
         const float Altitude = FMath::Max(DistanceFromCenter - SurfaceRadius, 0.0f);
 
         // Interpolacion logaritmica: la altitud varia en varios ordenes de magnitud
@@ -130,11 +131,35 @@ void APlanetApproachPawn::ApplyHeightClamp()
     }
 
     const FVector Direction = ToPawn / DistanceFromCenter;
-    const float SurfaceRadius = TargetPlanet->GetSurfaceRadiusAtDirection(Direction);
+    const float SurfaceRadius = GetTargetSurfaceRadius(Direction);
     const float MinAllowedDistance = SurfaceRadius + SurfaceClearance;
 
     if (DistanceFromCenter < MinAllowedDistance)
     {
         SetActorLocation(TargetPlanet->GetActorLocation() + Direction * MinAllowedDistance);
     }
+}
+
+AActor* APlanetApproachPawn::FindTargetPlanet() const
+{
+    if (AActor* Found = UGameplayStatics::GetActorOfClass(this, ATectonicsTestActor::StaticClass()))
+    {
+        return Found;
+    }
+    return UGameplayStatics::GetActorOfClass(this, ATectonicPlanetActor::StaticClass());
+}
+
+float APlanetApproachPawn::GetTargetSurfaceRadius(const FVector& Direction) const
+{
+    if (ATectonicsTestActor* TestActor = Cast<ATectonicsTestActor>(TargetPlanet))
+    {
+        return TestActor->GetSurfaceRadiusAtDirection(Direction);
+    }
+    if (ATectonicPlanetActor* PlanetActor = Cast<ATectonicPlanetActor>(TargetPlanet))
+    {
+        // Sin datos de elevacion por direccion en esta clase - aproximacion esferica.
+        // Razonable: el desplazamiento Nanite es pequeño relativo al radio del planeta.
+        return PlanetActor->PlanetRadius;
+    }
+    return 0.0f;
 }

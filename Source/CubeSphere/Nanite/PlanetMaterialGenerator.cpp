@@ -58,7 +58,12 @@ UMaterialInterface* GetOrCreatePlanetDisplacementMaterial()
     if (MinMaxExpr)
     {
         MinMaxExpr->ParameterName = TEXT("HeightmapMinMax");
-        MinMaxExpr->DefaultValue = FLinearColor(-3800.0f, 12000.0f, 0.0f, 0.0f);
+        // Deliberadamente pequeño para la primera prueba (±100m, no ±12000m): un
+        // desplazamiento Nanite grande sobre ruido de alta frecuencia (6 octavas) puede
+        // forzar teselado carisimo y tumbar el framerate - mejor confirmar que el
+        // material funciona a escala segura antes de subirlo. Es un parametro del
+        // material, ajustable despues sin recompilar C++.
+        MinMaxExpr->DefaultValue = FLinearColor(-100.0f, 100.0f, 0.0f, 0.0f);
     }
 
     // Elevacion real (metros) = Lerp(Min, Max, HeightmapSample)

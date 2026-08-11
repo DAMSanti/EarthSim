@@ -18,7 +18,7 @@ public class Simu : ModuleRules
             "CubeSphere"  // Nuestro módulo de planeta
         });
 
-        PrivateDependencyModuleNames.AddRange(new string[] 
+        PrivateDependencyModuleNames.AddRange(new string[]
         {
             "ProceduralMeshComponent",
             "MeshDescription",

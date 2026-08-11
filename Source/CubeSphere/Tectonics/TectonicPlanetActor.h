@@ -31,9 +31,15 @@ public:
 
     // --- Configuración del Planeta ---
 
-    /** Radio del planeta en unidades Unreal (6371km por defecto = Tierra) */
+    /**
+     * Radio del planeta en unidades Unreal (cm). El valor anterior (6371000.0f) decia
+     * en el comentario "6371km = radio de la Tierra" pero en cm eso son 63.71km, 100x
+     * menos que el real (637100000 cm) - bug encontrado el 11-08-2026 al tener este
+     * actor y ATectonicsTestActor (que si usa el radio real) a la vez en el mismo
+     * nivel, con escalas de planeta completamente distintas entre si.
+     */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet")
-    float PlanetRadius = 6371000.0f;
+    float PlanetRadius = 637100000.0f;
 
     /** Resolución del grid (celdas por lado de cada cara) */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet", meta = (ClampMin = "32", ClampMax = "2048"))

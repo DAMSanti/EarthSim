@@ -8,6 +8,7 @@
 
 class UCameraComponent;
 class ATectonicsTestActor;
+class ATectonicPlanetActor;
 
 /**
  * APlanetApproachPawn
@@ -46,8 +47,17 @@ public:
     virtual void BeginPlay() override;
     virtual void Tick(float DeltaTime) override;
 
+    /**
+     * Planeta a seguir. Acepta ATectonicsTestActor (altura real por direccion via
+     * GetSurfaceRadiusAtDirection) o ATectonicPlanetActor (solo radio esferico, sin
+     * datos de elevacion por direccion - aproximacion razonable ya que el
+     * desplazamiento Nanite es pequeño relativo al radio del planeta). Antes solo
+     * reconocia ATectonicsTestActor; con otro tipo de actor colocado en el nivel se
+     * quedaba sin referencia de "suelo" y la camara no tenia ni velocidad adaptativa
+     * ni colision.
+     */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet")
-    ATectonicsTestActor* TargetPlanet = nullptr;
+    AActor* TargetPlanet = nullptr;
 
     /** Margen sobre el terreno local (cm) que actua como "suelo" de la camara */
     UPROPERTY(EditAnywhere, Category = "Movement", meta = (ClampMin = "0"))
@@ -89,4 +99,10 @@ private:
     void HandleLook(float DeltaTime);
     void HandleMovement(float DeltaTime);
     void ApplyHeightClamp();
+
+    /** Encuentra el primer ATectonicsTestActor o ATectonicPlanetActor en el mundo */
+    AActor* FindTargetPlanet() const;
+
+    /** Radio de superficie en una direccion, delegando al tipo real de TargetPlanet */
+    float GetTargetSurfaceRadius(const FVector& Direction) const;
 };
