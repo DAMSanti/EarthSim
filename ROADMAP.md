@@ -175,7 +175,12 @@ Esto hace que subducción, dorsales y apertura de océanos sean **emergentes**, 
   - `DiffusionRate` pasa a ser una tasa **por Ma**, integrada como tal.
   - `OrogenyFactor` pasa a ser una **eficiencia adimensional**: la convergencia se convierte a m/Ma (rad/Ma × radio del planeta) antes de multiplicar, así que el número se lee directo — 0.005 = por cada metro que dos placas se acercan, la frontera sube 5 mm. Antes era una constante sin unidades multiplicando rad/Ma, sin significado físico posible.
   - **Integración por sub-pasos** (máx. 0.5 Ma cada uno): el `dt` que llega no está acotado porque el usuario puede subir `TimeScale` a 1000, y a 60 fps eso son ~16 Ma de golpe. Integrar eso de una vez daba saltos de miles de metros y una fracción de mezcla mayor que 1, que en vez de suavizar oscila. Que el resultado dependa del framerate no es aceptable en un simulador.
-- [ ] Visual: confirmar las cordilleras en el editor — **pendiente**
+- [x] Visual: cordilleras confirmadas en el editor (15-08-2026)
+- [x] **Rendimiento** (15-08-2026, tras confirmar "pocos fps, pero hay montañas"). Dos costes dominantes, ninguno de ellos la física en sí:
+  - `UpdateMeshColors()` corría **en cada frame**: reconstruía ~100.000 vértices (6×129²) con su muestreo bilineal y su conversión de color, y resubía la sección de malla entera a la GPU. No tiene sentido a 60 Hz cuando la simulación avanza en millones de años. Limitado a `MeshUpdateHz` (10 por defecto), con refresco inmediato al cambiar de campo o de material, que es donde el usuario sí espera respuesta instantánea.
+  - La difusión pasaba **los 3,5 M de taps por sub-paso** por `SampleNeighborElevation`, con doble indirección y comprobación de cruce de cara. Ahora se parte en interior (98,4 % de los píxeles a Res=256, indexado directo por filas) y anillo de borde (el único que paga la reproyección). Además el barrido de fronteras y la difusión van en `ParallelFor` por cara.
+  - Añadida instrumentación al HUD: **coste de simulación y de malla en ms**, con media móvil. Para no volver a optimizar a ciegas.
+  - Verificado que es refactor puro: elevación máxima y contabilidad de corteza **idénticas** antes y después (8.645 m, +59.168/−56.606).
 
 **Contabilidad medida (15-08-2026):**
 

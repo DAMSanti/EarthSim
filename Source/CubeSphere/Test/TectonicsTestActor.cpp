@@ -94,13 +94,32 @@ void ATectonicsTestActor::Tick(float DeltaTime)
     // Ejecutar simulación si está activa
     if (bSimulationRunning && bSystemsInitialized)
     {
+        const double SimStart = FPlatformTime::Seconds();
         StepSimulation(DeltaTime * TimeScale);
+        const double SimMs = (FPlatformTime::Seconds() - SimStart) * 1000.0;
+        // Media movil: el coste por frame varia mucho (la adveccion solo entra cada ~76
+        // pasos), y un valor instantaneo en el HUD seria ilegible.
+        AvgSimStepMs = FMath::Lerp(AvgSimStepMs, SimMs, 0.1);
     }
 
     // Actualizar visualización
     if (bSystemsInitialized)
     {
-        UpdateMeshColors();
+        // Limitador de refresco: reconstruir 100.000 vertices y resubir la malla entera
+        // 60 veces por segundo era el coste dominante del frame, y no aporta nada cuando
+        // la simulacion avanza en millones de anos.
+        MeshUpdateAccumulator += DeltaTime;
+        const float MeshInterval = (MeshUpdateHz > 0.0f) ? (1.0f / MeshUpdateHz) : 0.0f;
+
+        if (bForceMeshColorUpdate || MeshUpdateAccumulator >= MeshInterval)
+        {
+            MeshUpdateAccumulator = 0.0f;
+            bForceMeshColorUpdate = false;
+
+            const double MeshStart = FPlatformTime::Seconds();
+            UpdateMeshColors();
+            AvgMeshUpdateMs = FMath::Lerp(AvgMeshUpdateMs, (FPlatformTime::Seconds() - MeshStart) * 1000.0, 0.1);
+        }
 
         if (bShowVelocityVectors)
         {
@@ -1042,6 +1061,7 @@ void ATectonicsTestActor::DrawScreenDebugInfo()
         TEXT("[+/-] Velocidad | [1-8] Placa\n")
         TEXT("[V] Velocidades | [B] Límites\n")
         TEXT("Corteza: +%d creada / -%d destruida (%d advecciones)\n")
+        TEXT("Coste: sim %.1f ms | malla %.1f ms (%.0f Hz)\n")
         TEXT("[F/G] Campo | [U] %s\n")
         TEXT("%s"),
         SimulationTime,
@@ -1053,6 +1073,9 @@ void ATectonicsTestActor::DrawScreenDebugInfo()
         RasterizedTectonics ? RasterizedTectonics->GetAdvectionStats().CellsCreated : 0,
         RasterizedTectonics ? RasterizedTectonics->GetAdvectionStats().CellsDestroyed : 0,
         RasterizedTectonics ? RasterizedTectonics->GetAdvectionStats().AdvectionCount : 0,
+        AvgSimStepMs,
+        AvgMeshUpdateMs,
+        MeshUpdateHz,
         bUnlitFieldView ? TEXT("unlit") : TEXT("iluminado"),
         FieldRegistry ? *FieldRegistry->GetLegendText() : TEXT("(sin visor)")
     );
@@ -1135,6 +1158,7 @@ void ATectonicsTestActor::HandleInput()
         {
             FieldRegistry->CycleActive(bNext ? 1 : -1);
             FieldRegistry->RefreshRanges();
+            bForceMeshColorUpdate = true;
             if (GEngine)
             {
                 GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,
@@ -1148,6 +1172,7 @@ void ATectonicsTestActor::HandleInput()
     {
         bUnlitFieldView = !bUnlitFieldView;
         ApplyPlanetMaterial();
+        bForceMeshColorUpdate = true;
         if (GEngine)
         {
             GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,

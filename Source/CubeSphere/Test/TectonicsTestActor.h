@@ -222,6 +222,20 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tectonics|Visualization")
     bool bUnlitFieldView = true;
 
+    /**
+     * Cuantas veces por segundo se refresca el color y la posicion de los vertices.
+     *
+     * Antes UpdateMeshColors() corria en CADA frame: reconstruye ~100.000 vertices
+     * (6 x 129^2) con su muestreo bilineal y su conversion de color, y vuelve a subir la
+     * seccion de malla entera a la GPU. Era el coste dominante del frame, y no tenia
+     * sentido: la simulacion tectonica avanza en millones de anos, no hay nada que
+     * cambie visiblemente 60 veces por segundo.
+     *
+     * 0 = sin limite (comportamiento antiguo).
+     */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tectonics|Visualization", meta = (ClampMin = "0.0"))
+    float MeshUpdateHz = 10.0f;
+
     /** Sistema rasterizado */
     UPROPERTY(BlueprintReadOnly, Category = "Tectonics|Systems")
     URasterizedTectonics* RasterizedTectonics;
@@ -342,6 +356,20 @@ protected:
      * un mapa de placas congelado, que es justo la comprobacion principal de F1.
      */
     int32 LastSeenAdvectionCount = -1;
+
+    /** Acumulador del limitador de refresco de malla (ver MeshUpdateHz). */
+    float MeshUpdateAccumulator = 0.0f;
+
+    /**
+     * Fuerza un refresco inmediato saltandose el limitador. Se activa al cambiar de campo
+     * o de material: ahi el usuario espera respuesta al instante, no en el proximo tick
+     * del limitador.
+     */
+    bool bForceMeshColorUpdate = true;
+
+    // Medias moviles de coste, en ms. Instrumentacion para no optimizar a ciegas.
+    double AvgSimStepMs = 0.0;
+    double AvgMeshUpdateMs = 0.0;
 
     /** Espejos en float de los campos uint8 del ráster (ver arriba). */
     TArray<float> PlateIDFieldCache[6];

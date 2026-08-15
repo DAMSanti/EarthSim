@@ -653,8 +653,9 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
 
     for (int32 SubStep = 0; SubStep < NumSubSteps; ++SubStep)
     {
-        // Procesar cada cara
-        for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
+        // Procesar cada cara. ParallelFor por cara: cada hilo solo escribe en la suya,
+        // asi que no hay carrera.
+        ParallelFor(6, [&](int32 FaceIdx)
         {
             FTectonicFaceTextureData& Face = FaceData[FaceIdx];
 
@@ -719,48 +720,69 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
                     }
                 }
             }
-        }
+        });
 
         // ============================================================
         // RELAJACION DIFUSIVA (thermal erosion / mass wasting)
         //
-        // CORREGIDO el 15-08-2026: antes la fraccion de mezcla se aplicaba TAL CUAL en cada
-        // paso, sin multiplicar por el tiempo transcurrido, mientras que el levantamiento SI
-        // se escalaba por dt. Esa asimetria dejaba los dos terminos desacoplados en unos 7
-        // ordenes de magnitud: a 60 fps la difusion borraba ~70% del relieve por Ma mientras
-        // el levantamiento aportaba 5e-4 m/Ma. Por eso no se formaba ninguna cordillera.
+        // DiffusionRate es una tasa POR Ma y se integra como tal (corregido el 15-08-2026:
+        // antes se aplicaba tal cual por paso, lo que la dejaba desacoplada del levantamiento
+        // en ~7 ordenes de magnitud y hacia el resultado dependiente del framerate). Se
+        // recorta a 1 porque una fraccion de mezcla mayor que 1 no suaviza: sobrepasa el
+        // objetivo y oscila.
         //
-        // Ahora DiffusionRate es una tasa POR Ma y se integra como tal. Se recorta a 1 porque
-        // una fraccion de mezcla mayor que 1 no suaviza: sobrepasa el valor objetivo y
-        // oscila.
+        // RENDIMIENTO: el bucle se parte en interior y anillo de borde. A Resolution=256 el
+        // interior es el 98,4% de los pixeles y no puede cruzar de cara, asi que va con
+        // indexado directo por filas; solo el anillo paga la reproyeccion geometrica. Antes
+        // TODOS los taps pasaban por SampleNeighborElevation, que son 3,5 millones de
+        // llamadas con doble indireccion por sub-paso.
         // ============================================================
         if (Params.DiffusionRate > 0.0f)
         {
-            const float Kernel[3][3] = {
-                { 1.0f/16.0f, 2.0f/16.0f, 1.0f/16.0f },
-                { 2.0f/16.0f, 4.0f/16.0f, 2.0f/16.0f },
-                { 1.0f/16.0f, 2.0f/16.0f, 1.0f/16.0f }
-            };
-
             const float MixFraction = FMath::Clamp(Params.DiffusionRate * SubDt, 0.0f, 1.0f);
 
-            TArray<TArray<float>> Snapshot;
-            Snapshot.SetNum(6);
-            for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
+            if (MixFraction > 0.0f)
             {
-                Snapshot[FaceIdx] = FaceData[FaceIdx].ElevationData;
-            }
-
-            for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
-            {
-                const ECSCubeFace Face = static_cast<ECSCubeFace>(FaceIdx);
-                TArray<float>& ElevData = FaceData[FaceIdx].ElevationData;
-                TArray<float> TempData;
-                TempData.SetNumUninitialized(ElevData.Num());
-
-                for (int32 Y = 0; Y < Resolution; ++Y)
+                TArray<TArray<float>> Snapshot;
+                Snapshot.SetNum(6);
+                for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
                 {
-                    for (int32 X = 0; X < Resolution; ++X)
+                    Snapshot[FaceIdx] = FaceData[FaceIdx].ElevationData;
+                }
+
+                ParallelFor(6, [&](int32 FaceIdx)
+                {
+                    const ECSCubeFace Face = static_cast<ECSCubeFace>(FaceIdx);
+                    const TArray<float>& Src = Snapshot[FaceIdx];
+                    TArray<float>& Dst = FaceData[FaceIdx].ElevationData;
+                    const float* SrcPtr = Src.GetData();
+
+                    // --- Interior: sin cruces de cara, indexado directo ---
+                    for (int32 Y = 1; Y < Resolution - 1; ++Y)
+                    {
+                        const float* R0 = SrcPtr + (Y - 1) * Resolution;
+                        const float* R1 = SrcPtr + (Y    ) * Resolution;
+                        const float* R2 = SrcPtr + (Y + 1) * Resolution;
+
+                        for (int32 X = 1; X < Resolution - 1; ++X)
+                        {
+                            const float Sum =
+                                (R0[X - 1] + 2.0f * R0[X] + R0[X + 1] +
+                                 2.0f * R1[X - 1] + 4.0f * R1[X] + 2.0f * R1[X + 1] +
+                                 R2[X - 1] + 2.0f * R2[X] + R2[X + 1]) * (1.0f / 16.0f);
+
+                            Dst[Y * Resolution + X] = FMath::Lerp(R1[X], Sum, MixFraction);
+                        }
+                    }
+
+                    // --- Anillo de borde: aqui si hay que cruzar a la cara contigua ---
+                    const float Kernel[3][3] = {
+                        { 1.0f/16.0f, 2.0f/16.0f, 1.0f/16.0f },
+                        { 2.0f/16.0f, 4.0f/16.0f, 2.0f/16.0f },
+                        { 1.0f/16.0f, 2.0f/16.0f, 1.0f/16.0f }
+                    };
+
+                    auto BlurBorderPixel = [&](int32 X, int32 Y)
                     {
                         float Sum = 0.0f;
                         for (int32 KY = -1; KY <= 1; ++KY)
@@ -770,13 +792,21 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
                                 Sum += SampleNeighborElevation(Snapshot, Face, X, Y, KX, KY) * Kernel[KY + 1][KX + 1];
                             }
                         }
+                        const int32 Idx = Y * Resolution + X;
+                        Dst[Idx] = FMath::Lerp(SrcPtr[Idx], Sum, MixFraction);
+                    };
 
-                        const int32 Idx = GetLinearIndex(X, Y);
-                        TempData[Idx] = FMath::Lerp(ElevData[Idx], Sum, MixFraction);
+                    for (int32 X = 0; X < Resolution; ++X)
+                    {
+                        BlurBorderPixel(X, 0);
+                        BlurBorderPixel(X, Resolution - 1);
                     }
-                }
-
-                ElevData = MoveTemp(TempData);
+                    for (int32 Y = 1; Y < Resolution - 1; ++Y)
+                    {
+                        BlurBorderPixel(0, Y);
+                        BlurBorderPixel(Resolution - 1, Y);
+                    }
+                });
             }
         }
     }
