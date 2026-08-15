@@ -5,7 +5,6 @@
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
 #include "CubeSphere/Test/TectonicsTestActor.h"
-#include "DrawDebugHelpers.h"
 #include "Engine/Engine.h"
 
 APlanetApproachPawn::APlanetApproachPawn()
@@ -31,6 +30,8 @@ void APlanetApproachPawn::BeginPlay()
     }
 
     CurrentSpeed = MinSpeed;
+
+    SyncOrbitStateFromTransform();
 }
 
 void APlanetApproachPawn::Tick(float DeltaTime)
@@ -65,46 +66,187 @@ void APlanetApproachPawn::Tick(float DeltaTime)
         CurrentSpeed = MinSpeed;
     }
 
-    HandleLook(DeltaTime);
-    HandleMovement(DeltaTime);
+    EnsureMouseCaptured();
+    HandleModeToggle();
+
+    if (bOrbitMode && TargetPlanet)
+    {
+        HandleOrbit(DeltaTime);
+    }
+    else
+    {
+        HandleLook(DeltaTime);
+        HandleMovement(DeltaTime);
+    }
+
     ApplyHeightClamp();
 
-    if (bShowPlanetCompass)
-    {
-        DrawPlanetCompass();
-    }
+    // La brujula se dibuja ahora en ASimuHUD, en 2D. Ver SimuHUD.h para el porque.
 }
 
-void APlanetApproachPawn::DrawPlanetCompass() const
+void APlanetApproachPawn::EnsureMouseCaptured()
 {
-    if (!TargetPlanet || !Camera)
+    if (bInputModeConfigured)
     {
         return;
     }
 
-    const FVector CameraLocation = Camera->GetComponentLocation();
-    const FVector CameraForward = Camera->GetForwardVector();
-    const FVector ToPlanet = TargetPlanet->GetActorLocation() - CameraLocation;
-    const float Distance = ToPlanet.Size();
-    if (Distance < KINDA_SMALL_NUMBER)
+    APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0);
+    if (!PC)
+    {
+        // La posesion puede completarse despues de BeginPlay; se reintenta cada frame
+        // hasta conseguirlo en vez de darlo por perdido.
+        return;
+    }
+
+    FInputModeGameOnly InputMode;
+    InputMode.SetConsumeCaptureMouseDown(true);
+    PC->SetInputMode(InputMode);
+    PC->SetShowMouseCursor(false);
+
+    bInputModeConfigured = true;
+
+    UE_LOG(LogTemp, Log, TEXT("PlanetApproachPawn: raton capturado (modo de entrada = solo juego)"));
+}
+
+void APlanetApproachPawn::SyncOrbitStateFromTransform()
+{
+    if (!TargetPlanet)
+    {
+        bOrbitStateValid = false;
+        return;
+    }
+
+    const FVector ToPawn = GetActorLocation() - TargetPlanet->GetActorLocation();
+    OrbitDistance = ToPawn.Size();
+
+    if (OrbitDistance < KINDA_SMALL_NUMBER)
+    {
+        // Degenerado (camara en el centro): se elige una posicion arbitraria pero valida
+        // en vez de dejar angulos indefinidos.
+        OrbitDistance = FMath::Max(GetTargetSurfaceRadius(FVector::UpVector) * 2.0, 1.0);
+        OrbitLongitudeDeg = 0.0;
+        OrbitLatitudeDeg = 0.0;
+    }
+    else
+    {
+        const FVector Dir = ToPawn / OrbitDistance;
+        OrbitLatitudeDeg = FMath::RadiansToDegrees(FMath::Asin(FMath::Clamp(Dir.Z, -1.0, 1.0)));
+        OrbitLongitudeDeg = FMath::RadiansToDegrees(FMath::Atan2(Dir.Y, Dir.X));
+    }
+
+    bOrbitStateValid = true;
+}
+
+void APlanetApproachPawn::HandleModeToggle()
+{
+    APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0);
+    if (!PC || !PC->InputEnabled())
     {
         return;
     }
-    const FVector DirectionToPlanet = ToPlanet / Distance;
 
-    // Flecha anclada a un punto fijo delante de la camara (no al planeta): asi
-    // siempre esta en pantalla, gire la camara hacia donde gire, y su orientacion es
-    // lo que indica hacia donde esta el planeta - como una aguja de brujula.
-    const FVector ArrowStart = CameraLocation + CameraForward * 500.0f;
-    const FVector ArrowEnd = ArrowStart + DirectionToPlanet * 300.0f;
+    if (!PC->WasInputKeyJustPressed(EKeys::O))
+    {
+        return;
+    }
 
-    DrawDebugDirectionalArrow(GetWorld(), ArrowStart, ArrowEnd, 40.0f, FColor::Red, false, -1.0f, 0, 8.0f);
+    bOrbitMode = !bOrbitMode;
+
+    // Al entrar en orbita hay que leer la posicion actual, o la camara saltaria al
+    // ultimo punto orbital conocido. Al salir no hace falta nada: el modo libre parte
+    // de la transform, que ya es la correcta.
+    if (bOrbitMode)
+    {
+        SyncOrbitStateFromTransform();
+    }
 
     if (GEngine)
     {
-        const float DistanceKm = Distance / 100000.0f;
-        GEngine->AddOnScreenDebugMessage(4270, 0.0f, FColor::Red,
-            FString::Printf(TEXT("Planeta a %.1f km"), DistanceKm));
+        GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,
+            bOrbitMode ? TEXT("Camara: ORBITA (raton gira, W/S o rueda acerca)")
+                       : TEXT("Camara: LIBRE (WASD + QE, raton mira)"));
+    }
+}
+
+void APlanetApproachPawn::HandleOrbit(float DeltaTime)
+{
+    APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0);
+    if (!PC || !PC->InputEnabled())
+    {
+        return;
+    }
+
+    if (!bOrbitStateValid)
+    {
+        SyncOrbitStateFromTransform();
+    }
+
+    const FVector Center = TargetPlanet->GetActorLocation();
+
+    // --- Giro ---------------------------------------------------------------
+    float DX = 0.0f, DY = 0.0f;
+    PC->GetInputMouseDelta(DX, DY);
+
+    // A/D y flechas como alternativa al raton, util para giros finos y para grabar
+    // recorridos repetibles.
+    float KeyboardYaw = 0.0f;
+    float KeyboardPitch = 0.0f;
+    if (PC->IsInputKeyDown(EKeys::A) || PC->IsInputKeyDown(EKeys::Left))  KeyboardYaw -= 1.0f;
+    if (PC->IsInputKeyDown(EKeys::D) || PC->IsInputKeyDown(EKeys::Right)) KeyboardYaw += 1.0f;
+    if (PC->IsInputKeyDown(EKeys::Up))    KeyboardPitch += 1.0f;
+    if (PC->IsInputKeyDown(EKeys::Down))  KeyboardPitch -= 1.0f;
+
+    const float KeyboardOrbitDegPerSec = 45.0f;
+    OrbitLongitudeDeg += DX * OrbitSensitivity + KeyboardYaw * KeyboardOrbitDegPerSec * DeltaTime;
+    OrbitLatitudeDeg  += DY * OrbitSensitivity + KeyboardPitch * KeyboardOrbitDegPerSec * DeltaTime;
+
+    // Se recorta en vez de envolver: al pasar por el polo, la longitud se invierte de
+    // golpe y la camara da un tirón desconcertante. 89 grados deja ver el polo de sobra.
+    OrbitLatitudeDeg = FMath::Clamp(OrbitLatitudeDeg, -89.0, 89.0);
+    OrbitLongitudeDeg = FMath::Fmod(OrbitLongitudeDeg, 360.0);
+
+    // --- Acercar / alejar ---------------------------------------------------
+    const FVector CurrentDir = GetActorLocation() - Center;
+    const float SurfaceRadius = GetTargetSurfaceRadius(
+        CurrentDir.IsNearlyZero() ? FVector::UpVector : CurrentDir.GetSafeNormal());
+
+    float ZoomInput = 0.0f;
+    if (PC->IsInputKeyDown(EKeys::W) || PC->IsInputKeyDown(EKeys::E)) ZoomInput -= 1.0f;
+    if (PC->IsInputKeyDown(EKeys::S) || PC->IsInputKeyDown(EKeys::Q)) ZoomInput += 1.0f;
+
+    // La rueda da un paso discreto equivalente a ~0.3 s de zoom continuo.
+    float WheelSteps = 0.0f;
+    if (PC->WasInputKeyJustPressed(EKeys::MouseScrollUp))   WheelSteps -= 1.0f;
+    if (PC->WasInputKeyJustPressed(EKeys::MouseScrollDown)) WheelSteps += 1.0f;
+
+    if (!FMath::IsNearlyZero(ZoomInput) || !FMath::IsNearlyZero(WheelSteps))
+    {
+        const double Altitude = FMath::Max(OrbitDistance - SurfaceRadius, static_cast<double>(SurfaceClearance));
+        const double Delta = Altitude * OrbitZoomRate * (ZoomInput * DeltaTime + WheelSteps * 0.3);
+        OrbitDistance += Delta;
+    }
+
+    OrbitDistance = FMath::Max(OrbitDistance, static_cast<double>(SurfaceRadius + SurfaceClearance));
+
+    // --- Recolocar ----------------------------------------------------------
+    const double LatRad = FMath::DegreesToRadians(OrbitLatitudeDeg);
+    const double LonRad = FMath::DegreesToRadians(OrbitLongitudeDeg);
+    const double CosLat = FMath::Cos(LatRad);
+
+    const FVector Dir(
+        CosLat * FMath::Cos(LonRad),
+        CosLat * FMath::Sin(LonRad),
+        FMath::Sin(LatRad));
+
+    SetActorLocation(Center + Dir * OrbitDistance);
+
+    // Mirar siempre al centro. Se fija la rotacion en absoluto en vez de acumular
+    // giros: acumular introduce roll y la camara acaba escorada.
+    SetActorRotation((-Dir).Rotation());
+    if (Camera)
+    {
+        Camera->SetRelativeRotation(FRotator::ZeroRotator);
     }
 }
 
@@ -176,6 +318,15 @@ void APlanetApproachPawn::ApplyHeightClamp()
     if (DistanceFromCenter < MinAllowedDistance)
     {
         SetActorLocation(TargetPlanet->GetActorLocation() + Direction * MinAllowedDistance);
+
+        // En orbita, la distancia es estado propio: si no se resincroniza aqui, el
+        // siguiente frame volveria a colocar la camara donde ya sabemos que no cabe, y
+        // se quedaria vibrando contra el suelo. HandleOrbit ya recorta con el radio de
+        // la direccion ANTERIOR, pero al girar se puede entrar en una zona mas alta.
+        if (bOrbitMode)
+        {
+            OrbitDistance = MinAllowedDistance;
+        }
     }
 }
 

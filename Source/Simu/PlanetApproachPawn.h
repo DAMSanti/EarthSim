@@ -82,11 +82,36 @@ public:
     float MouseLookSpeed = 2.5f;
 
     /**
-     * Flecha de depuracion que siempre apunta hacia TargetPlanet, dibujada a una
-     * distancia fija delante de la camara (por eso siempre esta en pantalla,
-     * independientemente de hacia donde mires) - util a escala planetaria donde es
-     * facil no saber si el planeta esta simplemente fuera de encuadre o no se ve por
-     * otra razon (pedido explicitamente, 11-08-2026).
+     * true = modo ORBITA: la camara gira alrededor del centro del planeta manteniendo la
+     * distancia, y siempre mira hacia el centro. false = modo LIBRE: vuelo tipo
+     * espectador, el comportamiento original.
+     *
+     * Por defecto orbita porque desde F0.5 el uso principal del pawn es inspeccionar
+     * campos sobre el globo, y para eso el vuelo libre es un estorbo: cualquier giro
+     * desencuadra el planeta y hay que recolocarse a mano. Orbitando es imposible
+     * perderlo de vista. El modo libre sigue haciendo falta para bajar a la superficie
+     * y mirar el relieve de cerca. Se conmuta con O.
+     */
+    UPROPERTY(EditAnywhere, Category = "Movement")
+    bool bOrbitMode = true;
+
+    /** Grados de giro orbital por unidad de desplazamiento de raton. */
+    UPROPERTY(EditAnywhere, Category = "Movement", meta = (ClampMin = "0.01"))
+    float OrbitSensitivity = 0.35f;
+
+    /**
+     * Fraccion de la ALTITUD ACTUAL que se recorre por segundo al acercarse o alejarse
+     * en modo orbita. Proporcional y no absoluta a proposito: es lo que hace que el zoom
+     * se sienta igual de rapido a 15.000 km que a 10 km de altura. Con un paso absoluto,
+     * o tardas una eternidad desde orbita o atraviesas el planeta cerca del suelo.
+     */
+    UPROPERTY(EditAnywhere, Category = "Movement", meta = (ClampMin = "0.01"))
+    float OrbitZoomRate = 0.9f;
+
+    /**
+     * Brujula 2D que apunta hacia TargetPlanet cuando queda fuera de encuadre. La
+     * dibuja ASimuHUD, no el pawn: es informacion de interfaz, no un objeto del mundo.
+     * Solo aparece en modo libre - en orbita el planeta esta siempre centrado.
      */
     UPROPERTY(EditAnywhere, Category = "Debug")
     bool bShowPlanetCompass = true;
@@ -101,9 +126,35 @@ protected:
 private:
     float CurrentSpeed = 0.0f;
 
+    // Estado del modo orbita. Se mantiene en coordenadas esfericas alrededor del centro
+    // del planeta en vez de derivarlo de la transform cada frame: acumular giros sobre
+    // la transform hace que la camara vaya escorandose (roll) poco a poco.
+    double OrbitLongitudeDeg = 0.0;
+    double OrbitLatitudeDeg = 0.0;
+    double OrbitDistance = 0.0;
+    bool bOrbitStateValid = false;
+    bool bInputModeConfigured = false;
+
+    /**
+     * Captura el raton en el viewport. Sin esto GetInputMouseDelta() devuelve siempre
+     * cero y NINGUN giro con raton funciona - ni el de orbita ni el vuelo libre. Nada en
+     * el proyecto configuraba el modo de entrada, y como M1.6 se cerro sin verificar en
+     * editor, el giro con raton probablemente no ha funcionado nunca.
+     */
+    void EnsureMouseCaptured();
+
     void HandleLook(float DeltaTime);
     void HandleMovement(float DeltaTime);
     void ApplyHeightClamp();
+
+    /** Recalcula lat/lon/distancia a partir de la posicion actual (al entrar en orbita). */
+    void SyncOrbitStateFromTransform();
+
+    /** Un paso del modo orbita: entrada, actualizacion de angulos y recolocacion. */
+    void HandleOrbit(float DeltaTime);
+
+    /** Conmuta orbita/libre con la tecla O, sincronizando el estado en ambos sentidos. */
+    void HandleModeToggle();
 
     /** Encuentra el primer ATectonicsTestActor o ATectonicPlanetActor en el mundo */
     AActor* FindTargetPlanet() const;
@@ -111,6 +162,4 @@ private:
     /** Radio de superficie en una direccion, delegando al tipo real de TargetPlanet */
     float GetTargetSurfaceRadius(const FVector& Direction) const;
 
-    /** Dibuja la flecha de compas hacia TargetPlanet y un texto con la distancia */
-    void DrawPlanetCompass() const;
 };
