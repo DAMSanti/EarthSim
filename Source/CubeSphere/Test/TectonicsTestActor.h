@@ -14,6 +14,7 @@ class UPlateKinematics;
 class UBoundaryInteractions;
 class UPlanetFieldRegistry;
 class UPlanetClimate;
+class UPlanetHydrology;
 class URasterizedTectonics;
 class UProceduralMeshComponent;
 class UDirectionalLightComponent;
@@ -278,6 +279,13 @@ public:
      */
     UPROPERTY(BlueprintReadOnly, Category = "Tectonics|Systems")
     UPlanetClimate* Climate;
+
+    /**
+     * Drenaje y caudal acumulado (ROADMAP.md F4). Se recalcula junto con el clima: depende
+     * del relieve y de la lluvia, y ninguno de los dos cambia deprisa.
+     */
+    UPROPERTY(BlueprintReadOnly, Category = "Tectonics|Systems")
+    UPlanetHydrology* Hydrology;
 
     /**
      * Cada cuántos pasos se recalcula el clima. No hace falta cada paso: depende del

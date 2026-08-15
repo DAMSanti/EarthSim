@@ -9,6 +9,7 @@
 #include "Tectonics/RasterizedTectonics.h"
 #include "Tectonics/BoundaryInteractions.h"
 #include "Climate/PlanetClimate.h"
+#include "Hydrology/PlanetHydrology.h"
 
 // ============================================================
 // Rotación por cuaterniones: resultado verificable analíticamente
@@ -1514,6 +1515,206 @@ bool FClimateRainShadowTest::RunTest(const FString& Parameters)
 
     TestTrue(FString::Printf(TEXT("La media de sotavento es menor (%.0f frente a %.0f mm/ano)"), AvgLee, AvgWind),
         AvgLee < AvgWind);
+
+    return true;
+}
+
+// ============================================================
+// F4 — DRENAJE
+// ============================================================
+
+// ------------------------------------------------------------
+// BARRIDO DE RESOLUCION PARA EL DRENAJE
+//
+// La pregunta practica antes de pagar resolucion: a 39 km por celda (Res 256), ¿sale una
+// red de drenaje reconocible o solo manchas?
+//
+// La medida que lo decide es la LONGITUD DE LA RED: cuantas celdas son cauce, es decir por
+// cuantas pasa mucha mas agua de la que cae sobre ellas. Una red dendritica de verdad tiene
+// muchos cauces cortos alimentando pocos largos, asi que la fraccion de cauce crece con la
+// resolucion hasta saturar. Si a Res baja la fraccion es minuscula, es que la red no cabe
+// en la rejilla.
+//
+// Tambien se vigila la fraccion de MINIMOS LOCALES. Un lago aislado es fisica (el Caspio),
+// pero si media tierra son sumideros el agua no llega a organizarse en redes: se queda
+// estancada celda a celda.
+// ------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FHydrologyResolutionTest,
+    "Simu.Hydrology.DrainageResolution",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FHydrologyResolutionTest::RunTest(const FString& Parameters)
+{
+    const int32 Resolutions[3] = { 64, 128, 192 };
+
+    float ChannelFraction[3] = { 0, 0, 0 };
+    float SinkFraction[3] = { 0, 0, 0 };
+    double HydroMs[3] = { 0, 0, 0 };
+
+    for (int32 Case = 0; Case < 3; ++Case)
+    {
+        const int32 Res = Resolutions[Case];
+
+        UCubeSphereGrid* Grid = nullptr;
+        UTectonicPlateSystem* System = nullptr;
+        URasterizedTectonics* Raster = nullptr;
+        if (!TestTrue(TEXT("Fixture montado"), BuildF1Fixture(Res, Res, 8, 31337, Grid, System, Raster)))
+        {
+            return false;
+        }
+
+        // Relieve de verdad antes de drenar: sobre un planeta liso no hay nada que drenar.
+        FPlateMovementParams Params;
+        Params.DeltaTime = 0.5f;
+        for (int32 i = 0; i < 300; ++i)
+        {
+            System->Step(Params.DeltaTime);
+            Raster->Step(Params);
+        }
+
+        UPlanetClimate* Climate = NewObject<UPlanetClimate>();
+        Climate->Initialize(Raster, Grid);
+        Climate->Recompute(FClimateParams());
+
+        UPlanetHydrology* Hydro = NewObject<UPlanetHydrology>();
+        Hydro->Initialize(Raster, Climate);
+
+        const double Start = FPlatformTime::Seconds();
+        Hydro->Recompute();
+        HydroMs[Case] = (FPlatformTime::Seconds() - Start) * 1000.0;
+
+        const FHydrologyStats Stats = Hydro->GetStats();
+        if (!TestTrue(TEXT("Hay tierra que drenar"), Stats.LandCells > 0))
+        {
+            return false;
+        }
+
+        ChannelFraction[Case] = static_cast<float>(Stats.ChannelCells) / Stats.LandCells;
+        SinkFraction[Case] = static_cast<float>(Stats.SinkCells) / Stats.LandCells;
+
+        UE_LOG(LogTemp, Log,
+            TEXT("Drenaje Res %3d: %d celdas de tierra | cauce %.1f%% | sumideros %.1f%% | caudal max %.3e m3/ano | %.1f ms"),
+            Res, Stats.LandCells, ChannelFraction[Case] * 100.0f, SinkFraction[Case] * 100.0f,
+            Stats.MaxDischarge, HydroMs[Case]);
+    }
+
+    AddInfo(FString::Printf(TEXT("cauce: %.1f%% / %.1f%% / %.1f%% | sumideros: %.1f%% / %.1f%% / %.1f%%"),
+        ChannelFraction[0] * 100.0f, ChannelFraction[1] * 100.0f, ChannelFraction[2] * 100.0f,
+        SinkFraction[0] * 100.0f, SinkFraction[1] * 100.0f, SinkFraction[2] * 100.0f));
+
+    // Tiene que existir red, no solo manchas sueltas.
+    TestTrue(FString::Printf(TEXT("Se forman cauces a resolucion alta (%.1f%%)"), ChannelFraction[2] * 100.0f),
+        ChannelFraction[2] > 0.01f);
+
+    // El agua tiene que llegar al mar, no quedarse estancada por todas partes.
+    TestTrue(FString::Printf(TEXT("Los sumideros son minoria (%.1f%%)"), SinkFraction[2] * 100.0f),
+        SinkFraction[2] < 0.35f);
+
+    // Y el coste tiene que ser asumible frente al resto del paso.
+    TestTrue(FString::Printf(TEXT("El drenaje cuesta menos de 200 ms a Res 192 (%.1f ms)"), HydroMs[2]),
+        HydroMs[2] < 200.0);
+
+    return true;
+}
+
+// ------------------------------------------------------------
+// El agua va cuesta abajo y se conserva.
+//
+// Comprobaciones estructurales que no dependen de como salga el relieve: el caudal de una
+// celda nunca puede ser menor que el de la suma de las que desembocan en ella, y ninguna
+// celda puede drenar hacia arriba.
+// ------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FHydrologyDownhillTest,
+    "Simu.Hydrology.FlowsDownhill",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FHydrologyDownhillTest::RunTest(const FString& Parameters)
+{
+    const int32 Res = 64;
+
+    UCubeSphereGrid* Grid = nullptr;
+    UTectonicPlateSystem* System = nullptr;
+    URasterizedTectonics* Raster = nullptr;
+    if (!TestTrue(TEXT("Fixture montado"), BuildF1Fixture(Res, Res, 8, 777, Grid, System, Raster)))
+    {
+        return false;
+    }
+
+    FPlateMovementParams Params;
+    Params.DeltaTime = 0.5f;
+    for (int32 i = 0; i < 200; ++i)
+    {
+        System->Step(Params.DeltaTime);
+        Raster->Step(Params);
+    }
+
+    UPlanetClimate* Climate = NewObject<UPlanetClimate>();
+    Climate->Initialize(Raster, Grid);
+    Climate->Recompute(FClimateParams());
+
+    UPlanetHydrology* Hydro = NewObject<UPlanetHydrology>();
+    Hydro->Initialize(Raster, Climate);
+    Hydro->Recompute();
+
+    const float SeaLevel = Raster->GetSeaLevel();
+
+    // Se sigue el enlace que uso EL PROPIO ALGORITMO, no "el vecino mas bajo".
+    //
+    // Una version anterior de este test comprobaba el vecino geometricamente mas bajo y
+    // reportaba un 8,66% de excepciones. No era un bug del drenaje: el criterio es la
+    // mayor PENDIENTE con la distancia diagonal corregida, y un vecino diagonal puede
+    // estar mas abajo y aun asi tener menos pendiente por estar mas lejos. El test media
+    // una propiedad distinta de la que el codigo implementa.
+    int32 Checked = 0;
+    int32 UphillFlow = 0;
+    int32 DecreasingFlow = 0;
+
+    for (int32 F = 0; F < 6; ++F)
+    {
+        const ECSCubeFace Face = static_cast<ECSCubeFace>(F);
+        for (int32 Y = 0; Y < Res; ++Y)
+        {
+            for (int32 X = 0; X < Res; ++X)
+            {
+                const float Here = Raster->GetElevationAt(Face, X, Y);
+                if (Here < SeaLevel) { continue; }
+
+                ECSCubeFace DF; int32 DXc, DYc;
+                if (!Hydro->GetDownstreamCell(Face, X, Y, DF, DXc, DYc))
+                {
+                    continue;   // minimo local o desemboca en el mar
+                }
+
+                ++Checked;
+
+                // El agua no puede subir
+                if (Raster->GetElevationAt(DF, DXc, DYc) > Here)
+                {
+                    ++UphillFlow;
+                }
+
+                // Y aguas abajo tiene que llevar al menos tanto caudal, porque recibe todo
+                // lo de esta celda ademas de su propia lluvia
+                if (Hydro->GetDischargeAt(DF, DXc, DYc) < Hydro->GetDischargeAt(Face, X, Y) - 1.0f)
+                {
+                    ++DecreasingFlow;
+                }
+            }
+        }
+    }
+
+    AddInfo(FString::Printf(TEXT("%d enlaces comprobados, %d cuesta arriba, %d con caudal decreciente"),
+        Checked, UphillFlow, DecreasingFlow));
+
+    if (!TestTrue(TEXT("Hay enlaces de drenaje que comprobar"), Checked > 100))
+    {
+        return false;
+    }
+
+    // Estos dos son invariantes exactos del algoritmo, no tendencias: cualquier excepcion
+    // seria un bug.
+    TestEqual(TEXT("Ninguna celda drena cuesta arriba"), UphillFlow, 0);
+    TestEqual(TEXT("El caudal nunca decrece aguas abajo"), DecreasingFlow, 0);
 
     return true;
 }

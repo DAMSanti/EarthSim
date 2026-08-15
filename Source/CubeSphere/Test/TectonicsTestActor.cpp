@@ -6,6 +6,7 @@
 #include "../Visualization/PlanetFieldRegistry.h"
 #include "../Visualization/PlanetFieldMaterial.h"
 #include "../Climate/PlanetClimate.h"
+#include "../Hydrology/PlanetHydrology.h"
 #include "TectonicTypes.h"
 #include "TectonicPlateSystem.h"
 #include "PlateKinematics.h"
@@ -204,6 +205,13 @@ void ATectonicsTestActor::InitializeSystems()
     Climate->Recompute(FClimateParams());
     UE_LOG(LogTemp, Log, TEXT("  - Clima diagnostico inicializado"));
 
+    // 3.16 Drenaje (ROADMAP.md F4)
+    Hydrology = NewObject<UPlanetHydrology>(this, TEXT("Hydrology"));
+    Hydrology->Initialize(RasterizedTectonics, Climate);
+    Hydrology->Recompute();
+    UE_LOG(LogTemp, Log, TEXT("  - Drenaje inicializado: %d celdas de cauce"),
+        Hydrology->GetStats().ChannelCells);
+
     // 3.2 Registro de campos de diagnóstico (ROADMAP.md F0.5)
     FieldRegistry = NewObject<UPlanetFieldRegistry>(this, TEXT("FieldRegistry"));
     RegisterSimulationFields();
@@ -270,6 +278,7 @@ void ATectonicsTestActor::ShutdownSystems()
     }
 
     Climate = nullptr;
+    Hydrology = nullptr;
 
     BoundaryInteractions = nullptr;
     Kinematics = nullptr;
@@ -382,6 +391,13 @@ void ATectonicsTestActor::StepSimulation(float DeltaTime)
         ClimateUpdateIntervalSteps > 0 && (SimulationSteps % ClimateUpdateIntervalSteps) == 0)
     {
         Climate->Recompute(FClimateParams());
+
+        // El drenaje va detras del clima y en el mismo ritmo: depende del relieve y de la
+        // lluvia, y recalcularlo antes que el clima usaria la lluvia del ciclo anterior.
+        if (Hydrology && Hydrology->IsInitialized())
+        {
+            Hydrology->Recompute();
+        }
     }
 
     // 3. Refrescar la malla visual periódicamente para reflejar la elevación actual
@@ -1144,6 +1160,31 @@ void ATectonicsTestActor::RegisterSimulationFields()
         }
     }
 
+    // --- Caudal acumulado (ROADMAP.md F4) --------------------------------------
+    // ESTE es el mapa que valida F4, y va en ESCALA LOGARITMICA por necesidad. El caudal
+    // crece varios ordenes de magnitud entre la cabecera de un arroyo y la desembocadura
+    // del rio principal: en lineal el cauce principal satura y todos sus afluentes quedan
+    // indistinguibles del fondo, asi que la red simplemente no se ve. En log aparecen las
+    // ramificaciones, que es lo que hay que juzgar.
+    if (Hydrology && Hydrology->IsInitialized())
+    {
+        UPlanetHydrology* HydroRef = Hydrology;
+
+        FPlanetScalarField Field;
+        Field.Id = TEXT("Discharge");
+        Field.Label = TEXT("Caudal acumulado");
+        Field.Unit = TEXT("m3/ano");
+        Field.Palette = EPlanetFieldPalette::Sequential;
+        Field.Scale = EPlanetFieldScale::Logarithmic;
+        Field.Resolution = Res;
+        Field.bAutoRange = true;
+        Field.GetFaceData = [HydroRef](ECSCubeFace Face) -> const TArray<float>*
+        {
+            return HydroRef->IsInitialized() ? &HydroRef->GetDischargeData(Face) : nullptr;
+        };
+        FieldRegistry->RegisterField(Field);
+    }
+
     FieldRegistry->RefreshRanges();
 
     UE_LOG(LogTemp, Log, TEXT("  - %d campos de diagnostico registrados (F/G para conmutar)"),
@@ -1227,6 +1268,7 @@ void ATectonicsTestActor::DrawScreenDebugInfo()
         TEXT("[+/-] Velocidad | [1-8] Placa\n")
         TEXT("[V] Velocidades | [B] Límites\n")
         TEXT("Corteza: +%d creada / -%d destruida (%d advecciones)\n")
+        TEXT("Drenaje: %d celdas de cauce | %d lagos\n")
         TEXT("Coste: sim %.1f ms @%.0f Hz | malla %.1f ms @%.0f Hz\n")
         TEXT("  adv %.1f (motas %.1f) front %.1f dif %.1f iso %.1f ms\n")
         TEXT("[F/G] Campo | [U] %s\n")
@@ -1240,6 +1282,8 @@ void ATectonicsTestActor::DrawScreenDebugInfo()
         RasterizedTectonics ? RasterizedTectonics->GetAdvectionStats().CellsCreated : 0,
         RasterizedTectonics ? RasterizedTectonics->GetAdvectionStats().CellsDestroyed : 0,
         RasterizedTectonics ? RasterizedTectonics->GetAdvectionStats().AdvectionCount : 0,
+        Hydrology ? Hydrology->GetStats().ChannelCells : 0,
+        Hydrology ? Hydrology->GetStats().SinkCells : 0,
         AvgSimStepMs,
         SimulationStepsPerSecond,
         AvgMeshUpdateMs,

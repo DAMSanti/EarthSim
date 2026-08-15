@@ -81,9 +81,10 @@ Cuatro tests: perfil de temperatura, bandas de precipitación (comprueba explíc
 
 ⚠️ **Sin verificar en el editor todavía.**
 
-### F4 — Erosión hidráulica y sedimento 🔴 SIGUIENTE
+### F4 — Erosión hidráulica y sedimento 🟡 DRENAJE HECHO (16-08-2026)
 
-- [ ] **Acumulación de flujo** sobre la esfera, con `UCubeSphereGrid::GetNeighborCell` para cruzar caras (**no** `GetCrossFaceNeighbors` del QuadTree: arrastra la tabla vieja)
+- [x] **Acumulación de flujo** sobre la esfera. D8 con **corrección de distancia diagonal** — sin ella el drenaje prefiere las diagonales y las redes salen sesgadas a 45°. Recorrido de mayor a menor altura: una sola pasada basta, porque cuando le toca a una celda ya ha recibido todo lo de arriba
+- [x] Caudal en **unidades reales** (m³/año), no un número sin escala: mm/año × área de celda
 - [ ] Tratamiento de depresiones (lagos/sumideros)
 - [ ] **Incisión fluvial** (stream power): erosión ∝ caudal^m · pendiente^n
 - [ ] Transporte y deposición de sedimento → llanuras aluviales y deltas
@@ -95,7 +96,17 @@ Cuatro tests: perfil de temperatura, bandas de precipitación (comprueba explíc
 
 **Renderizable cuando:** **caudal acumulado en escala logarítmica** — es *el* mapa de F4; en lineal no se ve nada. Más tasa de erosión, espesor de sedimento y curva temporal de altura máxima.
 
-⚠️ **Aviso de resolución:** la malla va a 128 por cara sobre 6371 km, o sea ~78 km por celda; el ráster a 256 (~39 km). Vale para patrones globales pero **no para redes de drenaje**. Hay que decidir antes de F4 entre subir resolución (coste ×16 desde 32 a 96, medido) o una vista regional de más detalle.
+✅ **Aviso de resolución, resuelto por medición.** Se temía que 39 km/celda fuera insuficiente para redes de drenaje. `Simu.Hydrology.DrainageResolution` lo mide:
+
+| Res | Tierra | Cauce | Sumideros | Coste |
+|---|---|---|---|---|
+| 64 | 6.469 | 1,2 % | 1,0 % | 1,9 ms |
+| 128 | 26.560 | 2,1 % | 0,7 % | 9,3 ms |
+| 192 | 107.024 | **2,2 %** | 0,7 % | 40,4 ms |
+
+**La fracción de cauce satura entre 128 y 192**, así que la topología de la red ya está resuelta y subir más solo añadiría detalle de valle, no estructura. Y solo **0,7 % de sumideros**: el agua llega al mar en vez de estancarse.
+
+El límite real es **la malla de visualización** (`GridResolution = 128`, ~78 km), que es más gruesa que el ráster de simulación. Subirla es mucho más barato que subir la simulación.
 
 ### F5 — Atmósfera y ciclo del agua completo 🟢
 
