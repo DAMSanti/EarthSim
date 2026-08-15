@@ -568,6 +568,7 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
         ClaimCounts[F].SetNumZeroed(Resolution * Resolution);
     }
 
+
     ParallelFor(6, [&](int32 FaceIdx)
     {
         for (int32 Y = 0; Y < Resolution; ++Y)
@@ -629,6 +630,14 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
                 SourceFace.Reset();
                 SourceIdx.Reset();
 
+                // NOTA (15-08-2026): aqui se probo submuestreo 4x en las celdas de
+                // frontera, para situar el borde con precision de media celda y frenar la
+                // acumulacion de escalonado. Empeoro todo y se revirtio: con mayoria de 4
+                // submuestras DOS placas pueden reclamar la misma celda a la vez, asi que
+                // las colisiones se triplicaron (7.348 -> 20.348), la continental gano
+                // muchas mas veces y la tierra emergida se disparo del 25% al 48,5%. El
+                // escalonado tambien subio (x2,02 -> x3,10). Un test de reclamante unico
+                // no admite un criterio de mayoria sin repensar la resolucion de empates.
                 for (int32 P = 0; P < NumPlates; ++P)
                 {
                     const FVector PrevDir = InverseRotations[P].RotateVector(Dir);
@@ -834,6 +843,97 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
             }
         }
     });
+
+    // ============================================================
+    // LIMPIEZA DE MOTAS (15-08-2026)
+    //
+    // El campo de IDs es categorico: hay que remuestrearlo con vecino mas cercano, y cada
+    // adveccion re-cuantiza el borde. El error de una pasada es de +-1 pixel y por si solo
+    // no se veria, pero no es inocuo: una celda que queda asignada a la placa equivocada
+    // pasa a formar parte del borde, desde donde siembra mas error en la siguiente
+    // adveccion. Encadenado, eso es el patron de peine.
+    //
+    // La semilla de todo son las celdas AISLADAS: las que no coinciden con NINGUNA de sus
+    // cuatro vecinas. Fisicamente no pueden existir - una placa de una celda de ancho no
+    // es una placa - asi que borrarlas no destruye informacion, solo ruido de remuestreo.
+    //
+    // Se hace sobre una instantanea para que el resultado no dependa del orden de
+    // recorrido, y se arrastran tambien tipo, edad y grosor: dejar el ID corregido pero
+    // los datos del vecino equivocado seria peor que no tocar nada.
+    {
+        const TArray<FTectonicFaceTextureData> Speckled = FaceData;
+
+        ParallelFor(6, [&](int32 FaceIdx)
+        {
+            FTectonicFaceTextureData& Face = FaceData[FaceIdx];
+            const int32 NOff[4][2] = {{-1,0},{1,0},{0,-1},{0,1}};
+
+            for (int32 Y = 0; Y < Resolution; ++Y)
+            {
+                for (int32 X = 0; X < Resolution; ++X)
+                {
+                    const int32 Idx = Y * Resolution + X;
+                    const uint8 Mine = Speckled[FaceIdx].PlateIDData[Idx];
+
+                    int32 Same = 0;
+                    int32 BestFace = -1, BestIdx = -1;
+                    uint8 BestId = Mine;
+                    int32 BestCount = 0;
+
+                    // Conteo de vecinas por ID, con solo cuatro no hace falta mapa
+                    uint8 NeighbourIds[4];
+                    int32 NeighbourFace[4], NeighbourIdx[4], NumNeighbours = 0;
+
+                    for (int32 N = 0; N < 4; ++N)
+                    {
+                        ECSCubeFace NF; int32 NX, NY;
+                        if (!GetNeighborPixel(static_cast<ECSCubeFace>(FaceIdx), X, Y, NOff[N][0], NOff[N][1], NF, NX, NY))
+                        {
+                            continue;
+                        }
+                        const int32 NFi = static_cast<int32>(NF);
+                        const int32 NI = NY * Resolution + NX;
+                        NeighbourIds[NumNeighbours] = Speckled[NFi].PlateIDData[NI];
+                        NeighbourFace[NumNeighbours] = NFi;
+                        NeighbourIdx[NumNeighbours] = NI;
+                        if (NeighbourIds[NumNeighbours] == Mine) { ++Same; }
+                        ++NumNeighbours;
+                    }
+
+                    // Solo se tocan las celdas que no coinciden con NINGUNA vecina
+                    if (Same > 0 || NumNeighbours == 0)
+                    {
+                        continue;
+                    }
+
+                    for (int32 A = 0; A < NumNeighbours; ++A)
+                    {
+                        int32 Count = 0;
+                        for (int32 B = 0; B < NumNeighbours; ++B)
+                        {
+                            if (NeighbourIds[B] == NeighbourIds[A]) { ++Count; }
+                        }
+                        if (Count > BestCount)
+                        {
+                            BestCount = Count;
+                            BestId = NeighbourIds[A];
+                            BestFace = NeighbourFace[A];
+                            BestIdx = NeighbourIdx[A];
+                        }
+                    }
+
+                    if (BestFace >= 0)
+                    {
+                        Face.PlateIDData[Idx]        = BestId;
+                        Face.CrustTypeData[Idx]      = Speckled[BestFace].CrustTypeData[BestIdx];
+                        Face.CrustAgeData[Idx]       = Speckled[BestFace].CrustAgeData[BestIdx];
+                        Face.CrustThicknessData[Idx] = Speckled[BestFace].CrustThicknessData[BestIdx];
+                        Face.ElevationData[Idx]      = Speckled[BestFace].ElevationData[BestIdx];
+                    }
+                }
+            }
+        });
+    }
 
     for (const FFaceCounters& C : Counters)
     {
