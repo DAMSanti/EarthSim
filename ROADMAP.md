@@ -279,9 +279,30 @@ Un test vigila que las celdas sin resolver sigan siendo residuales: si vuelven a
 
 > **Sobre la tierra emergida:** bajó de 25,1 % a 18,8 %, y no es una regresión. **El 25,1 % estaba inflado por el propio bug**: los cordones congelados eran corteza continental elevada que no debía estar ahí. El 18,8 % es lo que queda al resolver esas celdas correctamente, y sigue en rango plausible (la Tierra está en 29 %).
 
-### ⚠️ La métrica del escalonado es insuficiente
+### ⚠️ Subir la resolución NO arregla el escalonado — medido y descartado
 
-`Frontera: ×2,02` mejoró respecto a ×3,15, pero las capturas siguen mostrando placas con forma de bloque rectangular. Un borde escalonado en bloques grandes es **más corto** que uno en peine fino, así que la métrica puede mejorar mientras el resultado sigue siendo igual de artificial. Hay que sustituirla por algo que mida *rectitud antinatural*, no solo longitud.
+Segunda hipótesis falsada sobre el mismo tema. Se esperaba que el escalonado fuera un artefacto de cuantización y se encogiera con la rejilla. `Simu.Tectonics.ResolutionScan`, 200 Ma en cada caso:
+
+| Res | Escalonado | ms/paso | Advecciones |
+|---|---|---|---|
+| 32 | ×1,28 | 0,56 | 19 |
+| 48 | ×1,42 | 1,96 | 39 |
+| 64 | ×1,54 | 1,86 | 39 |
+| **96** | **×1,63** | **9,07** | 78 |
+
+**Cuesta ×16 y lo empeora ×1,27.** Decisión: no se sube la resolución para esto.
+
+El barrido se conserva como **medida de coste frente a resolución**, que sí es fiable y hace falta para dimensionar F3 y F4: el coste escala con el número de celdas, así que cada campo nuevo que se añada paga ese factor.
+
+### ⚠️ La métrica del escalonado es insuficiente — y ha inducido a error tres veces
+
+El cociente `frontera_final / frontera_inicial` ha llevado a conclusiones equivocadas tres veces:
+
+1. Bajó a ×2,02 con la limpieza de motas, pero las capturas mostraban bordes en **bloque rectangular** — un borde en bloques grandes es *más corto* que uno en peine fino, así que la métrica mejora mientras el resultado sigue siendo igual de artificial.
+2. Sugirió que encadenar advecciones era la causa; el experimento de paso lo desmintió.
+3. **No es comparable entre resoluciones**: a más resolución hay sitio para rugosidad más fina, así que el cociente crece aunque el borde no sea peor en ningún sentido útil.
+
+Solo sirve para detectar un empeoramiento catastrófico **a resolución fija**. Antes de volver a atacar el escalonado hay que tener una métrica que mida *rectitud antinatural* — por ejemplo densidad de esquinas de 90° frente a la esperada para un círculo máximo — y no simple longitud. **Sin esa métrica, cualquier intento de arreglo es a ciegas.**
 
 ### Un test que no comprobaba nada, otra vez
 

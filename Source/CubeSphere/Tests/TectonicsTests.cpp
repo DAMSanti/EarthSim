@@ -1094,3 +1094,141 @@ bool FAdvectionChainingHypothesisTest::RunTest(const FString& Parameters)
 
     return true;
 }
+
+
+// ------------------------------------------------------------
+// BARRIDO DE RESOLUCION
+//
+// HIPOTESIS PROBADA Y DESCARTADA (16-08-2026), la segunda sobre el mismo tema. Se
+// esperaba que el escalonado de bordes fuera un artefacto de cuantizacion y por tanto se
+// encogiera al subir la resolucion: un borde solo puede ser tan fino como una celda, y a
+// 128 por cara una celda son ~78 km. La medida dice lo contrario:
+//
+//     Res 32 -> escalonado x1,28 |  0,56 ms/paso | 19 advecciones
+//     Res 48 -> escalonado x1,42 |  1,96 ms/paso | 39 advecciones
+//     Res 64 -> escalonado x1,54 |  1,86 ms/paso | 39 advecciones
+//     Res 96 -> escalonado x1,63 |  9,07 ms/paso | 78 advecciones
+//
+// Subir la resolucion cuesta x16 y EMPEORA el escalonado x1,27. Conclusion practica
+// inmediata: no se sube la resolucion para arreglar esto.
+//
+// Y una conclusion sobre la metrica, que es mas importante: el cociente
+// frontera_final/frontera_inicial NO es comparable entre resoluciones, aunque lo parezca.
+// A mas resolucion hay sitio para rugosidad mas fina, asi que el cociente crece aunque el
+// borde no sea "peor" en ningun sentido util. Es la tercera vez que esta metrica induce a
+// error - ya paso al confundir bordes en bloque con bordes suaves - y no deberia usarse
+// para decidir nada mas alla de detectar un empeoramiento catastrofico a resolucion fija.
+//
+// El test se conserva como medida de COSTE frente a resolucion, que si es fiable y hace
+// falta para dimensionar F3 y F4.
+// ------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FResolutionScanTest,
+    "Simu.Tectonics.ResolutionScan",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FResolutionScanTest::RunTest(const FString& Parameters)
+{
+    const int32 Resolutions[4] = { 32, 48, 64, 96 };
+    const float SimulatedMa = 200.0f;
+
+    float Ratios[4] = { 0, 0, 0, 0 };
+    double StepMs[4] = { 0, 0, 0, 0 };
+    int32 Advections[4] = { 0, 0, 0, 0 };
+    float LandEnd[4] = { 0, 0, 0, 0 };
+
+    for (int32 Case = 0; Case < 4; ++Case)
+    {
+        const int32 Res = Resolutions[Case];
+
+        UCubeSphereGrid* Grid = nullptr;
+        UTectonicPlateSystem* System = nullptr;
+        URasterizedTectonics* Raster = nullptr;
+        if (!TestTrue(TEXT("Fixture montado"), BuildF1Fixture(Res, Res, 8, 4242, Grid, System, Raster)))
+        {
+            return false;
+        }
+
+        auto CountBoundary = [Raster, Res]()
+        {
+            int32 N = 0;
+            const int32 DX[4] = {1,-1,0,0};
+            const int32 DY[4] = {0,0,1,-1};
+            for (int32 F = 0; F < 6; ++F)
+            {
+                const ECSCubeFace Face = static_cast<ECSCubeFace>(F);
+                for (int32 Y = 1; Y < Res - 1; ++Y)
+                {
+                    for (int32 X = 1; X < Res - 1; ++X)
+                    {
+                        const int32 Id = Raster->GetPlateIDAt(Face, X, Y);
+                        for (int32 D = 0; D < 4; ++D)
+                        {
+                            if (Raster->GetPlateIDAt(Face, X + DX[D], Y + DY[D]) != Id) { ++N; break; }
+                        }
+                    }
+                }
+            }
+            return N;
+        };
+
+        const int32 Before = CountBoundary();
+
+        FPlateMovementParams Params;
+        Params.DeltaTime = 0.25f;
+        Params.TimeScale = 1.0f;
+
+        const int32 Steps = FMath::RoundToInt(SimulatedMa / Params.DeltaTime);
+
+        const double Start = FPlatformTime::Seconds();
+        for (int32 i = 0; i < Steps; ++i)
+        {
+            System->Step(Params.DeltaTime);
+            Raster->Step(Params);
+        }
+        const double Elapsed = FPlatformTime::Seconds() - Start;
+
+        Ratios[Case] = static_cast<float>(CountBoundary()) / FMath::Max(Before, 1);
+        StepMs[Case] = (Elapsed * 1000.0) / Steps;
+        Advections[Case] = Raster->GetAdvectionStats().AdvectionCount;
+        LandEnd[Case] = Raster->GetLandFraction();
+
+        UE_LOG(LogTemp, Log,
+            TEXT("ResolutionScan: Res %2d -> escalonado x%.2f | %.2f ms/paso | %d advecciones | tierra %.1f%%"),
+            Res, Ratios[Case], StepMs[Case], Advections[Case], LandEnd[Case] * 100.0f);
+    }
+
+    // Coste relativo, que es lo que decide si compensa
+    for (int32 Case = 1; Case < 4; ++Case)
+    {
+        UE_LOG(LogTemp, Log, TEXT("  Res %2d frente a Res %2d: coste x%.1f, escalonado x%.2f"),
+            Resolutions[Case], Resolutions[0],
+            StepMs[Case] / FMath::Max(StepMs[0], 0.001), Ratios[Case] / FMath::Max(Ratios[0], 0.001f));
+    }
+
+    AddInfo(FString::Printf(TEXT("Res 32: x%.2f (%.1f ms) | 48: x%.2f (%.1f ms) | 64: x%.2f (%.1f ms) | 96: x%.2f (%.1f ms)"),
+        Ratios[0], StepMs[0], Ratios[1], StepMs[1], Ratios[2], StepMs[2], Ratios[3], StepMs[3]));
+
+    // NO se afirma nada sobre el escalonado entre resoluciones: la metrica no es
+    // comparable entre ellas (ver cabecera). Solo se comprueba que sigue acotado, para
+    // detectar una degeneracion grave.
+    TestTrue(FString::Printf(TEXT("El escalonado sigue acotado a alta resolucion (x%.2f)"), Ratios[3]),
+        Ratios[3] < 3.0f);
+
+    // El coste tiene que crecer con la resolucion, y hacerlo aproximadamente como Res^2.
+    // Si dejara de crecer seria senal de que algo no esta escalando como se cree - por
+    // ejemplo que la adveccion no se este ejecutando.
+    TestTrue(TEXT("El coste crece con la resolucion"), StepMs[3] > StepMs[0]);
+
+    const double CostRatio = StepMs[3] / FMath::Max(StepMs[0], 0.001);
+    const double CellRatio = (96.0 * 96.0) / (32.0 * 32.0);   // x9
+    TestTrue(FString::Printf(TEXT("El coste escala con el numero de celdas (x%.1f de coste frente a x%.0f de celdas)"),
+        CostRatio, CellRatio), CostRatio > CellRatio * 0.5);
+
+    // La fraccion de tierra emergida deberia converger al subir resolucion, no dispararse:
+    // es fisica, no debe depender de la rejilla.
+    TestTrue(FString::Printf(TEXT("La tierra emergida no depende fuertemente de la resolucion (%.1f%% a Res 32, %.1f%% a Res 96)"),
+        LandEnd[0] * 100.0f, LandEnd[3] * 100.0f),
+        FMath::Abs(LandEnd[3] - LandEnd[0]) < 0.10f);
+
+    return true;
+}
