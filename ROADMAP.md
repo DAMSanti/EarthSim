@@ -1,162 +1,206 @@
 # ROADMAP.md — Plan de Desarrollo (basado en estado real)
 
-> Este roadmap parte del inventario real de código en [`SPECS.md`](SPECS.md), no de una estimación de calendario. `docs/ROADMAP.md` y `docs/10-hoja-de-ruta.md` son el plan aspiracional original (12+ meses, por fases F1–F5); ese documento fue escrito como visión de producto y sus fechas no están validadas contra velocidad real de desarrollo — trátalo como referencia de *alcance*, no de *fecha*. Aquí se usan **hitos** en vez de meses, en formato checklist para ir marcando.
+> Reescrito el **15-08-2026** tras una auditoría de código completa que contradijo partes de la versión anterior de este documento. Ver [`SPECS.md`](SPECS.md) para el inventario por archivo.
+>
+> `docs/ROADMAP.md` y `docs/10-hoja-de-ruta.md` son el plan aspiracional original (12+ meses, fases F1–F5). Se conservan como referencia de **alcance**, no de fecha ni de orden.
 
 ## Cómo leer esto
 
-- **M0, M1, M2…** son hitos secuenciales, no bloques de tiempo fijo.
-- Cada hito tiene una definición de "hecho" verificable en código (no "se ve bien" sino "existe el archivo/test/función que lo prueba").
-- Prioridad `🔴` = bloquea el resto del roadmap, `🟡` = mejora sustancial, `🟢` = pulido.
-- `[x]` = hecho y verificado en editor/compilación. `[ ]` = pendiente.
+- Las fases **F0…F7** son secuenciales por **dependencia técnica**, no por tiempo. Cada una desbloquea la siguiente.
+- Cada fase tiene una definición de "hecho" **verificable en código**: existe el archivo/función/test que lo prueba, no "se ve bien".
+- `[x]` = hecho y verificado. `[ ]` = pendiente.
+- La sección **Historial** al final recoge el trabajo previo (M0–M5) y **qué de aquello resultó ser falso**.
 
 ---
 
-## M0 — Higiene de proyecto ✅ COMPLETO (10-08-2026)
+## Objetivo del proyecto
 
-🔴 Crítico y barato. Un proyecto de +9000 líneas de C++ sin control de versiones era el riesgo más alto del repo.
-
-- [x] `git init` + `.gitignore` (excluye `Binaries/`, `Intermediate/`, `Saved/`, `DerivedDataCache/`, `.vs/`, `.claude/`)
-- [x] Primer commit con el baseline completo
-- [x] Remoto en GitHub ya existente (confirmado por el usuario, 11-08-2026). Desarrollo sigue siendo local por ahora — no se hace `git push` automáticamente desde aquí sin que se pida explícitamente
+Un simulador planetario completo y **acoplado**: tectónica → relieve → clima → agua → erosión → sedimento → de vuelta a la tectónica. El acoplamiento es el objetivo, no un extra: un relieve que no se erosiona y una lluvia que no depende de las montañas son dos maquetas independientes, no un simulador.
 
 ---
 
-## M1 — Cerrar la brecha Simulación ↔ Render 🟡 PARCIAL (11-08-2026)
+## Diagnóstico de partida (auditoría 15-08-2026)
 
-🔴 Es la brecha de mayor impacto (ver `SPECS.md §4, §10.1`): hoy el planeta que se ve no es el planeta que se simula. **Importante: esto es sobre el pipeline Nanite (`PlanetNaniteMesh`/`NanitePlanetActor`), un actor distinto de `TectonicsTestActor`. Nada de lo hecho el 10-08 en `TectonicsTestActor` (ver M1.5) resuelve esto.**
+Lo que se creía hecho y **no lo está**:
 
-- [x] Sustituir el heightmap placeholder (`Sin(X)*Cos(Y)`) por muestreo real de `FSimplexNoise::SphereFractalNoise` — `Nanite/PlanetNaniteMesh.cpp:GenerateProceduralHeightmap`. Bonus: el placeholder anterior era además discontinuo entre parches/caras (ruido en espacio de textura, no en la esfera); la versión nueva usa la dirección 3D real, sin costuras.
-- [ ] Conectar la elevación calculada por la simulación tectónica al heightmap (todavía es ruido, no datos de `RasterizedTectonics`)
-- [ ] Verificar visualmente en editor que el heightmap sin costuras se ve bien
-- [x] **Bloqueador confirmado**: `Content/` solo contenía `M_VertexColor.uasset`. `NaniteConfig.PlanetMaterial` sin valor por defecto. El material no existía.
-- [x] **Material creado por código** (pedido explícitamente por el usuario, 11-08-2026): `Nanite/PlanetMaterialGenerator.h/.cpp` (`#if WITH_EDITOR`), usa `UMaterialEditingLibrary` (API oficial de Epic para crear/editar materiales por código - `CreateMaterialExpression`, `ConnectMaterialExpressions`, `ConnectMaterialProperty`) para construir: `TextureSampleParameter2D "Heightmap"` + `VectorParameter "HeightmapMinMax"` → `LinearInterpolate` (Min↔Max según el heightmap) → metros a cm → pin **Displacement** (confirmado en el código del motor: `r.Nanite.Tessellation` está activado por defecto en UE 5.8, no hace falta ningún cvar extra). Se guarda como asset real en `Content/Materials/M_PlanetDisplacement.uasset` la primera vez que se usa, y `GetPatchMaterial()` en `PlanetNaniteMesh.cpp` lo crea/carga automáticamente si `NaniteConfig.PlanetMaterial` está vacío.
-- [x] **Bug adicional encontrado al probar (11-08-2026):** el usuario colocó `NanitePlanetActor` (Simu/, actor standalone y más simple con colores fijos por cara) esperando ver el material — pero ese actor no usa `UPlanetNaniteMesh`/`GetPatchMaterial()` en absoluto, son pipelines distintos. Al revisar el que sí correspondía (`ATectonicPlanetActor`, dueño real de `UPlanetNaniteMesh`), se encontró que **tampoco habría funcionado**: `UPlanetNaniteMesh::SyncWithQuadTree()` (única función que llama a `GetPatchMaterial()`) solo se ejecuta si hay un `LODController` asignado, y `TectonicPlanetActor` nunca creaba ni asignaba uno — el material nunca se habría generado con ningún actor. Corregido: `TectonicPlanetActor` ahora crea un `UCubeLODController` propio y lo conecta en `InitializePlanet()`.
-- [x] **Segunda ronda de bugs encontrados al probar (11-08-2026):** con `TectonicPlanetActor` correctamente colocado, el material sí se creó, pero no se veía nada y el framerate caía mucho. Tres causas combinadas, todas corregidas:
-  - `PlanetApproachPawn` solo reconocía `ATectonicsTestActor` como objetivo — con `TectonicPlanetActor` en el nivel se quedaba sin referencia de "suelo" (sin velocidad adaptativa ni colisión). Generalizado para reconocer ambos tipos (`FindTargetPlanet`/`GetTargetSurfaceRadius`), con aproximación esférica simple para `TectonicPlanetActor` (sin datos de elevación por dirección en esa clase).
-  - `TectonicPlanetActor::PlanetRadius` valía `6371000.0f` (63,71 km) pese a decir en el comentario "6371km = Tierra" — 100x más pequeño que `TectonicsTestActor` (`637100000.0f`), dos planetas de escalas completamente distintas coexistiendo en el mismo nivel. Corregido al valor real.
-  - `HeightmapMinMax` por defecto del material era ±12000m — desplazamiento Nanite grande sobre ruido de 6 octavas, candidato claro a teselado carísimo. Reducido a ±100m para la primera prueba a escala segura; es un parámetro del material, se puede subir después sin recompilar.
-  - El asset ya generado con los valores viejos se borró para que se regenere limpio.
-- [x] Añadido HUD de depuración a `TectonicPlanetActor` (pedido por el usuario, mismo estilo que `TectonicsTestActor`) - tiempo simulado, pasos, nº de placas, radio. Aviso importante documentado en el propio código: como la construcción Nanite en `InitializePlanet()` es síncrona y bloquea el hilo principal, este texto **no puede aparecer mientras carga**, solo justo cuando termina - no hay forma de dar feedback "en vivo" durante ese bloqueo sin resolver primero la deuda arquitectónica de arriba (build asíncrono).
-- [x] Causa de "no veo nada" identificada: no era un bug, el actor se había colocado a ~8.874 km del origen (arrastrado en el viewport sin querer). Recolocado a `(0,0,0)`.
-- [ ] **Aún sin verificar visualmente tras esta ronda de fixes** (colocación a 0,0,0 + HUD + PlayerStart reposicionado a ~15.000km de distancia).
-- [x] Brújula de depuración añadida a `PlanetApproachPawn` (pedida por el usuario): flecha roja fija delante de la cámara que siempre apunta hacia `TargetPlanet`, más distancia en km en pantalla — para saber si el planeta simplemente está fuera de encuadre.
-- [x] **Segundo cuelgue confirmado ("0.001 FPS") incluso con `MaxSplitsPerFrame = 0`.** Esto descarta que el problema fuera solo la cascada de creación de parches (eso ya estaba mitigado) — hay algo más caro sin diagnosticar, candidato principal: coste de renderizado de Nanite Displacement en sí (re-teselado por frame según la vista). No se puede perfilar sin el editor abierto, así que en vez de seguir mitigando a ciegas, **se desactivó por completo la generación de parches Nanite** en `TectonicPlanetActor::InitializePlanet()` (código comentado, no solo un límite) hasta que se pueda diagnosticar de verdad con acceso al editor (Task Manager con columna GPU durante el cuelgue sería el primer paso).
-- **Conclusión de esta ronda de M1**: el pipeline `UPlanetNaniteMesh`/Nanite Displacement no es viable para verificación en tiempo real tal como está - dos intentos de mitigación (límite de splits, y antes el material a escala reducida) no lo resolvieron. `TectonicsTestActor` (ProceduralMesh, sin Nanite) sigue siendo la única vía de este proyecto verificada como funcional para ver la simulación tectónica. Recomendación para retomar M1: perfilar primero con el editor abierto (Session Frontend / Unreal Insights) antes de tocar más código a ciegas.
-- [x] **Bug real nº1 encontrado tras usar Live Coding: espiral de la muerte en `Tick()`.** El bucle de catch-up de simulación (`while (AccumulatedTime >= StepInterval)`) no tenía límite de pasos por frame - un frame lento agranda `DeltaTime`, lo que fuerza más pasos de catch-up, lo que tarda más, formando un ciclo que se retroalimenta. Corregido con `MaxStepsPerFrame = 10` y descarte del resto de `AccumulatedTime`. Mejora confirmada por el usuario (de ~0.001 FPS a ~2-3 FPS) probada en caliente con Ctrl+Alt+F11 (Live Coding) sin cerrar el editor - primera vez que se usa ese flujo en esta sesión.
-- [x] **Bug real nº2, el mayor coste identificado: `UTectonicVisualizerComponent::DrawPlateBoundaries()` recorre la rejilla completa (6×GridResolution², sin caché) cada Tick.** Con `GridResolution=256` son ~390.000 celdas/frame con varias llamadas a `GetPlateIDAt`/`CellToPoint` cada una - coste dominante restante tras arreglar la espiral de arriba. `bShowPlateBoundaries` desactivado por defecto en `TectonicPlanetActor.h`; **no optimizado de fondo** (debería cachear las líneas y recalcular solo cuando cambian los límites de placa, no cada frame de render) - queda como deuda técnica pendiente, no resuelta.
-- **Nota sobre el flujo de trabajo**: primera vez en la sesión usando Live Coding (Ctrl+Alt+F11) en vez de cerrar el editor para cada recompilación - funciona bien para cambios de lógica dentro de funciones existentes, mucho más rápido que el ciclo cerrar/compilar/reabrir usado hasta ahora.
-- [x] **Limpieza de clases (pedida explícitamente por el usuario, 11-08-2026):** `TestPlanetActor` y `NanitePlanetActor` (ambas en `Source/Simu/`) eran prototipos tempranos sin relación con la tectónica, causantes de casi toda la confusión de las pruebas de hoy. Se comprobó primero con un commandlet (`-run=CleanupPlanetActors`, ver nota abajo) que la versión guardada en disco de `test.umap` ya no tenía instancias de ninguna de las dos — **borradas las clases fuente por completo** (`TestPlanetActor.h/.cpp`, `NanitePlanetActor.h/.cpp`), no solo las instancias del nivel. El commandlet, ya sin uso una vez confirmado esto, también se borró.
-  - Nota técnica de la sesión de depuración: el commandlet se quedó colgado la primera vez por Live Coding enganchándose al proceso (arreglado con `-nolivecoding`), y sus logs informativos no se veían por usar severidad `Log` en vez de `Warning` en un contexto donde ese nivel se filtra - ninguno de los dos problemas es específico de este proyecto, son gotchas generales de commandlets en UE 5.8.
-- [ ] Sigue pendiente decidir si a largo plazo se mantienen ambos `TectonicPlanetActor` (Nanite) y `TectonicsTestActor` (ProceduralMesh, ya verificado) o solo uno — ahora mismo coexisten porque se necesitan los dos para terminar de verificar el material Nanite.
-- [x] **Bug grave encontrado al probar (11-08-2026): congelación total ("0.00001 FPS").** Causa raíz confirmada en código: `UPlanetNaniteMesh::SyncWithQuadTree()` construye una malla Nanite real (`UStaticMesh::Build` completo) **de forma síncrona en el hilo principal** por cada hoja nueva del quadtree, sin ningún límite propio. Con subdivisión activa cerca de un planeta de miles de km de radio, `UCubeLODController` pedía muchísimos niveles de detalle en cascada → decenas/cientos de builds Nanite síncronos → congelación total. Mitigación aplicada: `LODConfig.MaxSplitsPerFrame = 0` en `TectonicPlanetActor::InitializePlanet()`, que mantiene el quadtree en sus 6 hojas raíz (una por cara) para siempre, sin subdividir nunca. **Esto NO es una solución real**, solo evita el cuelgue para poder verificar el material. El problema de fondo (build Nanite síncrono por parche, sin async ni presupuesto por frame) sigue sin resolver y es una limitación arquitectónica seria de `UPlanetNaniteMesh` para uso en tiempo real — nadie había ejercitado este camino antes de hoy (`GetPatchMaterial`/`SyncWithQuadTree` nunca se llamaban, ver hallazgo anterior de esta misma sesión).
-- [ ] Conectar la elevación real de `RasterizedTectonics` al heightmap (hoy sigue siendo solo ruido de `GenerateProceduralHeightmap`, ver punto de arriba) — el material ya está listo para recibirla, pendiente el lado de generación de datos.
-- [ ] **Deuda arquitectónica nueva y seria**: `UPlanetNaniteMesh::GeneratePatchMesh` construye Nanite de forma síncrona y bloqueante por parche, sin presupuesto por frame ni asincronía. Con `MaxSplitsPerFrame = 0` el sistema es inutilizable como LOD real (6 parches fijos, sin más detalle nunca). Para que este pipeline sea usable en tiempo real hace falta repensar cómo se genera Nanite por parche - candidatos: build asíncrono (`Async`/task graph), un presupuesto explícito de builds-por-frame en `SyncWithQuadTree` (no solo en el conteo de splits del quadtree), o replantear si generar `UStaticMesh` con Nanite por parche es siquiera el enfoque correcto frente a una malla base única con Displacement (que es, de hecho, lo que ya hace `TectonicsTestActor` sin usar Nanite en absoluto).
+| Creencia | Realidad en código |
+|---|---|
+| "Motor CPU de tectónica maduro (~2800 líneas)" | Las placas **nunca se mueven**. `UPlateKinematics` solo lo llaman los tests |
+| "`BoundaryInteractions` calcula datos que nadie consume" | Correcto, pero peor: `ApplyElevationChanges()` está **vacía**. Se ejecuta 6×Res² celdas por paso para no producir nada |
+| "Erosión: reemplazar el `SimpleFlowSimulation` actual" | No hay nada que reemplazar. `SimpleFlowSimulation` es un test de conservación de masa, no hidrología |
+| "Hidrosfera parcial" | Cero. No existe ni una constante de nivel del mar |
 
-**Hecho cuando:** al correr la simulación de placas, las montañas/cordilleras generadas por colisión son visibles en la malla Nanite renderizada, sin pasos manuales. (Sigue sin cumplirse — falta el lado del material y conectar datos reales, no solo ruido.)
+Lo que se ve hoy en pantalla es un **generador de relieve estático**: un mapa de placas Voronoi fijo + ruido fractal, con crestas que crecen siempre en las mismas líneas hasta topar a 12000 m y difusión que las suaviza. No hay deriva continental, ni apertura/cierre de océanos, ni ciclo de Wilson, ni conservación de corteza.
+
+**Consecuencia para el orden de trabajo:** el movimiento de placas es el bloqueador absoluto. Erosionar un relieve que nunca cambia no es un simulador acoplado, es un filtro de imagen.
 
 ---
 
-## M1.5 — Sesión de depuración de `TectonicsTestActor` ✅ COMPLETO (10-08-2026)
+## F0 — Cimientos: limpiar y unificar 🔴 EN CURSO
 
-No estaba en el roadmap original — surgió al probar la simulación por primera vez en el editor y encontrar que nada de lo visible era fiable. Registrado aquí como hecho, con hallazgos que alimentan M2/M3.
+**Por qué primero:** hay un bug de mapeo de caras que corrompería en silencio cualquier sistema nuevo que muestree por cara, tres tests en rojo que nadie estaba mirando, y ~150 KB de código muerto que hace ruido en cada búsqueda.
 
-- [x] **Bug de picos infinitos en fronteras convergentes**: `RasterizedTectonics::Step()` sumaba elevación cada paso sin relajación entre celdas vecinas → paredes casi verticales de 12km. Fix: término de relajación difusiva (`FPlateMovementParams::DiffusionRate`) — `RasterizedTectonics.cpp`
-- [x] **Ese primer fix sobrecorrigió**: un blur completo cada paso, acumulado sobre miles de pasos, aplanaba el planeta entero. Fix: mezcla parcial (0.02 por defecto) en vez de reemplazo total — mismo archivo
-- [x] **`NanitePlanetActor` fantasma en `test.umap`**: radio = radio real de la Tierra (637.100.000 uu), dejado de pruebas anteriores, envolvía por completo al planeta de prueba (500m). Eliminado del nivel.
-- [x] **`PlayerStart` inexistente**: solo había un `PlayerStartPIE0` transitorio que se regeneraba cerca del origen en cada Play, dejando la cámara dentro del planeta. Hace falta un `PlayerStart` persistente colocado a mano (no se puede scriptar en un `.umap` binario) — colocado y verificado.
-- [x] **Fórmula de exageración de elevación acoplada al radio**: `ElevationOffset` escalaba con `VisualRadius`, contradiciendo su propio comentario ("1.0 = metros reales") y rompiéndose a escala real. Fix: `Elevation(m) * 100 * ElevationScale`, independiente del radio — `TectonicsTestActor.cpp` (dos copias: `CreatePlanetMesh` y `UpdateMeshColors`)
-- [x] **Escala de juguete → escala real de la Tierra**: `VisualRadius` 500m → 6.371km (`637100000.0f`), `ElevationScale` 50→15, `TimeScale` 100→1 (con nota honesta: no está calibrado contra velocidades reales de placas)
-- [x] Confirmado (no arreglado, documentado): `PlateSystem`/`BoundaryInteractions` calculan datos de elevación que nadie consume, en paralelo con `RasterizedTectonics` que sí se usa — ver M2
+- [x] **Unificar el mapeo cara↔dirección 3D en un único helper** — `CubeFaceMapping.h` (15-08-2026). Estaba escrito a mano 7 veces (5 previstas + 2 más encontradas al migrar: la tabla de tangentes de `RasterizedTectonics` y la generación de vértices de malla) y ya se había desincronizado:
+  - `UCubeSphereGrid::GetFaceAxes` para `+Z` da `U=(1,0,0) V=(0,1,0)` → dirección `(U, V, 1)`
+  - `URasterizedTectonics` case 4 (`+Z`) usa `FVector(U, -V, 1)` → **V invertida**. Lo mismo en `−Z`, invertida al revés.
+  - Efecto: el mapa de IDs de placa (Voronoi, sobre el Grid) y el de elevación (Raster) están **espejados en los dos casquetes polares**. Las fronteras dibujadas no coinciden con las montañas allí.
+  - Copias eliminadas: 3 en `TectonicsTestActor` (`GetSurfaceRadiusAtDirection`, `CreatePlanetMesh`, `UpdateMeshColors`), 2 en `RasterizedTectonics` (`InitializeFromPlateSystem`, `ApplyFractalNoise`), la tabla de tangentes de `RasterizedTectonics`, y las 2 de generación de vértices de malla. `UCubeSphereGrid::GetFaceAxes` ahora delega en el helper en vez de tener su propia tabla.
+  - Efecto secundario que no se había previsto: el convenio antiguo era **levógiro** en las dos caras polares (`AxisU × AxisV == −Normal`), lo que además de espejar los datos invertía el winding de los triángulos generados allí. Al unificar se corrige también eso.
+  - Cubierto por 4 tests nuevos en `Tests/CubeFaceMappingTests.cpp`: ida-y-vuelta exacta, dextrogiro en las 6 caras, acuerdo con el `Grid`, y cobertura de la esfera sin huecos.
 
-Detalle completo en `SPECS.md §5.3, §5.4`.
+- [ ] 🔴 **Arreglar los 3 tests que ya estaban en rojo** (descubierto el 15-08-2026 al ejecutar la suite; verificado que fallan también en `HEAD` sin ninguno de los cambios de F0). Que M3 y M4 se cerraran como "✅ completo" con la suite roja indica que **nunca se llegó a ejecutar**, solo a compilar:
+  - `Simu.CubeSphere.AdjacencyContinuity` — **124 errores** de continuidad de adyacencia entre caras. Es un bug real de corrección en el cruce entre caras, y **bloquea F4**: el drenaje necesita justo esa vecindad para enrutar ríos por los bordes del cubo.
+  - `Simu.Tectonics.BoundaryInteractionsSanity` y `Simu.Tectonics.ElevationStaysBounded` — ambos abortan en la primera línea porque `GeneratePlates()` devuelve `false`: *"JFA failed! Voronoi coverage: 697/6144 cells unassigned (11.34%)"*. El Jump Flooding deja entre el 11 % y el 19 % de las celdas sin asignar a resolución 32. Dos consecuencias: (a) hay que averiguar si también deja huecos a la resolución de producción (128), porque serían celdas sin placa en el mapa real; (b) esos dos tests **nunca han llegado a comprobar lo que dicen comprobar** — la cobertura de M4 es aún menor de lo documentado.
 
----
+- [ ] **Una sola asignación placa→celda.** Hoy hay dos que no coinciden: Voronoi/JFA sobre el Grid, y una búsqueda de centroide más cercano `O(Res²·N)` en `InitializeFromPlateSystem`. La segunda sobra.
+- [ ] **Borrar código muerto** (está en git si hace falta recuperarlo):
+  - `Streaming/ChunkStreamingManager` (27 KB) — 0 referencias externas
+  - `CubeSphereVisualizerComponent` (16 KB) — 0 referencias externas
+  - `PlateSimulationGPU` + `PlateMovementShader` + los 4 `.usf` (~50 KB) — todos los `Dispatch*` son `// TODO` vacíos
+- [ ] **Decidir el actor único.** `TectonicPlanetActor` hoy no hace nada útil: Nanite comentado (no dibuja terreno) y sin `RasterizedTectonics` (no simula relieve). `TectonicsTestActor` es el que funciona. Propuesta: quedarse con uno solo y retirar `Nanite/`, `LOD/`, `QuadTree/` a F6 — la ruta correcta para un planeta es **malla base + displacement desde textura** (lo que ya hace el test actor), no un `UStaticMesh` Nanite por parche construido síncronamente.
+- [ ] **Desactivar la llamada a `BoundaryInteractions::ProcessAllBoundaries`** hasta F1, donde por fin tendrá consumidor. Hoy es coste puro. **No borrar el archivo**: contiene física real (ángulos de subducción, esfuerzo acumulado, hotspots) que se conecta en F1.
 
-## M1.6 — Cámara de aproximación al planeta, con colisión ✅ IMPLEMENTADO (11-08-2026, sin verificar en editor)
+**Hecho cuando:** existe un único helper de mapeo de caras con test de ida-y-vuelta ✅, **la suite `Simu.*` pasa entera en verde**, y `grep` de las clases borradas no devuelve nada.
 
-🟡 Pedido explícitamente el 10-08-2026: con relieve realista (poco visible desde lejos, ver M1.5), hace falta poder acercarse a la superficie para juzgar el terreno de verdad.
+**Cómo ejecutar la suite** (no estaba documentado en ningún sitio, de ahí que se cerraran hitos sin correrla):
 
-- [x] `Simu/PlanetApproachPawn.h/.cpp`: pawn de cámara libre con velocidad interpolada **logarítmicamente** entre `MinSpeed`/`MaxSpeed` según la altitud sobre el terreno local (altitud varía en varios órdenes de magnitud - metros a miles de km - así que interpolación lineal habría dejado casi todo el rango útil comprimido en unos pocos frames)
-- [x] "Colisión" elegida: **Ruta B (consulta de altura)**, no colisión física real. Nuevo método `ATectonicsTestActor::GetSurfaceRadiusAtDirection()` reutiliza exactamente la misma fórmula que `CreatePlanetMesh`/`UpdateMeshColors` (nunca se desincroniza de lo que se ve), y el pawn recorta radialmente su posición si intenta meterse por debajo. Justificación: la malla se regenera con colisión desactivada a propósito (`TectonicsTestActor.cpp:576`, "es muy pesado") - recalcular colisión física real cada vez sería justo el problema de rendimiento que ese comentario evita
-- [x] Input por sondeo directo de teclado/ratón (mismo patrón que `TectonicsTestActor::HandleInput`), sin depender de assets de Enhanced Input que no se pueden crear sin el editor: WASD mueve, Q/E baja/sube, ratón mira
-- [x] `Simu/SimuGameMode.h/.cpp` + `GlobalDefaultGameMode` en `Config/DefaultEngine.ini` para que este pawn sea el que se posee al darle a Play (no se pudo hacer solo con .ini porque `AGameModeBase::DefaultPawnClass` no está marcado `config` en el motor)
-- [x] Corregido (11-08-2026, feedback del usuario): `MaxSpeed` por defecto era 30 km/s - a distancias orbitales (~15.000km) se sentía "MUY lento" (varios minutos para cruzar). Subido a 2.000 km/s (~7,5s para cruzar 15.000km) y `MaxSpeedAltitude` a ~1,5x el radio terrestre para que la curva logarítmica llegue a velocidad máxima a esa distancia
-- [ ] **No verificado en el editor.** Aviso importante: si el nivel `test.umap` tiene un GameMode Override en World Settings, ese override gana sobre `GlobalDefaultGameMode` del proyecto y el pawn nuevo no se usaría - si al darle a Play sigue apareciendo `DefaultPawn`, revisar World Settings > GameMode Override y ponerlo a "None" (o a `SimuGameMode` explícitamente)
-
-**Hecho cuando:** se puede pasar de vista orbital a estar de pie sobre una montaña generada por la simulación, sin clipping ni cambios manuales de velocidad de cámara. Código completo; falta la prueba real en editor.
-
----
-
-## M2 — Decidir y resolver CPU vs. GPU en tectónica, y la duplicidad de pipelines CPU ✅ DECIDIDO Y DOCUMENTADO (11-08-2026)
-
-🔴 Dos problemas de la misma familia (código construido en paralelo sin conectar). Resuelto por decisión documentada en código, no por implementación nueva — es lo que el propio "Hecho cuando" de abajo pedía.
-
-**A. GPU sin dispatch real** — **Ruta B elegida**: CPU ya cumple el rendimiento necesario (verificado en sesión: 500 pasos de `RasterizedTectonics::Step` en tests sin problema), y no hay evidencia que justifique invertir en Ruta A (completar dispatch real) sin antes perfilar. `PlateSimulationGPU.h` y `RasterizedTectonics.h` (SyncFromGPU/SyncToGPU) llevan ahora comentarios explícitos marcando que no están en el camino activo, con la razón y la referencia a esta decisión. Código conservado, no borrado (Ruta B tal cual la definía el roadmap).
-
-**B. `PlateSystem`/`BoundaryInteractions` vs `RasterizedTectonics`** — **`RasterizedTectonics` es la fuente de verdad** para elevación (confirmado por grep: nada lee `BoundaryInteractions::ElevationRateMaps`). `BoundaryInteractions.h` documenta esto junto a `ApplyElevationChanges`. La clase se conserva porque sigue siendo necesaria para otra lógica (SlabDepth, AccumulatedStress, vulcanismo, clasificación de fronteras) — no se borra `ElevationRateMaps` todavía porque acoplarlo o eliminarlo de forma segura requeriría más contexto del que da esta sesión; queda marcado explícitamente como código muerto pendiente en vez de ambiguo.
-
-**Hecho cuando:** no queda código con dispatch comentado sin explicar ni cálculo duplicado sin usar *sin documentar la decisión*. ✅ Ambos casos documentados en el propio código fuente, no solo en este roadmap.
+```
+& 'E:\Unreal\UE_5.8\Engine\Binaries\Win64\UnrealEditor-Cmd.exe' "D:\Portfolio\Simu\Simu.uproject" `
+    -ExecCmds="Automation RunTests Simu; Quit" -unattended -nopause -nosplash -NullRHI -log -stdout
+```
 
 ---
 
-## M3 — Cerrar los TODOs de correctness en LOD/QuadTree ✅ COMPLETO (11-08-2026)
+## F1 — Movimiento real de placas 🔴 EL BLOQUEADOR
 
-🟡 Afecta rendimiento (culling) y corrección visual (grietas entre caras).
+**Por qué:** sin esto no hay tectónica, y sin tectónica cambiante el resto del simulador no tiene nada que simular.
 
-- [x] Culling de frustum por nodo — implementado en `UCubeLODController::IsInFrustum` (test de cono cámara/nodo con bounding sphere conservador), no en `UpdateVisibleFaces` (confirmado sin callers, dejado como no-op documentado)
-- [x] Mapeo de aristas entre caras del cubo — `FCubeSphereQuadTree::GetCrossFaceNeighbors` implementado, portando la tabla de conexión y la transformación de rotación de `UCubeSphereGrid::GetNeighborCell` a coordenadas UV continuas
-- [x] Test de frustum contra bounding sphere en el LOD controller — mismo fix que el primer punto (es la misma función)
-- [x] Propagación de Voronoi entre caras — confirmado que la segunda pasada de `USphericalVoronoi::GenerateVoronoiTessellation` ya la resuelve correctamente; el TODO era una nota obsoleta sobre la primera pasada (JFA), no un bug real. Comentario corregido.
+Algoritmo elegido: **advección hacia atrás del campo de IDs de placa**. Para cada píxel de dirección `d`, se rota `d` hacia atrás por la rotación de cada placa (`−ω·Δt` sobre su polo de Euler) y se pregunta quién poseía ese punto el paso anterior:
 
-**Hecho cuando:** los 4 TODOs están resueltos o convertidos en tickets explícitos con justificación de por qué se posponen. ✅ Compilado y verificado sin errores nuevos.
+- **Un candidato** → la placa simplemente se movió.
+- **Dos o más** → colisión. Según los tipos de corteza: océano-continente y océano-océano ⇒ subducción; continente-continente ⇒ orogenia.
+- **Ninguno** → hueco. Es un rift: se crea corteza oceánica nueva con edad 0.
 
----
+Esto hace que subducción, dorsales y apertura de océanos sean **emergentes**, no guionizadas — y es donde `BoundaryInteractions` por fin tiene a quién alimentar.
 
-## M4 — Cobertura de test para el subsistema más grande ✅ NÚCLEO COMPLETO (11-08-2026)
+- [ ] Llamar de verdad a `UPlateKinematics::CalculatePlateRotation` desde `UTectonicPlateSystem::Step` y acumular la rotación por placa
+- [ ] Advección hacia atrás del campo `PlateIDData` en `URasterizedTectonics::Step`
+- [ ] Resolución de colisión (2+ candidatos) por tipo de corteza
+- [ ] Creación de corteza en huecos (0 candidatos), con edad 0 y elevación de dorsal
+- [ ] Destrucción de corteza en subducción — hoy `CreateNewCrust` no tiene contraparte (`TODO` en `BoundaryInteractions.cpp:609`)
+- [ ] Conectar `ElevationRateMaps` de `BoundaryInteractions` al raster: rellenar `ApplyElevationChanges()`, que hoy está vacía
+- [ ] Reactivar `ProcessAllBoundaries` (desactivada en F0)
+- [ ] Advectar también `CrustAge` y `CrustType` junto con el ID (si no, la corteza "cambia de tipo" al moverse)
 
-🟡 Hoy solo `CubeSphereGrid` tenía tests automatizados. Creado `Tests/TectonicsTests.cpp` con 3 suites:
+**Coste:** `O(Res²·N)` por paso. Con Res=512 y 12 placas son ~3,1 M operaciones — asumible si el paso tectónico corre a baja frecuencia (no cada frame). Presupuestarlo explícitamente, no dejarlo en el `Tick`.
 
-- [x] Test de regresión para `PlateKinematics` (rotación por cuaterniones sobre un polo de Euler conocido — 90° sobre +Z lleva (1,0,0)→(0,1,0) — y caso DeltaTime=0 = identidad)
-- [x] Test de `ClassifyBoundaryType` (convergente/divergente/transformante/ninguno según los 4 casos analíticos de velocidad relativa vs. normal)
-- [x] Test de regresión directo del bug de esta sesión: corre `RasterizedTectonics::Step` 500 veces y verifica que la elevación se mantiene acotada (≤12000m, ≥-12000m) **y** que sigue habiendo variación de relieve (>100m entre min y max) — falla tanto si vuelve el bug de picos infinitos como si vuelve la sobrecorrección que aplana el planeta
-- [x] Test de sanidad de `BoundaryInteractions`: corre `PlateSystem->Step` 50 veces (que internamente llama a `BoundaryInteractions::ProcessAllBoundaries`) y verifica que `SlabDepth`/`AccumulatedStress` se mantienen finitos - guarda contra NaN/Inf silenciosos en las fórmulas de subducción/orogenia
-- [ ] Tests específicos por tipo de frontera (subducción/orogenia/spreading/transformante) con casos sintéticos de placas conocidas — pendiente, cobertura hoy es de sanidad general, no por caso
-- [ ] Test de conservación de masa de corteza — pendiente. Nota: la implementación actual de `CreateNewCrust` no tiene una operación de destrucción de corteza equivalente (ver TODO en `BoundaryInteractions.cpp:609`), así que un test de conservación estricto fallaría hoy por diseño incompleto, no por bug - escribirlo tendría más sentido junto con esa implementación pendiente
-
-**Hecho cuando:** existe `Tests/TectonicsTests.cpp` corriendo en el framework de Automation de UE. ✅ (cobertura ampliable después, no bloquea)
-
----
-
-## M5 — Persistencia mínima ✅ COMPLETO Y VERIFICADO (11-08-2026)
-
-🟡 Ninguna sesión sobrevivía a un reinicio.
-
-- [x] `UTectonicSaveGame` (`Tectonics/TectonicSaveGame.h`): guarda semilla, parámetros de grid/raster, estado cinemático evolucionado de cada placa (`FTectonicPlate` completo) y la elevación acumulada de las 6 caras
-- [x] Guardado/carga vía `USaveGame` + `UGameplayStatics::SaveGameToSlot/LoadGameFromSlot`
-- [x] Diseño verificado por código (no solo asumido): `USphericalVoronoi::Initialize` y `UTectonicPlateSystem::InitializePlateProperties` llaman a `FMath::RandInit(Config.RandomSeed [+1000])` explícitamente, así que la topología (IDs de placa por celda) es reproducible solo con la semilla — no hace falta serializarla, se regenera en `LoadSimulation` llamando a `InitializeSystems()` con la misma semilla y sobreescribiendo encima el estado cinemático y la elevación guardados
-- [x] Atajos en `TectonicsTestActor`: `K` guarda, `L` carga (slot fijo `"SimuSnapshot"`)
-- [x] Verificado en editor (11-08-2026): `K` guarda y `L` carga sin errores en una sesión de Play real
-- [x] Confirmado por el usuario: el planeta se ve idéntico tras cargar (mismas placas, mismo relieve)
-
-**Hecho cuando:** se puede cerrar el editor, reabrir, cargar un snapshot guardado, y el planeta se ve idéntico. ✅
+**Hecho cuando:**
+- Test: tras N pasos, el centroide de una placa se ha desplazado la distancia angular que predice `ω·N·Δt` (±tolerancia).
+- Test: el número de celdas por placa cambia con el tiempo (las placas crecen y menguan) — falla si el campo de IDs sigue congelado.
+- Test de conservación: área de corteza creada en dorsales ≈ área destruida en subducción, dentro de un margen.
+- Visual: dos continentes que empiezan separados colisionan y levantan una cordillera en el punto de contacto.
 
 ---
 
-## M6+ — Retomar el roadmap de producto original
+## F2 — Isostasia y nivel del mar 🔴
 
-Con M1–M5 resueltos, el resto de fases descritas en `docs/ROADMAP.md` (Fase 3: Atmósfera, Fase 4: Erosión/Hidrología, Fase 5: Biosfera) siguen siendo el plan de producto válido:
+**Por qué antes del agua:** sin nivel del mar explícito no hay costa, y sin costa no hay dónde depositar sedimento ni desde dónde evaporar.
 
-- [ ] **Atmósfera** (Shallow Water Equations + Coriolis + ciclo del agua) — `docs/04-atmosfera-clima.md`
-- [ ] **Erosión real** (Pipe Model reemplazando el `SimpleFlowSimulation` actual) — `docs/05-hidrosfera-erosion.md`
-- [ ] **Climatología profunda** (ciclo carbono-silicatos, albedo, feedback hielo-albedo) — `docs/06-climatologia-efecto-invernadero.md`
-- [ ] **Biosfera/agentes evolutivos** (Niagara, genoma vectorial) — `docs/07-biosfera-evolucion.md`
+- [ ] Constante/estado de **nivel del mar** explícito (hoy no existe: el océano es "elevación negativa" pintada de azul)
+- [ ] **Grosor de corteza** como campo simulado, no solo elevación. La elevación pasa a derivarse de la isostasia, no a ser el estado primario
+- [ ] **Equilibrio isostático** (flotación de Airy): corteza gruesa/ligera flota alta. Es lo que hace que las montañas tengan raíz y que al erosionarlas la superficie rebote
+- [ ] **Conservación del volumen de océano**: el nivel del mar sube si la cuenca oceánica se reduce (dorsales jóvenes y calientes ocupan volumen)
+- [ ] Subsidencia térmica: la corteza oceánica se hunde al enfriarse con la edad (`CrustAge` ya se rastrea, hoy no se usa para nada)
 
-Antes de arrancar Atmósfera, conviene decidir si corre en el mismo pipeline CPU que tectónica hoy, o si es el punto natural para invertir en GPU (las SWE son mucho más sensibles a paralelismo que la tectónica rasterizada actual).
+**Hecho cuando:** una cordillera erosionada en F4 rebota isostáticamente en vez de desaparecer; y el nivel del mar responde a la edad media de la corteza oceánica.
 
 ---
 
-## Riesgos heredados del plan original (siguen vigentes)
+## F3 — Clima mínimo viable 🟡
 
-De `docs/ROADMAP.md`: inestabilidad numérica en SWE, VRAM insuficiente a resolución alta, complejidad de bordes del cubo (parcialmente ya materializada como los TODOs de M3), rendimiento por debajo de 60 FPS.
+**Por qué aquí y no después de la erosión:** la erosión hidráulica necesita **caudal**, y el caudal necesita **precipitación**. Sin esto, F4 tendría que inventarse una lluvia uniforme, que es exactamente lo que impide que se formen desiertos, sombras de lluvia y cuencas realistas.
 
-**Riesgo nuevo, confirmado el 10-08-2026:** los parámetros de la simulación (`DiffusionRate`, `OrogenyFactor`, `SpreadingFactor`, `TimeScale`, `ElevationScale`...) no están calibrados contra nada real ni entre sí — se ajustan por observación y son fáciles de desequilibrar (ver M1.5, dos iteraciones para encontrar un punto medio razonable en `DiffusionRate`). Cualquier cambio en uno puede requerir re-ajustar los demás. Vale la pena documentar el punto de equilibrio encontrado como base, no como valor final.
+Esta fase es deliberadamente **barata**: campos diagnósticos, no dinámica de fluidos. La atmósfera completa es F5.
+
+- [ ] **Temperatura** = f(latitud, altitud, ¿estación?). Gradiente adiabático con la altura
+- [ ] **Humedad** transportada por un campo de viento sencillo (bandas por latitud: alisios, oestes, polares). No SWE todavía
+- [ ] **Precipitación orográfica**: la humedad precipita al subir sobre relieve, y la masa de aire queda seca a sotavento ⇒ sombras de lluvia
+- [ ] Evaporación proporcional a temperatura sobre superficie de agua
+
+**Hecho cuando:** el mapa de precipitación muestra una asimetría clara barlovento/sotavento en una cordillera generada por F1, y desiertos en el interior de continentes grandes.
+
+---
+
+## F4 — Erosión hidráulica y transporte de sedimento 🟡
+
+**Por qué ahora:** ya hay relieve que cambia (F1), costa donde depositar (F2) y lluvia que lo alimenta (F3).
+
+- [ ] **Acumulación de flujo** sobre la esfera: dirección de drenaje por celda y caudal acumulado aguas abajo. Hay que resolver el cruce entre caras del cubo (`GetCrossFaceNeighbors` ya existe, de M3)
+- [ ] **Tratamiento de depresiones** (lagos/sumideros): rellenar o enrutar. Sin esto el drenaje se atasca
+- [ ] **Incisión fluvial** (stream power): erosión ∝ caudal^m · pendiente^n
+- [ ] **Transporte y deposición** de sedimento: capacidad de carga, deposición al perder pendiente ⇒ llanuras aluviales y deltas
+- [ ] **Erosión termal / mass wasting**: ya existe de facto como `FPlateMovementParams::DiffusionRate`. **Migrarla aquí** con su justificación física en vez de dejarla como un hack anti-picos dentro del paso tectónico
+- [ ] Realimentación a F2: el sedimento depositado añade masa (subsidencia), la roca erosionada la quita (rebote isostático)
+
+**Hecho cuando:** aparecen redes de drenaje dendríticas visibles, los ríos desembocan en el mar formando deltas, y una montaña aislada se degrada con el tiempo en vez de crecer indefinidamente.
+
+**Nota de calibración:** este es el punto donde `DiffusionRate`/`OrogenyFactor` dejan de ser parámetros libres. La erosión debe equilibrar el levantamiento tectónico — si no, o se aplana el planeta o se dispara a 12000 m. Ese equilibrio es un resultado observable, no un valor a fijar a mano.
+
+---
+
+## F5 — Atmósfera y ciclo del agua completo 🟢
+
+Sustituye el clima diagnóstico de F3 por dinámica real.
+
+- [ ] Shallow Water Equations + Coriolis — `docs/04-atmosfera-clima.md`
+- [ ] Ciclo del agua cerrado: evaporación → advección → condensación → precipitación → escorrentía → océano, con **balance de masa verificable**
+- [ ] Corrientes oceánicas y transporte de calor
+- [ ] Hielo: casquetes polares, glaciares, y su erosión (distinta de la fluvial)
+- [ ] Climatología profunda: ciclo carbono-silicatos, albedo, realimentación hielo-albedo — `docs/06-climatologia-efecto-invernadero.md`
+
+**Riesgo conocido:** las SWE son numéricamente inestables si el paso de tiempo no respeta CFL. Es el candidato natural para invertir en GPU (mucho más sensible a paralelismo que la tectónica rasterizada).
+
+---
+
+## F6 — Rendimiento, LOD y GPU 🟢
+
+Deliberadamente **al final**. Optimizar un pipeline cuya física aún no está definida es tirar el trabajo.
+
+- [ ] Reconsiderar el renderizado planetario: malla base + displacement desde textura, frente al `UStaticMesh` Nanite por parche que se abandonó en F0
+- [ ] Reintroducir QuadTree/LOD/streaming sobre el enfoque elegido
+- [ ] Mover los campos de simulación a texturas GPU y los pasos a compute shaders
+- [ ] Cachear el dibujo de fronteras de placa (deuda de M1: `DrawPlateBoundaries` recorre la rejilla entera cada frame; hoy solo está desactivado por defecto, no arreglado)
+
+---
+
+## F7 — Biosfera 🟢
+
+- [ ] Agentes evolutivos, genoma vectorial, Niagara — `docs/07-biosfera-evolucion.md`
+
+---
+
+## Riesgos vigentes
+
+- **Calibración cruzada de parámetros.** `DiffusionRate`, `OrogenyFactor`, `SpreadingFactor`, `TimeScale`, `ElevationScale` no están calibrados contra nada real ni entre sí; tocar uno obliga a reajustar los demás. F4 debería convertir parte de esto en un equilibrio emergente en vez de valores fijados a mano.
+- **Coste `O(Res²)` acumulativo.** Cada fase añade campos que recorren las 6 caras. Sin presupuesto de tiempo por paso y desacople del framerate, se repite la espiral de la muerte de M1.
+- **Bordes del cubo.** Cada sistema nuevo que necesite vecindad (drenaje en F4, advección en F5) vuelve a pagar el problema de las costuras entre caras. Es la razón por la que F0 unifica el mapeo antes de empezar.
+- **Estabilidad numérica de las SWE** y **VRAM a resolución alta** (heredados del plan original).
+
+---
+
+## Historial — M0 a M5 (10 y 11-08-2026)
+
+Trabajo previo, resumido. Se conserva porque documenta bugs reales y decisiones, pero **léelo con las correcciones de la auditoría del 15-08-2026**.
+
+### Válido y aprovechable
+- **M0** — `git init`, `.gitignore`, baseline commiteado.
+- **M1.5** — Sesión de depuración de `TectonicsTestActor`: bug de picos infinitos en fronteras convergentes (fix: término difusivo) y su sobrecorrección (fix: mezcla parcial 0.02). Fórmula de exageración de elevación desacoplada del radio. Escala de juguete → escala real de la Tierra.
+- **M1.6** — `PlanetApproachPawn`: cámara con velocidad interpolada logarítmicamente según altitud, y "colisión" por consulta de altura (`GetSurfaceRadiusAtDirection`) en vez de colisión física. Brújula de depuración.
+- **M3** — Culling de frustum (`UCubeLODController::IsInFrustum`) y mapeo de aristas entre caras (`FCubeSphereQuadTree::GetCrossFaceNeighbors`). **`GetCrossFaceNeighbors` se reutiliza en F4** para el drenaje.
+- **M5** — Persistencia (`UTectonicSaveGame`): guarda semilla, estado cinemático y elevación; la topología se regenera desde la semilla. Verificado en editor.
+
+### Correcciones de la auditoría
+- **M1** quedó parado en el punto correcto: la elevación de `RasterizedTectonics` nunca llegó al heightmap Nanite. El diagnóstico de "deuda arquitectónica seria" en `UPlanetNaniteMesh` (build síncrono y bloqueante por parche) era acertado — **F0 propone abandonar ese pipeline**, no arreglarlo.
+- **M2** cerró como "decidido y documentado" que CPU es la ruta activa. Correcto, pero la conclusión de que existían "dos pipelines CPU redundantes" se quedó corta: `BoundaryInteractions` no es redundante, es **inerte** (`ApplyElevationChanges()` vacía).
+- **M4** dio por buena la cobertura de tests. Los tests pasan, pero **ninguno detecta que las placas no se mueven** — `UPlateKinematics` se testea de forma aislada mientras nadie lo llama en producción. F1 añade los tests que habrían pillado esto.
+- El antiguo **M6+** listaba "Erosión real (Pipe Model reemplazando el `SimpleFlowSimulation` actual)". Redacción engañosa: no hay nada que reemplazar.

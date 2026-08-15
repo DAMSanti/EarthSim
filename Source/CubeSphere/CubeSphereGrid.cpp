@@ -3,6 +3,7 @@
 // Sprint 1.1 - Estructura de Datos Espaciales
 
 #include "CubeSphereGrid.h"
+#include "CubeFaceMapping.h"
 
 UCubeSphereGrid::UCubeSphereGrid()
     : Resolution(CubeSphereConstants::DefaultResolution)
@@ -127,43 +128,10 @@ ECSCubeFace UCubeSphereGrid::GetDominantFace(const FVector& Point)
 
 void UCubeSphereGrid::GetFaceAxes(ECSCubeFace Face, FVector& OutAxisU, FVector& OutAxisV, FVector& OutNormal) const
 {
-    switch (Face)
-    {
-        case ECSCubeFace::PositiveX:
-            OutNormal = FVector(1, 0, 0);
-            OutAxisU = FVector(0, 1, 0);
-            OutAxisV = FVector(0, 0, 1);
-            break;
-        case ECSCubeFace::NegativeX:
-            OutNormal = FVector(-1, 0, 0);
-            OutAxisU = FVector(0, -1, 0);
-            OutAxisV = FVector(0, 0, 1);
-            break;
-        case ECSCubeFace::PositiveY:
-            OutNormal = FVector(0, 1, 0);
-            OutAxisU = FVector(-1, 0, 0);
-            OutAxisV = FVector(0, 0, 1);
-            break;
-        case ECSCubeFace::NegativeY:
-            OutNormal = FVector(0, -1, 0);
-            OutAxisU = FVector(1, 0, 0);
-            OutAxisV = FVector(0, 0, 1);
-            break;
-        case ECSCubeFace::PositiveZ:
-            OutNormal = FVector(0, 0, 1);
-            OutAxisU = FVector(1, 0, 0);
-            OutAxisV = FVector(0, 1, 0);
-            break;
-        case ECSCubeFace::NegativeZ:
-            OutNormal = FVector(0, 0, -1);
-            OutAxisU = FVector(1, 0, 0);
-            OutAxisV = FVector(0, -1, 0);
-            break;
-        default:
-            OutNormal = FVector::UpVector;
-            OutAxisU = FVector::ForwardVector;
-            OutAxisV = FVector::RightVector;
-    }
+    // La tabla vive en CubeFaceMapping.h, que es la fuente única de verdad del proyecto
+    // (ver ROADMAP.md F0). Este método se conserva porque es parte de la API pública del
+    // Grid y tiene varios callers, pero ya no define nada por su cuenta.
+    CubeFaceMapping::GetFaceAxes(Face, OutAxisU, OutAxisV, OutNormal);
 }
 
 FVector UCubeSphereGrid::FaceUVToCubePoint(ECSCubeFace Face, const FVector2D& UV) const

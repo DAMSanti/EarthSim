@@ -2,6 +2,7 @@
 
 #include "TectonicsTestActor.h"
 #include "../CubeSphereGrid.h"
+#include "../CubeFaceMapping.h"
 #include "TectonicTypes.h"
 #include "TectonicPlateSystem.h"
 #include "PlateKinematics.h"
@@ -355,37 +356,13 @@ float ATectonicsTestActor::GetSurfaceRadiusAtDirection(const FVector& Direction)
         return VisualRadius;
     }
 
-    FVector Normal = Direction.GetSafeNormal();
-    FVector AbsNormal = Normal.GetAbs();
+    // Conversion unificada (CubeFaceMapping.h, ROADMAP.md F0). Antes esto era un bloque
+    // de 20 lineas copiado tambien en CreatePlanetMesh y UpdateMeshColors: mantener las
+    // tres copias sincronizadas a mano es exactamente lo que fallo en los polos.
     ECSCubeFace DominantFace;
-    float FaceU, FaceV;
+    float TexU, TexV;
+    CubeFaceMapping::DirectionToFaceTexUV(Direction.GetSafeNormal(), DominantFace, TexU, TexV);
 
-    // Misma logica de cara dominante que UpdateMeshColors, para muestrear exactamente
-    // la misma elevacion que se esta renderizando.
-    if (AbsNormal.X >= AbsNormal.Y && AbsNormal.X >= AbsNormal.Z)
-    {
-        DominantFace = Normal.X >= 0 ? ECSCubeFace::PositiveX : ECSCubeFace::NegativeX;
-        float Scale = 1.0f / AbsNormal.X;
-        if (Normal.X >= 0) { FaceU = Normal.Y * Scale; FaceV = Normal.Z * Scale; }
-        else { FaceU = -Normal.Y * Scale; FaceV = Normal.Z * Scale; }
-    }
-    else if (AbsNormal.Y >= AbsNormal.X && AbsNormal.Y >= AbsNormal.Z)
-    {
-        DominantFace = Normal.Y >= 0 ? ECSCubeFace::PositiveY : ECSCubeFace::NegativeY;
-        float Scale = 1.0f / AbsNormal.Y;
-        if (Normal.Y >= 0) { FaceU = -Normal.X * Scale; FaceV = Normal.Z * Scale; }
-        else { FaceU = Normal.X * Scale; FaceV = Normal.Z * Scale; }
-    }
-    else
-    {
-        DominantFace = Normal.Z >= 0 ? ECSCubeFace::PositiveZ : ECSCubeFace::NegativeZ;
-        float Scale = 1.0f / AbsNormal.Z;
-        if (Normal.Z >= 0) { FaceU = Normal.X * Scale; FaceV = -Normal.Y * Scale; }
-        else { FaceU = Normal.X * Scale; FaceV = Normal.Y * Scale; }
-    }
-
-    float TexU = (FaceU + 1.0f) * 0.5f;
-    float TexV = (FaceV + 1.0f) * 0.5f;
     float Elevation = RasterizedTectonics->GetElevationBilinear(DominantFace, TexU, TexV);
 
     float ElevationOffset = Elevation * 100.0f * ElevationScale;
@@ -549,17 +526,7 @@ void ATectonicsTestActor::CreatePlanetMesh()
                 float V = (static_cast<float>(Y) / Resolution) * 2.0f - 1.0f;
 
                 // Proyección del cubo a esfera (DEBE coincidir exactamente con RasterizedTectonics)
-                FVector CubePos;
-                switch (CubeFace)
-                {
-                    case ECSCubeFace::PositiveX: CubePos = FVector(1.0f, U, V); break;      // Face 0 - Front
-                    case ECSCubeFace::NegativeX: CubePos = FVector(-1.0f, -U, V); break;    // Face 1 - Back
-                    case ECSCubeFace::PositiveY: CubePos = FVector(-U, 1.0f, V); break;     // Face 2 - Right
-                    case ECSCubeFace::NegativeY: CubePos = FVector(U, -1.0f, V); break;     // Face 3 - Left
-                    case ECSCubeFace::PositiveZ: CubePos = FVector(U, -V, 1.0f); break;     // Face 4 - Top
-                    case ECSCubeFace::NegativeZ: CubePos = FVector(U, V, -1.0f); break;     // Face 5 - Bottom
-                    default: CubePos = FVector(1.0f, U, V); break;
-                }
+                FVector CubePos = CubeFaceMapping::FaceUVToCubePoint(CubeFace, U, V);
                 
                 // Normalizar para proyectar a esfera
                 FVector Normal = CubePos.GetSafeNormal();
@@ -570,53 +537,10 @@ void ATectonicsTestActor::CreatePlanetMesh()
                 {
                     // Para garantizar continuidad en los bordes, usar la cara dominante
                     // basada en la posición esférica, no la cara actual del loop
-                    FVector AbsNormal = Normal.GetAbs();
+                    // Conversión unificada, ver CubeFaceMapping.h (ROADMAP.md F0).
                     ECSCubeFace DominantFace;
-                    float FaceU, FaceV;
-                    
-                    if (AbsNormal.X >= AbsNormal.Y && AbsNormal.X >= AbsNormal.Z)
-                    {
-                        // Cara X dominante
-                        DominantFace = Normal.X >= 0 ? ECSCubeFace::PositiveX : ECSCubeFace::NegativeX;
-                        float Scale = 1.0f / AbsNormal.X;
-                        if (Normal.X >= 0) {
-                            FaceU = Normal.Y * Scale;
-                            FaceV = Normal.Z * Scale;
-                        } else {
-                            FaceU = -Normal.Y * Scale;
-                            FaceV = Normal.Z * Scale;
-                        }
-                    }
-                    else if (AbsNormal.Y >= AbsNormal.X && AbsNormal.Y >= AbsNormal.Z)
-                    {
-                        // Cara Y dominante
-                        DominantFace = Normal.Y >= 0 ? ECSCubeFace::PositiveY : ECSCubeFace::NegativeY;
-                        float Scale = 1.0f / AbsNormal.Y;
-                        if (Normal.Y >= 0) {
-                            FaceU = -Normal.X * Scale;
-                            FaceV = Normal.Z * Scale;
-                        } else {
-                            FaceU = Normal.X * Scale;
-                            FaceV = Normal.Z * Scale;
-                        }
-                    }
-                    else
-                    {
-                        // Cara Z dominante
-                        DominantFace = Normal.Z >= 0 ? ECSCubeFace::PositiveZ : ECSCubeFace::NegativeZ;
-                        float Scale = 1.0f / AbsNormal.Z;
-                        if (Normal.Z >= 0) {
-                            FaceU = Normal.X * Scale;
-                            FaceV = -Normal.Y * Scale;
-                        } else {
-                            FaceU = Normal.X * Scale;
-                            FaceV = Normal.Y * Scale;
-                        }
-                    }
-                    
-                    // Convertir UV [-1,1] a coordenadas normalizadas [0, 1] para interpolación bilineal
-                    float TexU = (FaceU + 1.0f) * 0.5f;
-                    float TexV = (FaceV + 1.0f) * 0.5f;
+                    float TexU, TexV;
+                    CubeFaceMapping::DirectionToFaceTexUV(Normal, DominantFace, TexU, TexV);
                     Elevation = RasterizedTectonics->GetElevationBilinear(DominantFace, TexU, TexV);
                 }
                 

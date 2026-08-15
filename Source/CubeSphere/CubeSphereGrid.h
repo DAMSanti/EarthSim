@@ -303,6 +303,9 @@ private:
     // Convierte coordenadas UV y cara a punto en el cubo [-1, 1]
     FVector FaceUVToCubePoint(ECSCubeFace Face, const FVector2D& UV) const;
 
-    // Obtiene los ejes locales de una cara
+public:
+    // Obtiene los ejes locales de una cara. Delega en CubeFaceMapping::GetFaceAxes, que es
+    // la fuente única de verdad del convenio (ver ROADMAP.md F0). Público para que el test
+    // de regresión pueda verificar que el Grid no se salga del convenio compartido.
     void GetFaceAxes(ECSCubeFace Face, FVector& OutAxisU, FVector& OutAxisV, FVector& OutNormal) const;
 };

@@ -3,6 +3,7 @@
 #include "RasterizedTectonics.h"
 #include "TectonicPlateSystem.h"
 #include "../CubeSphereGrid.h"
+#include "../CubeFaceMapping.h"
 #include "../Noise/SimplexNoise.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogRasterizedTectonics, Log, All);
@@ -134,25 +135,11 @@ void URasterizedTectonics::InitializeFromPlateSystem()
         {
             for (int32 X = 0; X < Resolution; ++X)
             {
-                // Convertir coordenada de textura a posición 3D
-                // UV va de 0 a 1, mapear a -1 a 1 para la cara del cubo
-                const float U = (static_cast<float>(X) + 0.5f) / static_cast<float>(Resolution) * 2.0f - 1.0f;
-                const float V = (static_cast<float>(Y) + 0.5f) / static_cast<float>(Resolution) * 2.0f - 1.0f;
-
-                // Obtener posición en el cubo y normalizar a esfera
-                FVector CubePos;
-                switch (FaceIdx)
-                {
-                case 0:  CubePos = FVector(1.0f, U, V); break;     // Front
-                case 1:  CubePos = FVector(-1.0f, -U, V); break;   // Back
-                case 2:  CubePos = FVector(-U, 1.0f, V); break;    // Right
-                case 3:  CubePos = FVector(U, -1.0f, V); break;    // Left
-                case 4:  CubePos = FVector(U, -V, 1.0f); break;    // Top
-                case 5:  CubePos = FVector(U, V, -1.0f); break;    // Bottom
-                default: CubePos = FVector(0, 0, 1); break;
-                }
-
-                const FVector SphereDir = CubePos.GetSafeNormal();
+                // Convención unificada en CubeFaceMapping (ver ROADMAP.md F0): antes había
+                // aquí un switch propio que invertía V en las dos caras polares respecto
+                // al del Grid, dejando espejados el mapa de placas y el de elevación.
+                const FVector SphereDir = CubeFaceMapping::PixelToDirection(
+                    static_cast<ECSCubeFace>(FaceIdx), X, Y, Resolution);
                 const FVector SpherePos = SphereDir * Radius;
 
                 // Buscar placa más cercana
@@ -228,17 +215,10 @@ void URasterizedTectonics::InitializeFromPlateSystem()
                 
                 // Proyectar a 2D tangente a la superficie (usando U y V locales)
                 // Para simplificar, usamos las componentes Y y Z de la velocidad
-                FVector TangentU, TangentV;
-                switch (FaceIdx)
-                {
-                case 0:  TangentU = FVector(0, 1, 0); TangentV = FVector(0, 0, 1); break;
-                case 1:  TangentU = FVector(0, -1, 0); TangentV = FVector(0, 0, 1); break;
-                case 2:  TangentU = FVector(-1, 0, 0); TangentV = FVector(0, 0, 1); break;
-                case 3:  TangentU = FVector(1, 0, 0); TangentV = FVector(0, 0, 1); break;
-                case 4:  TangentU = FVector(1, 0, 0); TangentV = FVector(0, -1, 0); break;
-                case 5:  TangentU = FVector(1, 0, 0); TangentV = FVector(0, 1, 0); break;
-                default: TangentU = FVector(0, 1, 0); TangentV = FVector(0, 0, 1); break;
-                }
+                // Ejes locales de la cara desde la tabla única (ver CubeFaceMapping.h).
+                // La copia que había aquí también tenía la V polar invertida.
+                FVector TangentU, TangentV, FaceNormal;
+                CubeFaceMapping::GetFaceAxes(static_cast<ECSCubeFace>(FaceIdx), TangentU, TangentV, FaceNormal);
                 
                 float VelU = FVector::DotProduct(Velocity3D, TangentU);
                 float VelV = FVector::DotProduct(Velocity3D, TangentV);
@@ -260,9 +240,7 @@ void URasterizedTectonics::ApplyFractalNoise(const FFractalNoiseParams& Params)
 
     // Inicializar el generador de ruido con la semilla
     FSimplexNoise::Initialize(Params.Seed);
-    
-    const float Radius = Grid->GetRadius();
-    
+
     UE_LOG(LogRasterizedTectonics, Log, TEXT("Applying fractal noise with seed %d"), Params.Seed);
 
     for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
@@ -273,23 +251,11 @@ void URasterizedTectonics::ApplyFractalNoise(const FFractalNoiseParams& Params)
         {
             for (int32 X = 0; X < Resolution; ++X)
             {
-                // Convertir coordenada de textura a posición 3D
-                const float U = (static_cast<float>(X) + 0.5f) / static_cast<float>(Resolution) * 2.0f - 1.0f;
-                const float V = (static_cast<float>(Y) + 0.5f) / static_cast<float>(Resolution) * 2.0f - 1.0f;
-
-                FVector CubePos;
-                switch (FaceIdx)
-                {
-                case 0:  CubePos = FVector(1.0f, U, V); break;
-                case 1:  CubePos = FVector(-1.0f, -U, V); break;
-                case 2:  CubePos = FVector(-U, 1.0f, V); break;
-                case 3:  CubePos = FVector(U, -1.0f, V); break;
-                case 4:  CubePos = FVector(U, -V, 1.0f); break;
-                case 5:  CubePos = FVector(U, V, -1.0f); break;
-                default: CubePos = FVector(0, 0, 1); break;
-                }
-
-                const FVector SphereDir = CubePos.GetSafeNormal();
+                // Misma conversión unificada que InitializeFromPlateSystem (CubeFaceMapping.h).
+                // Es imprescindible que ambas usen exactamente la misma: este ruido se suma
+                // encima de la elevación que aquella escribió.
+                const FVector SphereDir = CubeFaceMapping::PixelToDirection(
+                    static_cast<ECSCubeFace>(FaceIdx), X, Y, Resolution);
                 const int32 LinearIdx = GetLinearIndex(X, Y);
                 const bool bIsContinental = (Face.CrustTypeData[LinearIdx] == 1);
                 

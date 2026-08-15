@@ -1,5 +1,9 @@
 # 🗺️ Roadmap - Simulación Planetaria
 
+> ⚠️ **Este NO es el plan de trabajo activo.** Es la visión de producto original (12+ meses, fases F1–F5), escrita antes de que existiera el código. Sus fechas y su orden no están validados contra el estado real.
+>
+> El plan activo es [`/ROADMAP.md`](../ROADMAP.md) en la raíz del repositorio, reordenado por dependencia técnica tras la auditoría del 15-08-2026. Usa este documento como referencia de **alcance y contenido físico** (qué modelos usar, qué ecuaciones), no de orden ni de fechas.
+
 ## Visión General del Proyecto
 
 **Duración Total Estimada:** 12+ meses  
