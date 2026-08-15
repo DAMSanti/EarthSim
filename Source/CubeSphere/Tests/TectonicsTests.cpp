@@ -3,6 +3,7 @@
 
 #include "Misc/AutomationTest.h"
 #include "CubeSphereGrid.h"
+#include "CubeFaceMapping.h"
 #include "Tectonics/PlateKinematics.h"
 #include "Tectonics/TectonicPlateSystem.h"
 #include "Tectonics/RasterizedTectonics.h"
@@ -176,6 +177,132 @@ bool FBoundaryInteractionsSanityTest::RunTest(const FString& Parameters)
         }
     }
     TestTrue(TEXT("SlabDepth y AccumulatedStress se mantienen finitos tras 50 pasos"), bAllFinite);
+
+    return true;
+}
+
+// ============================================================
+// Regresión: la elevación debe ser continua a través de las costuras del cubo.
+//
+// Bug encontrado el 15-08-2026 mirando una captura del planeta: en el limbo se veía un
+// escalón. Causa: SmoothElevation y la difusión de Step() recortaban con FMath::Clamp al
+// borde de la cara, o sea trataban cada cara como una imagen aislada. En el borde el
+// kernel se muestreaba a sí mismo en vez de al vecino real del otro lado de la costura,
+// así que la fila de borde se sesgaba respecto a su vecina. Y como la difusión corre en
+// CADA paso, la discontinuidad crecía con el tiempo a lo largo de las 12 aristas.
+//
+// El test compara la diferencia media de elevación entre píxeles vecinos CRUZANDO una
+// costura contra la de píxeles vecinos DENTRO de una cara. Sobre un campo continuo las
+// dos deben ser del mismo orden; si la costura se sesga, la primera se dispara.
+//
+// El calculo del vecino se rehace aqui a proposito con CubeFaceMapping en vez de llamar
+// al helper de URasterizedTectonics: si ambos compartieran implementacion, un error en
+// ella haria pasar el test igualmente.
+// ============================================================
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRasterizedTectonicsSeamContinuityTest,
+    "Simu.Tectonics.SeamContinuity",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FRasterizedTectonicsSeamContinuityTest::RunTest(const FString& Parameters)
+{
+    const int32 Res = 32;
+
+    UCubeSphereGrid* Grid = NewObject<UCubeSphereGrid>();
+    Grid->Initialize(32, 637100000.0f);
+
+    FPlateGenerationConfig Config;
+    Config.NumPlates = 4;
+    Config.bUseFixedSeed = true;
+    Config.RandomSeed = 7;
+
+    UTectonicPlateSystem* PlateSystem = NewObject<UTectonicPlateSystem>();
+    PlateSystem->Initialize(Grid, Config);
+    if (!TestTrue(TEXT("GeneratePlates debe tener exito"), PlateSystem->GeneratePlates()))
+    {
+        return false;
+    }
+
+    URasterizedTectonics* Raster = NewObject<URasterizedTectonics>();
+    Raster->Initialize(Grid, PlateSystem, Res);
+
+    // Suavizado FUERTE a proposito. La primera version de este test corria 300 pasos de
+    // simulacion y no detectaba el bug: el ruido fractal deja saltos enormes entre
+    // pixeles vecinos por todas partes, y el sesgo de costura quedaba enterrado en ese
+    // ruido. Con suavizado fuerte el campo converge a algo casi plano en el interior de
+    // cada cara, asi que cualquier escalon que sobreviva en las costuras destaca: es la
+    // condicion que separa "vecinos reales" de "recorte al borde".
+    Raster->SmoothElevation(60);
+
+    double SeamSum = 0.0;   int32 SeamCount = 0;
+    double InnerSum = 0.0;  int32 InnerCount = 0;
+
+    const int32 DX[4] = { 1, -1, 0, 0 };
+    const int32 DY[4] = { 0, 0, 1, -1 };
+
+    for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
+    {
+        const ECSCubeFace Face = static_cast<ECSCubeFace>(FaceIdx);
+
+        for (int32 Y = 0; Y < Res; ++Y)
+        {
+            for (int32 X = 0; X < Res; ++X)
+            {
+                const float Here = Raster->GetElevationAt(Face, X, Y);
+
+                for (int32 D = 0; D < 4; ++D)
+                {
+                    const int32 NX = X + DX[D];
+                    const int32 NY = Y + DY[D];
+                    const bool bCrossesSeam = (NX < 0 || NX >= Res || NY < 0 || NY >= Res);
+
+                    float There = 0.0f;
+                    if (!bCrossesSeam)
+                    {
+                        There = Raster->GetElevationAt(Face, NX, NY);
+                    }
+                    else
+                    {
+                        // Reproyección geométrica: salirse del cuadrado UV y ver en qué
+                        // cara cae de verdad la dirección resultante.
+                        const float U = (static_cast<float>(NX) + 0.5f) / Res * 2.0f - 1.0f;
+                        const float V = (static_cast<float>(NY) + 0.5f) / Res * 2.0f - 1.0f;
+                        const FVector Dir = CubeFaceMapping::FaceUVToCubePoint(Face, U, V).GetSafeNormal();
+
+                        ECSCubeFace NeighborFace;
+                        float NU, NV;
+                        CubeFaceMapping::DirectionToFaceUV(Dir, NeighborFace, NU, NV);
+
+                        const int32 PX = FMath::Clamp(FMath::FloorToInt((NU + 1.0f) * 0.5f * Res), 0, Res - 1);
+                        const int32 PY = FMath::Clamp(FMath::FloorToInt((NV + 1.0f) * 0.5f * Res), 0, Res - 1);
+                        There = Raster->GetElevationAt(NeighborFace, PX, PY);
+                    }
+
+                    const double Diff = FMath::Abs(Here - There);
+                    if (bCrossesSeam) { SeamSum += Diff; ++SeamCount; }
+                    else              { InnerSum += Diff; ++InnerCount; }
+                }
+            }
+        }
+    }
+
+    if (!TestTrue(TEXT("Hay muestras de costura y de interior"), SeamCount > 0 && InnerCount > 0))
+    {
+        return false;
+    }
+
+    const double SeamAvg = SeamSum / SeamCount;
+    const double InnerAvg = InnerSum / InnerCount;
+
+    UE_LOG(LogTemp, Log, TEXT("SeamContinuity: costura %.2f m (%d muestras), interior %.2f m (%d muestras), ratio %.2f"),
+        SeamAvg, SeamCount, InnerAvg, InnerCount, InnerAvg > 0.0 ? SeamAvg / InnerAvg : 0.0);
+    AddInfo(FString::Printf(TEXT("Salto medio: costura %.2f m, interior %.2f m, ratio %.2f"),
+        SeamAvg, InnerAvg, InnerAvg > 0.0 ? SeamAvg / InnerAvg : 0.0));
+
+    // Margen de 3x: la distorsion gnomonica hace que los pixeles cerca de las aristas
+    // cubran mas superficie, asi que un salto algo mayor es legitimo. Lo que se busca es
+    // el sesgo sistematico, que con el bug da un ratio de dos digitos.
+    TestTrue(FString::Printf(TEXT("El salto en costura (%.2f m) no debe dispararse frente al interior (%.2f m)"),
+        SeamAvg, InnerAvg), SeamAvg < InnerAvg * 3.0 + 1.0);
 
     return true;
 }

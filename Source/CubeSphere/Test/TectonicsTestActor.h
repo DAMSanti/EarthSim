@@ -214,6 +214,14 @@ public:
     UPROPERTY(BlueprintReadOnly, Category = "Tectonics|Systems")
     UBoundaryInteractions* BoundaryInteractions;
 
+    /**
+     * true = material unlit, el color de vertice sale tal cual (vista de diagnostico:
+     * lo que se ve ES la paleta). false = material iluminado, con sombreado que ayuda a
+     * leer el relieve pero falsea los colores. Conmuta con U.
+     */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tectonics|Visualization")
+    bool bUnlitFieldView = true;
+
     /** Sistema rasterizado */
     UPROPERTY(BlueprintReadOnly, Category = "Tectonics|Systems")
     URasterizedTectonics* RasterizedTectonics;
@@ -315,6 +323,9 @@ protected:
      * campos es todo lo que hace falta para poder verlos.
      */
     void RegisterSimulationFields();
+
+    /** Aplica el material segun bUnlitFieldView. */
+    void ApplyPlanetMaterial();
 
     /**
      * Refresca las copias en float de los campos que el ráster guarda como uint8

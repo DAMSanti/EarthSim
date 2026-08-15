@@ -4,6 +4,7 @@
 #include "../CubeSphereGrid.h"
 #include "../CubeFaceMapping.h"
 #include "../Visualization/PlanetFieldRegistry.h"
+#include "../Visualization/PlanetFieldMaterial.h"
 #include "TectonicTypes.h"
 #include "TectonicPlateSystem.h"
 #include "PlateKinematics.h"
@@ -583,10 +584,24 @@ void ATectonicsTestActor::CreatePlanetMesh()
             }
         }
 
-        // Generar triángulos de esta cara
-        // Algunas caras necesitan winding invertido debido al mapeo UV
-        bool bFlipWinding = (CubeFace == ECSCubeFace::PositiveZ) || 
-                            (CubeFace == ECSCubeFace::NegativeZ);
+        // Generar triángulos de esta cara.
+        //
+        // ANTES habia aqui un bFlipWinding para PositiveZ y NegativeZ. Existia como
+        // parche del bug de F0: el convenio de caras antiguo era LEVOGIRO justo en esas
+        // dos (AxisU x AxisV = -Normal), asi que sus triangulos salian mirando hacia
+        // dentro y habia que invertirlos para compensar.
+        //
+        // Al unificar el convenio en CubeFaceMapping.h las 6 caras pasaron a ser
+        // dextrogiras (invariante que verifica Simu.CubeSphere.FaceMappingHandedness),
+        // asi que el parche dejo de compensar nada y paso a romper: las dos caras
+        // polares quedaron generadas al reves, con las normales hacia dentro. El
+        // sintoma eran muescas en forma de V en la silueta del planeta (donde una cara
+        // invertida se junta con una correcta) y un reborde extrano en el limbo
+        // inferior, ademas de que segun el angulo desaparecia media esfera - se estaba
+        // viendo el interior de la cascara por culling de caras traseras.
+        //
+        // Con un convenio dextrogiro uniforme el winding correcto es el mismo en las 6
+        // caras y no hay nada que invertir.
         
         for (int32 Y = 0; Y < Resolution; ++Y)
         {
@@ -597,28 +612,13 @@ void ATectonicsTestActor::CreatePlanetMesh()
                 int32 V2 = V0 + (Resolution + 1);
                 int32 V3 = V2 + 1;
 
-                if (bFlipWinding)
-                {
-                    // Winding invertido para PositiveZ
-                    MeshTriangles.Add(V0);
-                    MeshTriangles.Add(V1);
-                    MeshTriangles.Add(V2);
+                MeshTriangles.Add(V0);
+                MeshTriangles.Add(V2);
+                MeshTriangles.Add(V1);
 
-                    MeshTriangles.Add(V1);
-                    MeshTriangles.Add(V3);
-                    MeshTriangles.Add(V2);
-                }
-                else
-                {
-                    // Winding normal
-                    MeshTriangles.Add(V0);
-                    MeshTriangles.Add(V2);
-                    MeshTriangles.Add(V1);
-
-                    MeshTriangles.Add(V1);
-                    MeshTriangles.Add(V2);
-                    MeshTriangles.Add(V3);
-                }
+                MeshTriangles.Add(V1);
+                MeshTriangles.Add(V2);
+                MeshTriangles.Add(V3);
             }
         }
     }
@@ -644,31 +644,48 @@ void ATectonicsTestActor::CreatePlanetMesh()
             false  // No crear colisión, es muy pesado
         );
         
-        // Intentar cargar material custom del proyecto
-        UMaterial* VertexColorMat = LoadObject<UMaterial>(nullptr,
-            TEXT("/Game/Materials/M_VertexColor.M_VertexColor"));
-        
-        if (VertexColorMat)
-        {
-            PlanetMesh->SetMaterial(0, VertexColorMat);
-            UE_LOG(LogTemp, Log, TEXT("Material M_VertexColor aplicado"));
-            UE_LOG(LogTemp, Log, TEXT("IMPORTANTE: Asegurate que el material sea LIT (no Unlit) para que funcione la iluminacion"));
-        }
-        else
-        {
-            // Si no existe, dar instrucciones claras
-            UE_LOG(LogTemp, Warning, TEXT("=== CREAR MATERIAL M_VertexColor ==="));
-            UE_LOG(LogTemp, Warning, TEXT("1. Content Browser > Add > Material"));
-            UE_LOG(LogTemp, Warning, TEXT("2. Nombrar: M_VertexColor en Content/Materials/"));
-            UE_LOG(LogTemp, Warning, TEXT("3. Abrir material, añadir VertexColor node"));
-            UE_LOG(LogTemp, Warning, TEXT("4. Conectar VertexColor RGB -> Base Color"));
-            UE_LOG(LogTemp, Warning, TEXT("5. Shading Model = Default Lit (NO Unlit)"));
-            UE_LOG(LogTemp, Warning, TEXT("6. Two Sided = True"));
-            UE_LOG(LogTemp, Warning, TEXT("7. Guardar y reiniciar Play"));
-        }
-        
+        ApplyPlanetMaterial();
+
         UE_LOG(LogTemp, Log, TEXT("Mesh creado con %d vertices y %d colores"), 
             MeshVertices.Num(), MeshColors.Num());
+    }
+}
+
+void ATectonicsTestActor::ApplyPlanetMaterial()
+{
+    if (!PlanetMesh)
+    {
+        return;
+    }
+
+    UMaterialInterface* Chosen = nullptr;
+
+#if WITH_EDITOR
+    if (bUnlitFieldView)
+    {
+        // Vista de diagnostico: el color en pantalla tiene que ser el de la paleta, sin
+        // que la iluminacion lo module (ver PlanetFieldMaterial.h para el porque).
+        Chosen = GetOrCreateFieldViewMaterial();
+    }
+#endif
+
+    if (!Chosen)
+    {
+        // Vista "natural": material iluminado. El sombreado ayuda a leer la forma del
+        // relieve, a costa de falsear los colores de la paleta.
+        Chosen = LoadObject<UMaterial>(nullptr, TEXT("/Game/Materials/M_VertexColor.M_VertexColor"));
+    }
+
+    if (Chosen)
+    {
+        PlanetMesh->SetMaterial(0, Chosen);
+        UE_LOG(LogTemp, Log, TEXT("Material del planeta: %s (%s)"),
+            *Chosen->GetName(), bUnlitFieldView ? TEXT("diagnostico/unlit") : TEXT("iluminado"));
+    }
+    else
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("Sin material para el planeta: no se pudo crear M_PlanetFieldUnlit ni cargar M_VertexColor"));
     }
 }
 
@@ -1013,13 +1030,15 @@ void ATectonicsTestActor::DrawScreenDebugInfo()
         TEXT("\n[SPACE] Pausa | [R] Reiniciar\n")
         TEXT("[+/-] Velocidad | [1-8] Placa\n")
         TEXT("[V] Velocidades | [B] Límites\n")
-        TEXT("[F/G] Campo: %s"),
+        TEXT("[F/G] Campo | [U] %s\n")
+        TEXT("%s"),
         SimulationTime,
         SimulationSteps,
         bSimulationRunning ? TEXT("EJECUTANDO") : TEXT("PAUSADO"),
         TimeScale,
         PlateSystem ? PlateSystem->GetNumPlates() : 0,
         GridResolution,
+        bUnlitFieldView ? TEXT("unlit") : TEXT("iluminado"),
         FieldRegistry ? *FieldRegistry->GetLegendText() : TEXT("(sin visor)")
     );
 
@@ -1106,6 +1125,19 @@ void ATectonicsTestActor::HandleInput()
                 GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,
                     FieldRegistry->GetLegendText());
             }
+        }
+    }
+
+    // U - Conmutar entre vista de diagnostico (unlit) y vista iluminada
+    if (PC->WasInputKeyJustPressed(EKeys::U))
+    {
+        bUnlitFieldView = !bUnlitFieldView;
+        ApplyPlanetMaterial();
+        if (GEngine)
+        {
+            GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,
+                bUnlitFieldView ? TEXT("Vista: diagnostico (unlit, color = paleta)")
+                                : TEXT("Vista: iluminada (sombreado, color falseado)"));
         }
     }
 

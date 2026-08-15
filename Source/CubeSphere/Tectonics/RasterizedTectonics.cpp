@@ -399,8 +399,18 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
             { 1.0f/16.0f, 2.0f/16.0f, 1.0f/16.0f }
         };
 
+        // Igual que en SmoothElevation: instantanea previa para que el resultado no
+        // dependa del orden de las caras, y vecinos que cruzan costuras.
+        TArray<TArray<float>> Snapshot;
+        Snapshot.SetNum(6);
         for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
         {
+            Snapshot[FaceIdx] = FaceData[FaceIdx].ElevationData;
+        }
+
+        for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
+        {
+            const ECSCubeFace Face = static_cast<ECSCubeFace>(FaceIdx);
             TArray<float>& ElevData = FaceData[FaceIdx].ElevationData;
             TArray<float> TempData;
             TempData.SetNumUninitialized(ElevData.Num());
@@ -414,9 +424,7 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
                     {
                         for (int32 KX = -1; KX <= 1; ++KX)
                         {
-                            int32 SampleX = FMath::Clamp(X + KX, 0, Resolution - 1);
-                            int32 SampleY = FMath::Clamp(Y + KY, 0, Resolution - 1);
-                            Sum += ElevData[GetLinearIndex(SampleX, SampleY)] * Kernel[KY + 1][KX + 1];
+                            Sum += SampleNeighborElevation(Snapshot, Face, X, Y, KX, KY) * Kernel[KY + 1][KX + 1];
                         }
                     }
 
@@ -559,6 +567,64 @@ int32 URasterizedTectonics::GetPlateIDAt(ECSCubeFace Face, int32 X, int32 Y) con
     return FaceData[FaceIdx].PlateIDData[GetLinearIndex(X, Y)];
 }
 
+bool URasterizedTectonics::GetNeighborPixel(ECSCubeFace Face, int32 X, int32 Y, int32 DX, int32 DY,
+                                            ECSCubeFace& OutFace, int32& OutX, int32& OutY) const
+{
+    const int32 NewX = X + DX;
+    const int32 NewY = Y + DY;
+
+    if (NewX >= 0 && NewX < Resolution && NewY >= 0 && NewY < Resolution)
+    {
+        OutFace = Face;
+        OutX = NewX;
+        OutY = NewY;
+        return true;
+    }
+
+    if (Resolution <= 0)
+    {
+        return false;
+    }
+
+    // Se sale del cuadrado UV a proposito y se reproyecta: la cara vecina y la rotacion
+    // relativa entre ambas salen solas. Ver CubeFaceMapping.h.
+    const float U = (static_cast<float>(NewX) + 0.5f) / static_cast<float>(Resolution) * 2.0f - 1.0f;
+    const float V = (static_cast<float>(NewY) + 0.5f) / static_cast<float>(Resolution) * 2.0f - 1.0f;
+
+    const FVector Dir = CubeFaceMapping::FaceUVToCubePoint(Face, U, V).GetSafeNormal();
+    if (Dir.IsNearlyZero())
+    {
+        return false;
+    }
+
+    float NU, NV;
+    CubeFaceMapping::DirectionToFaceUV(Dir, OutFace, NU, NV);
+
+    OutX = FMath::Clamp(FMath::FloorToInt((NU + 1.0f) * 0.5f * Resolution), 0, Resolution - 1);
+    OutY = FMath::Clamp(FMath::FloorToInt((NV + 1.0f) * 0.5f * Resolution), 0, Resolution - 1);
+    return true;
+}
+
+float URasterizedTectonics::SampleNeighborElevation(const TArray<TArray<float>>& AllFaces,
+                                                    ECSCubeFace Face, int32 X, int32 Y,
+                                                    int32 DX, int32 DY) const
+{
+    ECSCubeFace NFace;
+    int32 NX, NY;
+    if (!GetNeighborPixel(Face, X, Y, DX, DY, NFace, NX, NY))
+    {
+        return AllFaces[static_cast<int32>(Face)][GetLinearIndex(X, Y)];
+    }
+
+    const int32 NIdx = static_cast<int32>(NFace);
+    if (!AllFaces.IsValidIndex(NIdx) || AllFaces[NIdx].Num() != Resolution * Resolution)
+    {
+        return AllFaces[static_cast<int32>(Face)][GetLinearIndex(X, Y)];
+    }
+
+    return AllFaces[NIdx][NY * Resolution + NX];
+}
+
 void URasterizedTectonics::SmoothElevation(int32 Iterations)
 {
     if (!bIsInitialized)
@@ -577,7 +643,16 @@ void URasterizedTectonics::SmoothElevation(int32 Iterations)
 
     for (int32 Iter = 0; Iter < Iterations; ++Iter)
     {
-        // Procesar cada cara
+        // Instantanea de las 6 caras: la convolucion tiene que leer el estado ANTERIOR
+        // tambien al cruzar a otra cara, o el resultado dependeria del orden en que se
+        // procesan las caras.
+        TArray<TArray<float>> Snapshot;
+        Snapshot.SetNum(6);
+        for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
+        {
+            Snapshot[FaceIdx] = FaceData[FaceIdx].ElevationData;
+        }
+
         for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
         {
             if (!FaceData[FaceIdx].bIsValid)
@@ -585,6 +660,7 @@ void URasterizedTectonics::SmoothElevation(int32 Iterations)
                 continue;
             }
 
+            const ECSCubeFace Face = static_cast<ECSCubeFace>(FaceIdx);
             TArray<float>& ElevData = FaceData[FaceIdx].ElevationData;
             TArray<float> TempData;
             TempData.SetNumUninitialized(ElevData.Num());
@@ -600,11 +676,9 @@ void URasterizedTectonics::SmoothElevation(int32 Iterations)
                     {
                         for (int32 KX = -1; KX <= 1; ++KX)
                         {
-                            // Clamp a los bordes (mirror boundary)
-                            int32 SampleX = FMath::Clamp(X + KX, 0, Resolution - 1);
-                            int32 SampleY = FMath::Clamp(Y + KY, 0, Resolution - 1);
-                            
-                            Sum += ElevData[GetLinearIndex(SampleX, SampleY)] * Kernel[KY + 1][KX + 1];
+                            // Vecino real, cruzando a la cara contigua si toca. Antes se
+                            // recortaba al borde de la cara, lo que sesgaba la costura.
+                            Sum += SampleNeighborElevation(Snapshot, Face, X, Y, KX, KY) * Kernel[KY + 1][KX + 1];
                         }
                     }
                     

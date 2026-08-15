@@ -331,6 +331,26 @@ private:
     void ReleaseGPUResources();
     void UpdatePlateDataBuffer();
     
+    /**
+     * Vecino de un pixel del raster, cruzando entre caras cuando hace falta.
+     *
+     * Antes, SmoothElevation y la difusion de Step() recortaban con FMath::Clamp al
+     * borde de la cara, es decir trataban cada cara como una imagen aislada: en el borde
+     * el kernel se muestreaba a si mismo en vez de al vecino real del otro lado de la
+     * costura. Como la difusion corre en cada paso, el sesgo se acumulaba y generaba una
+     * discontinuidad de elevacion a lo largo de las 12 aristas del cubo que crecia con
+     * el tiempo - visible en el limbo del planeta como un escalon.
+     *
+     * Mismo metodo geometrico que UCubeSphereGrid::GetNeighborCell (ver su comentario),
+     * pero a la resolucion del raster, que no tiene por que coincidir con la del Grid.
+     */
+    bool GetNeighborPixel(ECSCubeFace Face, int32 X, int32 Y, int32 DX, int32 DY,
+                          ECSCubeFace& OutFace, int32& OutX, int32& OutY) const;
+
+    /** Elevacion del vecino (X+DX, Y+DY), cruzando caras. */
+    float SampleNeighborElevation(const TArray<TArray<float>>& AllFaces,
+                                  ECSCubeFace Face, int32 X, int32 Y, int32 DX, int32 DY) const;
+
     // Helpers
     int32 GetLinearIndex(int32 X, int32 Y) const { return Y * Resolution + X; }
     bool IsValidCoord(int32 X, int32 Y) const { return X >= 0 && X < Resolution && Y >= 0 && Y < Resolution; }
