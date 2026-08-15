@@ -71,10 +71,10 @@ bool UTectonicPlateSystem::GeneratePlates()
     // Paso 1: Generar centroides
     Voronoi->GenerateCentroids();
 
-    // Paso 2: Ejecutar JFA
-    if (!Voronoi->RunJFA())
+    // Paso 2: Asignar cada celda a la placa de centroide más cercano
+    if (!Voronoi->AssignCellsToPlates())
     {
-        UE_LOG(LogTemp, Error, TEXT("JFA failed!"));
+        UE_LOG(LogTemp, Error, TEXT("Voronoi tessellation failed!"));
         return false;
     }
 

@@ -213,9 +213,9 @@ struct CUBESPHERE_API FPlateGenerationConfig
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation", meta = (ClampMin = "0.0", ClampMax = "0.1"))
     float MaxAngularVelocity = 0.005f;
 
-    // Iteraciones de JFA (log2 de la resolución máxima)
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Generation", meta = (ClampMin = "4", ClampMax = "12"))
-    int32 JFAIterations = 8;
+    // NOTA (15-08-2026): aquí había JFAIterations, parámetro del Jump Flooding Algorithm
+    // que USphericalVoronoi ya no usa — la teselación es ahora fuerza bruta exacta y no
+    // tiene número de iteraciones que ajustar. Eliminado en vez de dejarlo sin efecto.
 };
 
 /**

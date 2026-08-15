@@ -24,19 +24,12 @@ void USphericalVoronoi::Initialize(UCubeSphereGrid* InGrid, const FPlateGenerati
 
     // Inicializar el mapa de IDs (6 caras)
     PlateIDMap.SetNum(6);
-    JFABuffer.SetNum(6);
-    
+
     for (int32 Face = 0; Face < 6; ++Face)
     {
-        PlateIDMap[Face].SetNumZeroed(Resolution * Resolution);
-        JFABuffer[Face].SetNumZeroed(Resolution * Resolution);
-        
-        // Inicializar con -1 (sin placa asignada)
-        for (int32 i = 0; i < Resolution * Resolution; ++i)
-        {
-            PlateIDMap[Face][i] = -1;
-            JFABuffer[Face][i] = -1;
-        }
+        // -1 = sin placa asignada. AssignCellsToPlates sobreescribe todas las celdas;
+        // que quede algún -1 significa que algo falló y ValidateCoverage lo detecta.
+        PlateIDMap[Face].Init(-1, Resolution * Resolution);
     }
 
     // Inicializar generador de números aleatorios con semilla
@@ -102,216 +95,109 @@ void USphericalVoronoi::GenerateFibonacciSphere(int32 NumPoints, TArray<FVector>
     }
 }
 
-bool USphericalVoronoi::RunJFA()
+// ============================================================
+// TESELACIÓN DE VORONOI
+//
+// POR QUÉ ESTO YA NO ES UN JUMP FLOODING ALGORITHM (15-08-2026):
+//
+// El JFA que había aquí dejaba entre el 11 % y el 19 % de las celdas sin asignar, lo
+// que hacía que GeneratePlates() devolviera false y abortaba dos tests de la suite
+// (Simu.Tectonics.BoundaryInteractionsSanity y ElevationStaysBounded) en su primera
+// aserción — llevaban tiempo en rojo sin que nadie lo viera.
+//
+// Causa raíz: las pasadas de salto del JFA no cruzaban entre caras del cubo (estaba
+// admitido en un comentario del propio código). La propagación entre caras ocurría solo
+// en una segunda pasada que avanzaba UNA celda por iteración y solo sobre las filas de
+// borde. Consecuencia: cualquier cara del cubo que no contuviera ningún centroide dentro
+// se alimentaba a razón de una celda por pasada desde sus bordes, y con log2(Res)+2
+// pasadas no llegaba a rellenarse. Con ~12 placas repartidas por Fibonacci sobre 6 caras,
+// que alguna cara quede sin centroide es lo normal, no un caso raro.
+//
+// Se podría haber arreglado haciendo que los saltos cruzaran caras, pero el JFA es la
+// herramienta equivocada para este problema. El JFA es una aproximación que merece la
+// pena cuando hay miles de semillas o se ejecuta en GPU; aquí hay ~12-30 placas y esto
+// se ejecuta UNA sola vez, al generar el planeta. La fuerza bruta (para cada celda, el
+// centroide más cercano) es:
+//   - exacta por definición, no aproximada: ES el diagrama de Voronoi
+//   - de cobertura total garantizada, sin casos límite entre caras
+//   - O(6·Res²·N): con Res=128 y N=20 son ~2M productos escalares, milisegundos
+//   - el mismo criterio (centroide más cercano) que ya usaba
+//     RasterizedTectonics::InitializeFromPlateSystem, lo que acerca los dos mapas de
+//     placas del proyecto. OJO: acerca, no unifica — aquí se usan los centroides de
+//     Fibonacci originales, mientras que RasterizedTectonics usa FTectonicPlate::Centroid,
+//     que CalculatePlateStatistics recalcula después como promedio de las celdas de cada
+//     placa. Siguen siendo dos asignaciones distintas y pueden discrepar cerca de las
+//     fronteras; unificarlas de verdad sigue pendiente (ROADMAP.md F0).
+//
+// Si alguna vez hace falta recalcular esto por frame (no es el caso: en F1 la propiedad
+// de placa pasa a advectarse, no a recalcularse), entonces sí tocaría volver a un JFA,
+// pero en GPU y con los saltos cruzando caras de verdad.
+// ============================================================
+bool USphericalVoronoi::AssignCellsToPlates()
 {
     if (!bIsInitialized || Centroids.Num() == 0)
     {
-        UE_LOG(LogTemp, Error, TEXT("SphericalVoronoi::RunJFA - Not initialized or no centroids!"));
+        UE_LOG(LogTemp, Error, TEXT("SphericalVoronoi::AssignCellsToPlates - Not initialized or no centroids!"));
         return false;
     }
 
-    UE_LOG(LogTemp, Log, TEXT("Running JFA with %d iterations..."), Config.JFAIterations);
+    UE_LOG(LogTemp, Log, TEXT("Assigning %d x %d x 6 cells to %d plates (nearest centroid)..."),
+        Resolution, Resolution, Centroids.Num());
 
-    // Paso 1: Inicializar semillas (marcar celdas que contienen centroides)
-    InitializeJFASeeds();
-
-    // Paso 2: JFA - Jump Flooding Algorithm
-    // Comenzar con step size = Resolution/2, dividir por 2 cada iteración
-    int32 MaxStep = FMath::Max(1, Resolution / 2);
-    
-    for (int32 Step = MaxStep; Step >= 1; Step /= 2)
+    // Los centroides ya deberían venir normalizados, pero normalizarlos aquí hace que la
+    // comparación por producto escalar sea válida sin depender de esa suposición.
+    TArray<FVector> UnitCentroids;
+    UnitCentroids.Reserve(Centroids.Num());
+    for (const FVector& C : Centroids)
     {
-        JFAPass(Step);
-        UE_LOG(LogTemp, Verbose, TEXT("  JFA pass with step %d completed"), Step);
+        UnitCentroids.Add(C.GetSafeNormal());
     }
-
-    // Paso adicional con step=1 para asegurar cobertura completa
-    JFAPass(1);
-
-    // Copiar resultado del buffer al mapa final
-    for (int32 Face = 0; Face < 6; ++Face)
-    {
-        for (int32 i = 0; i < Resolution * Resolution; ++i)
-        {
-            PlateIDMap[Face][i] = JFABuffer[Face][i];
-        }
-    }
-
-    // Validar cobertura
-    bool bValid = ValidateCoverage();
-    
-    if (bValid)
-    {
-        UE_LOG(LogTemp, Log, TEXT("JFA completed successfully. All cells assigned."));
-    }
-    else
-    {
-        UE_LOG(LogTemp, Warning, TEXT("JFA completed but some cells may be unassigned."));
-    }
-
-    return bValid;
-}
-
-void USphericalVoronoi::InitializeJFASeeds()
-{
-    // Para cada centroide, encontrar la celda más cercana y marcarla
-    for (int32 PlateID = 0; PlateID < Centroids.Num(); ++PlateID)
-    {
-        ECSCubeFace Face;
-        int32 X, Y;
-        
-        if (FindCellForPoint(Centroids[PlateID], Face, X, Y))
-        {
-            int32 FaceIdx = static_cast<int32>(Face);
-            int32 Idx = Y * Resolution + X;
-            JFABuffer[FaceIdx][Idx] = PlateID;
-            
-            UE_LOG(LogTemp, Verbose, TEXT("Seed %d placed at Face %d, (%d, %d)"), PlateID, FaceIdx, X, Y);
-        }
-    }
-}
-
-void USphericalVoronoi::JFAPass(int32 StepSize)
-{
-    // Direcciones de salto (incluyendo diagonales)
-    static const int32 DX[] = { -1,  0,  1, -1, 1, -1, 0, 1 };
-    static const int32 DY[] = { -1, -1, -1,  0, 0,  1, 1, 1 };
-    
-    // Buffer temporal para esta pasada
-    TArray<TArray<int32>> NewBuffer = JFABuffer;
 
     for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
     {
-        ECSCubeFace Face = static_cast<ECSCubeFace>(FaceIdx);
-        
+        const ECSCubeFace Face = static_cast<ECSCubeFace>(FaceIdx);
+
         for (int32 Y = 0; Y < Resolution; ++Y)
         {
             for (int32 X = 0; X < Resolution; ++X)
             {
-                int32 CurrentIdx = Y * Resolution + X;
-                int32 BestPlate = JFABuffer[FaceIdx][CurrentIdx];
-                float BestDist = (BestPlate >= 0) ? 
-                    GeodesicDistance(CellToSpherePoint(Face, X, Y), Centroids[BestPlate]) : 
-                    FLT_MAX;
+                const FVector CellPoint = CellToSpherePoint(Face, X, Y);
 
-                // Revisar vecinos a distancia StepSize
-                for (int32 Dir = 0; Dir < 8; ++Dir)
+                // Sobre la esfera unitaria, la distancia geodésica es acos(dot) — monótona
+                // decreciente en dot. Basta con quedarse con el producto escalar mayor:
+                // mismo resultado que comparar ángulos, sin 6·Res²·N llamadas a acos().
+                int32 BestPlate = 0;
+                float BestDot = -2.0f;
+
+                for (int32 PlateID = 0; PlateID < UnitCentroids.Num(); ++PlateID)
                 {
-                    int32 NX = X + DX[Dir] * StepSize;
-                    int32 NY = Y + DY[Dir] * StepSize;
-
-                    // Manejar bordes - obtener celda adyacente real
-                    ECSCubeFace NeighborFace = Face;
-                    int32 NeighborX = NX;
-                    int32 NeighborY = NY;
-
-                    // Si está dentro de la cara actual
-                    if (NX >= 0 && NX < Resolution && NY >= 0 && NY < Resolution)
+                    const float Dot = static_cast<float>(FVector::DotProduct(CellPoint, UnitCentroids[PlateID]));
+                    if (Dot > BestDot)
                     {
-                        int32 NeighborIdx = NY * Resolution + NX;
-                        int32 NeighborPlate = JFABuffer[FaceIdx][NeighborIdx];
-                        
-                        if (NeighborPlate >= 0)
-                        {
-                            float Dist = GeodesicDistance(CellToSpherePoint(Face, X, Y), Centroids[NeighborPlate]);
-                            if (Dist < BestDist)
-                            {
-                                BestDist = Dist;
-                                BestPlate = NeighborPlate;
-                            }
-                        }
-                    }
-                    else
-                    {
-                        // Vecino en otra cara: esta pasada JFA no cruza caras, pero la
-                        // segunda pasada de abajo (propagación de bordes vía
-                        // Grid->GetNeighborCell) sí resuelve la continuidad cross-face
-                        // para el resultado final. Esto solo significa que la
-                        // convergencia de JFA cerca de bordes de cara puede tardar
-                        // alguna iteración extra, no que el resultado final sea incorrecto.
+                        BestDot = Dot;
+                        BestPlate = PlateID;
                     }
                 }
 
-                NewBuffer[FaceIdx][CurrentIdx] = BestPlate;
+                PlateIDMap[FaceIdx][Y * Resolution + X] = BestPlate;
             }
         }
     }
 
-    // Segunda pasada: propagar entre caras adyacentes
-    // Esto asegura que los bordes de las caras se conecten correctamente
-    for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
+    // Con fuerza bruta esto no puede fallar salvo que CellToSpherePoint devuelva basura
+    // (Grid nulo), pero se comprueba igual: es la garantía que el JFA no daba.
+    const bool bValid = ValidateCoverage();
+
+    if (bValid)
     {
-        ECSCubeFace Face = static_cast<ECSCubeFace>(FaceIdx);
-        
-        // Procesar bordes de la cara
-        for (int32 Edge = 0; Edge < 4; ++Edge)
-        {
-            for (int32 i = 0; i < Resolution; ++i)
-            {
-                int32 X, Y;
-                switch (Edge)
-                {
-                case 0: X = i; Y = 0; break;              // Borde inferior
-                case 1: X = i; Y = Resolution - 1; break; // Borde superior
-                case 2: X = 0; Y = i; break;              // Borde izquierdo
-                case 3: X = Resolution - 1; Y = i; break; // Borde derecho
-                default: X = 0; Y = 0;
-                }
-
-                int32 CurrentIdx = Y * Resolution + X;
-                int32 CurrentPlate = NewBuffer[FaceIdx][CurrentIdx];
-                
-                // Obtener vecino en cara adyacente
-                ECSCubeFace NeighborFace;
-                int32 NeighborX, NeighborY;
-                
-                // Calcular posición del vecino según el borde
-                int32 OffX = 0, OffY = 0;
-                switch (Edge)
-                {
-                case 0: OffY = -1; break;
-                case 1: OffY = 1; break;
-                case 2: OffX = -1; break;
-                case 3: OffX = 1; break;
-                }
-                
-                if (Grid->GetNeighborCell(Face, X, Y, OffX, OffY, NeighborFace, NeighborX, NeighborY))
-                {
-                    int32 NeighborFaceIdx = static_cast<int32>(NeighborFace);
-                    int32 NeighborIdx = NeighborY * Resolution + NeighborX;
-                    int32 NeighborPlate = NewBuffer[NeighborFaceIdx][NeighborIdx];
-                    
-                    if (NeighborPlate >= 0 && CurrentPlate < 0)
-                    {
-                        // Propagar desde vecino
-                        NewBuffer[FaceIdx][CurrentIdx] = NeighborPlate;
-                    }
-                    else if (NeighborPlate >= 0 && CurrentPlate >= 0)
-                    {
-                        // Ambos tienen placa - elegir el más cercano
-                        FVector CellPoint = CellToSpherePoint(Face, X, Y);
-                        float CurrentDist = GeodesicDistance(CellPoint, Centroids[CurrentPlate]);
-                        float NeighborDist = GeodesicDistance(CellPoint, Centroids[NeighborPlate]);
-                        
-                        if (NeighborDist < CurrentDist)
-                        {
-                            NewBuffer[FaceIdx][CurrentIdx] = NeighborPlate;
-                        }
-                    }
-                }
-            }
-        }
+        UE_LOG(LogTemp, Log, TEXT("Voronoi tessellation complete. All cells assigned."));
+    }
+    else
+    {
+        UE_LOG(LogTemp, Error, TEXT("Voronoi tessellation left cells unassigned - Grid invalid?"));
     }
 
-    JFABuffer = MoveTemp(NewBuffer);
-}
-
-float USphericalVoronoi::GeodesicDistance(const FVector& A, const FVector& B) const
-{
-    // Distancia geodésica en esfera unitaria = ángulo entre vectores
-    float Dot = FVector::DotProduct(A.GetSafeNormal(), B.GetSafeNormal());
-    Dot = FMath::Clamp(Dot, -1.0f, 1.0f);
-    return FMath::Acos(Dot);
+    return bValid;
 }
 
 FVector USphericalVoronoi::CellToSpherePoint(ECSCubeFace Face, int32 X, int32 Y) const
@@ -324,19 +210,6 @@ FVector USphericalVoronoi::CellToSpherePoint(ECSCubeFace Face, int32 X, int32 Y)
     
     // Usar el Grid para convertir a punto 3D
     return Grid->FaceUVToCartesian(Face, FVector2D(U, V)).GetSafeNormal();
-}
-
-bool USphericalVoronoi::FindCellForPoint(const FVector& Point, ECSCubeFace& OutFace, int32& OutX, int32& OutY) const
-{
-    if (!Grid) return false;
-    
-    FVector2D UV;
-    OutFace = Grid->CartesianToFaceUV(Point, UV);
-    
-    OutX = FMath::Clamp(FMath::FloorToInt(UV.X * Resolution), 0, Resolution - 1);
-    OutY = FMath::Clamp(FMath::FloorToInt(UV.Y * Resolution), 0, Resolution - 1);
-    
-    return true;
 }
 
 int32 USphericalVoronoi::GetPlateIDAt(ECSCubeFace Face, int32 X, int32 Y) const
@@ -396,12 +269,3 @@ bool USphericalVoronoi::ValidateCoverage() const
     return UnassignedCount == 0;
 }
 
-int32 USphericalVoronoi::GetLinearIndex(ECSCubeFace Face, int32 X, int32 Y) const
-{
-    return GetFaceOffset(Face) + Y * Resolution + X;
-}
-
-int32 USphericalVoronoi::GetFaceOffset(ECSCubeFace Face) const
-{
-    return static_cast<int32>(Face) * Resolution * Resolution;
-}

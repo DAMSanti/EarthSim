@@ -16,7 +16,8 @@
  * 
  * El algoritmo:
  * 1. Genera N puntos (centroides) distribuidos uniformemente en la esfera
- * 2. Usa Jump Flooding Algorithm (JFA) para asignar cada celda al centroide más cercano
+ * 2. Asigna cada celda al centroide más cercano por fuerza bruta (ver AssignCellsToPlates
+ *    en el .cpp para por qué esto ya no es un Jump Flooding Algorithm)
  * 3. El resultado es un mapa de IDs de placa para cada celda del CubeSphereGrid
  */
 UCLASS(BlueprintType)
@@ -43,11 +44,17 @@ public:
     void GenerateCentroids();
 
     /**
-     * Ejecutar Jump Flooding Algorithm para asignar IDs de placa
-     * @return true si se completó correctamente
+     * Asignar a cada celda la placa cuyo centroide le queda más cerca (teselación de
+     * Voronoi esférica). Fuerza bruta sobre los centroides: exacta por definición y
+     * con cobertura total garantizada.
+     *
+     * Sustituye al Jump Flooding Algorithm que había aquí antes (ver .cpp para el
+     * porqué). Se llama una sola vez, al generar el planeta.
+     *
+     * @return true si se asignaron todas las celdas
      */
     UFUNCTION(BlueprintCallable, Category = "Voronoi")
-    bool RunJFA();
+    bool AssignCellsToPlates();
 
     /**
      * Obtener el ID de placa para una celda específica
@@ -94,9 +101,6 @@ protected:
     // Mapa de IDs de placa: PlateIDMap[Face][Y * Resolution + X]
     TArray<TArray<int32>> PlateIDMap;
 
-    // Buffer temporal para JFA (almacena índice del centroide más cercano conocido)
-    TArray<TArray<int32>> JFABuffer;
-
     // Resolución del grid
     int32 Resolution;
 
@@ -112,39 +116,8 @@ private:
     void GenerateFibonacciSphere(int32 NumPoints, TArray<FVector>& OutPoints);
 
     /**
-     * Inicializar el buffer de JFA con los centroides
-     * Asigna cada celda que contiene un centroide a ese centroide
-     */
-    void InitializeJFASeeds();
-
-    /**
-     * Ejecutar una pasada de JFA con un step size dado
-     * @param StepSize - Distancia de salto en celdas
-     */
-    void JFAPass(int32 StepSize);
-
-    /**
-     * Calcular distancia geodésica entre dos puntos en la esfera
-     */
-    float GeodesicDistance(const FVector& A, const FVector& B) const;
-
-    /**
      * Convertir coordenadas de celda a punto en la esfera
      */
     FVector CellToSpherePoint(ECSCubeFace Face, int32 X, int32 Y) const;
 
-    /**
-     * Encontrar la celda más cercana a un punto dado
-     */
-    bool FindCellForPoint(const FVector& Point, ECSCubeFace& OutFace, int32& OutX, int32& OutY) const;
-
-    /**
-     * Obtener índice lineal para una celda
-     */
-    int32 GetLinearIndex(ECSCubeFace Face, int32 X, int32 Y) const;
-
-    /**
-     * Obtener offset de cara en el buffer
-     */
-    int32 GetFaceOffset(ECSCubeFace Face) const;
 };
