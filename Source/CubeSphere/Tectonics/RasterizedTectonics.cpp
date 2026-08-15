@@ -53,6 +53,7 @@ void URasterizedTectonics::Initialize(UCubeSphereGrid* InGrid, UTectonicPlateSys
         Face.VelocityData.SetNum(PixelsPerFace);
         Face.CrustAgeData.SetNumZeroed(PixelsPerFace);
         Face.CrustTypeData.SetNumZeroed(PixelsPerFace);
+        Face.CrustThicknessData.SetNumZeroed(PixelsPerFace);
 
         // Inicializar velocidades a cero
         for (int32 i = 0; i < PixelsPerFace; ++i)
@@ -70,7 +71,11 @@ void URasterizedTectonics::Initialize(UCubeSphereGrid* InGrid, UTectonicPlateSys
     StepCount = 0;
     TotalSimulationTime = 0.0f;
 
-    UE_LOG(LogRasterizedTectonics, Log, TEXT("RasterizedTectonics initialized successfully"));
+    // El log va aqui y no dentro de InitializeFromPlateSystem porque GetLandFraction()
+    // devuelve 0 mientras bIsInitialized sea false, y daba un enganoso "0% de tierra".
+    UE_LOG(LogRasterizedTectonics, Log,
+        TEXT("RasterizedTectonics listo. Nivel del mar %.0f m, tierra emergida %.1f%%"),
+        SeaLevel, GetLandFraction() * 100.0f);
 }
 
 void URasterizedTectonics::ReleaseResources()
@@ -91,6 +96,7 @@ void URasterizedTectonics::ReleaseResources()
         Face.VelocityData.Empty();
         Face.CrustAgeData.Empty();
         Face.CrustTypeData.Empty();
+        Face.CrustThicknessData.Empty();
         Face.bIsValid = false;
     }
 
@@ -234,6 +240,18 @@ void URasterizedTectonics::InitializeFromPlateSystem()
                 
                 // Tipo de corteza
                 Face.CrustTypeData[LinearIdx] = bIsContinental ? 1 : 0;
+
+                // Grosor de corteza: el estado primario desde F2. El ruido fractal se
+                // aplica AQUI y no sobre la elevacion, porque la elevacion ya no es un
+                // estado que se pueda tocar - se deriva. Un continente algo mas grueso
+                // flota mas alto, que es como funciona de verdad.
+                const FIsostasyParams DefaultIsostasy;
+                const float BaseThickness = bIsContinental
+                    ? DefaultIsostasy.ContinentalThickness
+                    : DefaultIsostasy.OceanicThickness;
+                const float ThicknessNoise = bIsContinental ? (NoiseValue * 1.2f) : (NoiseValue * 0.15f);
+                Face.CrustThicknessData[LinearIdx] = FMath::Clamp(
+                    BaseThickness + ThicknessNoise, 3000.0f, DefaultIsostasy.MaxThickness);
                 
                 // Edad inicial aleatoria (en millones de años)
                 Face.CrustAgeData[LinearIdx] = FMath::FRandRange(0.0f, 200.0f);
@@ -257,7 +275,16 @@ void URasterizedTectonics::InitializeFromPlateSystem()
         }
     }
 
-    UE_LOG(LogRasterizedTectonics, Log, TEXT("Textures initialized from plate system with velocities"));
+    // La elevacion pasa a ser derivada: se calcula desde grosor, edad y tipo.
+    const FIsostasyParams DefaultIsostasy;
+    RebuildElevationFromIsostasy(DefaultIsostasy);
+
+    // El volumen de oceano de partida es el que se conserva a partir de aqui. Se fija con
+    // el nivel del mar en 0, que es donde el datum isostatico esta calibrado.
+    SeaLevel = 0.0f;
+    TargetOceanVolume = ComputeOceanVolume(SeaLevel);
+
+    UE_LOG(LogRasterizedTectonics, Log, TEXT("Textures initialized from plate system"));
 }
 
 void URasterizedTectonics::ApplyFractalNoise(const FFractalNoiseParams& Params)
@@ -308,6 +335,141 @@ void URasterizedTectonics::ApplyFractalNoise(const FFractalNoiseParams& Params)
     }
 
     UE_LOG(LogRasterizedTectonics, Log, TEXT("Fractal noise applied"));
+}
+
+// ============================================================
+// ISOSTASIA Y NIVEL DEL MAR (ROADMAP.md F2)
+// ============================================================
+
+float URasterizedTectonics::ComputeIsostaticElevation(float ThicknessMetres, bool bContinental,
+                                                      float AgeMa, const FIsostasyParams& Params)
+{
+    if (bContinental)
+    {
+        // Flotación de Airy. La densidad continental (granítica, 2750) es bastante menor
+        // que la del manto (3300), asi que una columna gruesa sobresale mucho: es la
+        // razon de que los continentes esten sobre el nivel del mar y de que las
+        // cordilleras tengan raiz profunda.
+        const float Buoyancy = (Params.MantleDensity - Params.ContinentalDensity) / FMath::Max(Params.MantleDensity, 1.0f);
+        return ThicknessMetres * Buoyancy - Params.IsostaticDatum;
+    }
+
+    // Corteza oceanica: manda el hundimiento termico, no el grosor. La ley empirica
+    // d = D0 + K*sqrt(edad) ajusta muy bien la batimetria real hasta ~70 Ma, y luego el
+    // fondo se estabiliza. Por eso un mapa de profundidad oceanica es esencialmente un
+    // mapa de la edad del fondo.
+    const float Depth = FMath::Min(
+        Params.RidgeDepth + Params.ThermalSubsidenceCoeff * FMath::Sqrt(FMath::Max(AgeMa, 0.0f)),
+        Params.MaxOceanDepth);
+
+    return -Depth;
+}
+
+float URasterizedTectonics::GetCrustThicknessAt(ECSCubeFace Face, int32 X, int32 Y) const
+{
+    const int32 FaceIdx = static_cast<int32>(Face);
+    if (!bIsInitialized || FaceIdx < 0 || FaceIdx >= 6 || !IsValidCoord(X, Y))
+    {
+        return 0.0f;
+    }
+    return FaceData[FaceIdx].CrustThicknessData[GetLinearIndex(X, Y)];
+}
+
+void URasterizedTectonics::RebuildElevationFromIsostasy(const FIsostasyParams& Params)
+{
+    ParallelFor(6, [&](int32 FaceIdx)
+    {
+        FTectonicFaceTextureData& Face = FaceData[FaceIdx];
+        const int32 Count = Face.ElevationData.Num();
+
+        for (int32 i = 0; i < Count; ++i)
+        {
+            Face.ElevationData[i] = ComputeIsostaticElevation(
+                Face.CrustThicknessData[i],
+                Face.CrustTypeData[i] == 1,
+                Face.CrustAgeData[i],
+                Params);
+        }
+    });
+}
+
+double URasterizedTectonics::ComputeOceanVolume(float TestSeaLevel) const
+{
+    // Suma de la columna de agua sobre cada celda sumergida. No se pondera por area de
+    // celda: la distorsion gnomonica hace que las celdas cerca de las esquinas del cubo
+    // cubran mas superficie, asi que esto es una aproximacion. Es aceptable porque lo que
+    // importa es que el volumen se CONSERVE, y el mismo sesgo se aplica al calcular el
+    // objetivo y al resolver el nivel, con lo que se cancela.
+    double Volume = 0.0;
+
+    for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
+    {
+        const TArray<float>& Elev = FaceData[FaceIdx].ElevationData;
+        for (int32 i = 0; i < Elev.Num(); ++i)
+        {
+            if (Elev[i] < TestSeaLevel)
+            {
+                Volume += static_cast<double>(TestSeaLevel - Elev[i]);
+            }
+        }
+    }
+
+    return Volume;
+}
+
+void URasterizedTectonics::UpdateSeaLevel()
+{
+    if (!bIsInitialized || TargetOceanVolume <= 0.0)
+    {
+        return;
+    }
+
+    // Biseccion. El volumen es monotono creciente con el nivel del mar (subir el nivel
+    // solo puede anadir agua), asi que la biseccion converge siempre y no hace falta nada
+    // mas sofisticado. 40 iteraciones sobre un rango de 40 km dan precision submilimetrica.
+    float Low = -20000.0f;
+    float High = 20000.0f;
+
+    for (int32 Iter = 0; Iter < 40; ++Iter)
+    {
+        const float Mid = (Low + High) * 0.5f;
+        if (ComputeOceanVolume(Mid) < TargetOceanVolume)
+        {
+            Low = Mid;
+        }
+        else
+        {
+            High = Mid;
+        }
+    }
+
+    SeaLevel = (Low + High) * 0.5f;
+}
+
+float URasterizedTectonics::GetLandFraction() const
+{
+    if (!bIsInitialized)
+    {
+        return 0.0f;
+    }
+
+    int32 Land = 0;
+    int32 Total = 0;
+
+    for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
+    {
+        const TArray<float>& Elev = FaceData[FaceIdx].ElevationData;
+        for (int32 i = 0; i < Elev.Num(); ++i)
+        {
+            ++Total;
+            if (Elev[i] >= SeaLevel)
+            {
+                ++Land;
+            }
+        }
+    }
+
+    return (Total > 0) ? (static_cast<float>(Land) / static_cast<float>(Total)) : 0.0f;
 }
 
 float URasterizedTectonics::GetPixelAngularSize() const
@@ -453,6 +615,7 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
                     Face.ElevationData[Idx] = Prev[SF].ElevationData[SI];
                     Face.CrustAgeData[Idx]  = Prev[SF].CrustAgeData[SI];
                     Face.CrustTypeData[Idx] = Prev[SF].CrustTypeData[SI];
+                    Face.CrustThicknessData[Idx] = Prev[SF].CrustThicknessData[SI];
                     ++Count.Moved;
                 }
                 else if (Claimants.Num() == 0)
@@ -468,7 +631,8 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
                     Face.PlateIDData[Idx]   = (PreviousOwner < NumPlates) ? PreviousOwner : 0;
                     Face.CrustTypeData[Idx] = 0;
                     Face.CrustAgeData[Idx]  = 0.0f;
-                    Face.ElevationData[Idx] = -2500.0f;
+                    Face.CrustThicknessData[Idx] = FIsostasyParams().OceanicThickness;
+                    Face.ElevationData[Idx] = -FIsostasyParams().RidgeDepth;
                     ++Count.Created;
                 }
                 else
@@ -520,15 +684,54 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
                     const int32 WF = SourceFace[Winner];
                     const int32 WI = SourceIdx[Winner];
 
-                    Face.PlateIDData[Idx]   = static_cast<uint8>(Claimants[Winner]);
-                    Face.ElevationData[Idx] = Prev[WF].ElevationData[WI];
-                    Face.CrustAgeData[Idx]  = Prev[WF].CrustAgeData[WI];
-                    Face.CrustTypeData[Idx] = Prev[WF].CrustTypeData[WI];
+                    const int32 WinnerFace = WF;
+                    const int32 WinnerIdx = WI;
 
-                    // Cada perdedor es una celda de corteza que desaparece: es la
-                    // contraparte de la creacion en dorsales que faltaba (el TODO de
-                    // BoundaryInteractions.cpp:609).
-                    Count.Destroyed += Claimants.Num() - 1;
+                    Face.PlateIDData[Idx]   = static_cast<uint8>(Claimants[Winner]);
+                    Face.ElevationData[Idx] = Prev[WinnerFace].ElevationData[WinnerIdx];
+                    Face.CrustAgeData[Idx]  = Prev[WinnerFace].CrustAgeData[WinnerIdx];
+                    Face.CrustTypeData[Idx] = Prev[WinnerFace].CrustTypeData[WinnerIdx];
+
+                    // CONSERVACION DE CORTEZA CONTINENTAL (ROADMAP.md F2).
+                    //
+                    // Antes de F2 el perdedor simplemente desaparecia, y el planeta perdia
+                    // ~29% de corteza continental cada 200 Ma - insostenible, porque en la
+                    // Tierra el area continental lleva miles de millones de anos
+                    // aproximadamente constante.
+                    //
+                    // La fisica real: la corteza oceanica SI se destruye (subduce al
+                    // manto), pero la continental NO puede - es demasiado ligera para
+                    // hundirse. Cuando dos continentes chocan, su material se APILA. Por
+                    // eso el Tibet tiene 70 km de corteza en vez de 35.
+                    //
+                    // Asi que el grosor del perdedor continental se suma al del ganador,
+                    // y de ahi salen las montanas por flotacion isostatica, sin ningun
+                    // termino de levantamiento inventado.
+                    float Thickness = Prev[WinnerFace].CrustThicknessData[WinnerIdx];
+                    int32 SubductedCount = 0;
+
+                    for (int32 C = 0; C < Claimants.Num(); ++C)
+                    {
+                        if (C == Winner)
+                        {
+                            continue;
+                        }
+
+                        const int32 LF = SourceFace[C], LI = SourceIdx[C];
+                        if (Prev[LF].CrustTypeData[LI] == 1)
+                        {
+                            // Continental: se apila, no se pierde.
+                            Thickness += Prev[LF].CrustThicknessData[LI];
+                        }
+                        else
+                        {
+                            // Oceanica: subduce y desaparece de verdad.
+                            ++SubductedCount;
+                        }
+                    }
+
+                    Face.CrustThicknessData[Idx] = FMath::Min(Thickness, FIsostasyParams().MaxThickness);
+                    Count.Destroyed += SubductedCount;
                 }
 
                 // La velocidad depende de donde esta el punto AHORA y de quien lo posee
@@ -651,6 +854,11 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
     // de una constante magica sin unidades.
     const float RadiusMetres = Grid ? (Grid->GetRadius() / 100.0f) : 6371000.0f;
 
+    // Ancho de una celda del raster sobre la superficie (m). Una cara abarca 90 grados.
+    const float CellWidthMetres = (Resolution > 0)
+        ? (PI * 0.5f * RadiusMetres / static_cast<float>(Resolution))
+        : 1.0f;
+
     for (int32 SubStep = 0; SubStep < NumSubSteps; ++SubStep)
     {
         // Procesar cada cara. ParallelFor por cara: cada hilo solo escribe en la suya,
@@ -693,29 +901,41 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
 
                     if (ConvergenceSum > 0.0f)
                     {
-                        // Convergencia en m/Ma: rad/Ma por el radio del planeta. Con omega
-                        // tipico de 0.005 rad/Ma sobre 6371 km son ~32 km/Ma de acortamiento,
-                        // que es el orden real del Himalaya (~5 cm/ano).
+                        // OROGENIA COMO ENGROSAMIENTO (ROADMAP.md F2).
+                        //
+                        // Antes esto sumaba metros a la elevacion directamente. Ahora suma
+                        // GROSOR, y la altura sale despues por flotacion isostatica. La
+                        // diferencia no es cosmetica: engrosar conserva masa y crea raiz
+                        // cortical, asi que al erosionar la montana en F4 la superficie
+                        // rebotara en vez de desaparecer, que es lo que hace de verdad.
+                        //
+                        // El acortamiento horizontal se reparte en el ancho de la celda:
+                        // una convergencia de C m/Ma sobre una celda de ancho W engrosa la
+                        // columna en una fraccion C/W por Ma. La eficiencia recoge que el
+                        // acortamiento real se reparte por todo el orogeno, no se
+                        // concentra en una celda.
                         const float ConvergenceMetresPerMa = ConvergenceSum * RadiusMetres;
+                        const float ShorteningRate = ConvergenceMetresPerMa / FMath::Max(CellWidthMetres, 1.0f);
 
-                        // La orogenia continente-continente es mucho mas eficaz levantando
-                        // que la subduccion: en subduccion la placa oceanica se hunde y solo
-                        // parte del acortamiento se convierte en relieve, mientras que en una
-                        // colision continental no hay a donde ir salvo hacia arriba.
+                        // La corteza oceanica no se engrosa al converger: subduce. Solo la
+                        // continental se apila.
                         const bool bContinental = (Face.CrustTypeData[Idx] == 1);
-                        const float Efficiency = Params.OrogenyFactor * (bContinental ? 1.0f : 0.25f);
-
-                        const float Uplift = ConvergenceMetresPerMa * Efficiency * SubDt;
-                        Face.ElevationData[Idx] = FMath::Min(Face.ElevationData[Idx] + Uplift, 12000.0f);
+                        if (bContinental)
+                        {
+                            const float Growth = 1.0f + ShorteningRate * Params.OrogenyFactor * SubDt;
+                            Face.CrustThicknessData[Idx] = FMath::Min(
+                                Face.CrustThicknessData[Idx] * Growth, Params.Isostasy.MaxThickness);
+                        }
                     }
                     else if (ConvergenceSum < 0.0f)
                     {
-                        // Divergencia: dorsal. La corteza recien formada esta caliente y flota
-                        // mas, de ahi que una dorsal quede ~1300 m sobre la llanura abisal.
+                        // Divergencia: dorsal. Corteza oceanica nueva y caliente; su altura
+                        // la pone el hundimiento termico desde la edad, asi que basta con
+                        // reiniciar edad y grosor.
                         if (Face.CrustTypeData[Idx] == 0)
                         {
-                            Face.ElevationData[Idx] = Params.OceanicBaseElevation + 1300.0f;
                             Face.CrustAgeData[Idx] = 0.0f;
+                            Face.CrustThicknessData[Idx] = Params.Isostasy.OceanicThickness;
                         }
                     }
                 }
@@ -734,7 +954,7 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
         // RENDIMIENTO: el bucle se parte en interior y anillo de borde. A Resolution=256 el
         // interior es el 98,4% de los pixeles y no puede cruzar de cara, asi que va con
         // indexado directo por filas; solo el anillo paga la reproyeccion geometrica. Antes
-        // TODOS los taps pasaban por SampleNeighborElevation, que son 3,5 millones de
+        // TODOS los taps pasaban por SampleNeighborField, que son 3,5 millones de
         // llamadas con doble indireccion por sub-paso.
         // ============================================================
         if (Params.DiffusionRate > 0.0f)
@@ -747,14 +967,14 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
                 Snapshot.SetNum(6);
                 for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
                 {
-                    Snapshot[FaceIdx] = FaceData[FaceIdx].ElevationData;
+                    Snapshot[FaceIdx] = FaceData[FaceIdx].CrustThicknessData;
                 }
 
                 ParallelFor(6, [&](int32 FaceIdx)
                 {
                     const ECSCubeFace Face = static_cast<ECSCubeFace>(FaceIdx);
                     const TArray<float>& Src = Snapshot[FaceIdx];
-                    TArray<float>& Dst = FaceData[FaceIdx].ElevationData;
+                    TArray<float>& Dst = FaceData[FaceIdx].CrustThicknessData;
                     const float* SrcPtr = Src.GetData();
 
                     // --- Interior: sin cruces de cara, indexado directo ---
@@ -789,7 +1009,7 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
                         {
                             for (int32 KX = -1; KX <= 1; ++KX)
                             {
-                                Sum += SampleNeighborElevation(Snapshot, Face, X, Y, KX, KY) * Kernel[KY + 1][KX + 1];
+                                Sum += SampleNeighborField(Snapshot, Face, X, Y, KX, KY) * Kernel[KY + 1][KX + 1];
                             }
                         }
                         const int32 Idx = Y * Resolution + X;
@@ -810,6 +1030,14 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
             }
         }
     }
+
+    // La elevacion es DERIVADA desde F2: se reconstruye desde grosor, edad y tipo tras
+    // cada paso. Nada la modifica directamente.
+    RebuildElevationFromIsostasy(Params.Isostasy);
+
+    // Y el nivel del mar responde: si las dorsales son jovenes la cuenca oceanica es menos
+    // honda y el agua desplazada inunda los continentes.
+    UpdateSeaLevel();
 
     TotalSimulationTime += DeltaTimeScaled;
     StepCount++;
@@ -979,7 +1207,7 @@ bool URasterizedTectonics::GetNeighborPixel(ECSCubeFace Face, int32 X, int32 Y, 
     return true;
 }
 
-float URasterizedTectonics::SampleNeighborElevation(const TArray<TArray<float>>& AllFaces,
+float URasterizedTectonics::SampleNeighborField(const TArray<TArray<float>>& AllFaces,
                                                     ECSCubeFace Face, int32 X, int32 Y,
                                                     int32 DX, int32 DY) const
 {
@@ -1052,7 +1280,7 @@ void URasterizedTectonics::SmoothElevation(int32 Iterations)
                         {
                             // Vecino real, cruzando a la cara contigua si toca. Antes se
                             // recortaba al borde de la cara, lo que sesgaba la costura.
-                            Sum += SampleNeighborElevation(Snapshot, Face, X, Y, KX, KY) * Kernel[KY + 1][KX + 1];
+                            Sum += SampleNeighborField(Snapshot, Face, X, Y, KX, KY) * Kernel[KY + 1][KX + 1];
                         }
                     }
                     

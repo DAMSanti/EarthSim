@@ -30,8 +30,82 @@ struct FTectonicFaceTextureData
     TArray<FVector2f> VelocityData;  // Velocidad tangencial
     TArray<float> CrustAgeData;      // Edad de la corteza
     TArray<uint8> CrustTypeData;     // Tipo (oceánica/continental)
+    TArray<float> CrustThicknessData; // Grosor de corteza (m) - estado primario desde F2
     
     bool bIsValid = false;
+};
+
+/**
+ * Parámetros de isostasia y nivel del mar (ROADMAP.md F2).
+ *
+ * Hasta F2 la elevación era el estado primario: la orogenia le sumaba metros
+ * directamente. Eso tiene dos problemas. El primero es que no conserva masa — en una
+ * colisión continente-continente la resolución destruía la celda perdedora porque no
+ * tenía dónde apilar su material, y el planeta perdía ~29 % de corteza continental cada
+ * 200 Ma. El segundo es que una montaña erosionada desaparecería en vez de rebotar.
+ *
+ * Desde F2 el estado primario es el **grosor de corteza**, y la elevación se DERIVA por
+ * flotación isostática. Así el levantamiento pasa a ser una consecuencia de acumular
+ * masa, no un término sumado a mano.
+ */
+USTRUCT(BlueprintType)
+struct CUBESPHERE_API FIsostasyParams
+{
+    GENERATED_BODY()
+
+    /** Densidad del manto (kg/m³). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "1000.0"))
+    float MantleDensity = 3300.0f;
+
+    /** Densidad de la corteza continental (kg/m³). Granítica, ligera: por eso flota alta. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "1000.0"))
+    float ContinentalDensity = 2750.0f;
+
+    /** Densidad de la corteza oceánica (kg/m³). Basáltica, más densa: por eso subduce. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "1000.0"))
+    float OceanicDensity = 2900.0f;
+
+    /** Grosor inicial de corteza continental (m). ~35 km es el valor terrestre típico. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "1000.0"))
+    float ContinentalThickness = 35000.0f;
+
+    /** Grosor inicial de corteza oceánica (m). ~7 km, cinco veces más fina. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "1000.0"))
+    float OceanicThickness = 7000.0f;
+
+    /**
+     * Grosor máximo (m). El Tíbet ronda los 70 km; por encima de eso la raíz se vuelve
+     * inestable y se desprende (delaminación), fenómeno que no se simula todavía, así
+     * que se acota.
+     */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "1000.0"))
+    float MaxThickness = 75000.0f;
+
+    /**
+     * Referencia de altura (m). Se resta a la flotación de Airy para que el resultado
+     * quede en la escala habitual de elevación. Calibrado para que una corteza
+     * continental de 35 km dé ~+840 m, que es la altura media de los continentes.
+     */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite)
+    float IsostaticDatum = 4993.0f;
+
+    /**
+     * Profundidad de una dorsal recién formada (m) y coeficiente de hundimiento térmico.
+     *
+     * El fondo oceánico no está a una profundidad fija: se hunde al enfriarse, siguiendo
+     * muy bien la ley empírica d = D0 + K·√(edad en Ma). La corteza joven de una dorsal
+     * está caliente y flota; a 100 Ma se ha enfriado y contraído hasta ~6 km. Es la
+     * razón de que la batimetría real sea básicamente un mapa de la edad del fondo.
+     */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite)
+    float RidgeDepth = 2500.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite)
+    float ThermalSubsidenceCoeff = 350.0f;
+
+    /** Profundidad a la que se estabiliza el fondo oceánico viejo (m). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite)
+    float MaxOceanDepth = 5750.0f;
 };
 
 /**
@@ -61,13 +135,19 @@ struct CUBESPHERE_API FPlateMovementParams
      * significado físico y desacoplada de la difusión en ~7 órdenes de magnitud.
      *
      * Ahora la convergencia se pasa a m/Ma (rad/Ma × radio del planeta) antes de
-     * multiplicar, así que este número se lee directamente: 0.005 = por cada metro que
-     * dos placas se acercan, la frontera sube 5 mm. Con ω típico de 0.005 rad/Ma sobre
-     * 6371 km eso son ~32 km/Ma de acortamiento y ~160 m/Ma de levantamiento, del orden
-     * del Himalaya antes de erosión.
+     * multiplicar, así que este número se lee directamente.
+     *
+     * Desde F2 lo que engrosa es el GROSOR de corteza, no la elevación: es la fracción
+     * del acortamiento horizontal que se convierte en engrosamiento vertical. Recoge que
+     * el acortamiento real se reparte por todo el orógeno y no se concentra en una celda.
+     * Calibrado contra el Himalaya: la corteza pasó allí de ~35 a ~70 km en unos 50 Ma,
+     * o sea ~700 m/Ma de engrosamiento, que con un acortamiento de 0.153/Ma pide un
+     * factor del orden de 0.1. El valor NO se puede leer aislado: forma un equilibrio con
+     * `DiffusionRate`, que rebaja continuamente la raíz. Subir uno sin mirar el otro
+     * aplana el planeta o lo satura contra `MaxThickness`.
      */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
-    float OrogenyFactor = 0.005f;
+    float OrogenyFactor = 0.08f;
     
     // Factor de spreading (qué tan rápido se crea corteza)
     UPROPERTY(EditAnywhere, BlueprintReadWrite)
@@ -86,7 +166,9 @@ struct CUBESPHERE_API FPlateMovementParams
     float OceanicBaseElevation = -3800.0f;
 
     // Tasa de relajación difusiva (thermal erosion / mass wasting), POR Ma de tiempo
-    // simulado — no por paso. Antes era por paso, lo que hacía que el resultado
+    // simulado — no por paso. Desde F2 actúa sobre el GROSOR de corteza, no sobre la
+    // elevación (que ya es derivada), así que representa redistribución de masa cortical
+    // y no un simple suavizado de la imagen. Antes era por paso, lo que hacía que el resultado
     // dependiera del framerate y dejaba la difusión desacoplada del levantamiento
     // (ver OrogenyFactor). Sin esto, la elevación en celdas de frontera
     // crece sin control hacia el tope (12000m) mientras las celdas vecinas no-frontera
@@ -98,7 +180,11 @@ struct CUBESPHERE_API FPlateMovementParams
     // (equilibrio entre esta tasa y OrogenyFactor/SpreadingFactor), no hay un valor
     // "correcto" universal.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
-    float DiffusionRate = 0.05f;
+    float DiffusionRate = 0.02f;
+
+    /** Isostasia y batimetría (ROADMAP.md F2). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite)
+    FIsostasyParams Isostasy;
 };
 
 /**
@@ -254,6 +340,48 @@ public:
     UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics")
     FTectonicAdvectionStats GetAdvectionStats() const { return AdvectionStats; }
 
+    /**
+     * Elevación de equilibrio isostático de una columna de corteza (m).
+     *
+     * Flotación de Airy: una columna de grosor T y densidad Rc flotando en un manto de
+     * densidad Rm sobresale h = T·(Rm−Rc)/Rm sobre el nivel de flotación. Con los valores
+     * reales (35 km continental a 2750 sobre manto a 3300) salen ~5,8 km, y restando el
+     * datum queda +840 m: la altura media real de los continentes. Que el número correcto
+     * salga de densidades reales, y no de una constante ajustada, es la comprobación de
+     * que la fórmula es la buena.
+     *
+     * Para corteza oceánica no se usa Airy sino el hundimiento térmico por edad, que
+     * describe mucho mejor la batimetría observada.
+     */
+    UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics|Isostasy")
+    static float ComputeIsostaticElevation(float ThicknessMetres, bool bContinental, float AgeMa,
+                                           const FIsostasyParams& Params);
+
+    /** Grosor de corteza (m) en una celda. Estado primario desde F2. */
+    UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics|Isostasy")
+    float GetCrustThicknessAt(ECSCubeFace Face, int32 X, int32 Y) const;
+
+    /**
+     * Nivel del mar actual (m, en la misma escala que la elevación). Antes no existía:
+     * el océano era simplemente "elevación negativa".
+     */
+    UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics|Isostasy")
+    float GetSeaLevel() const { return SeaLevel; }
+
+    /** Fracción de la superficie del planeta por encima del nivel del mar (0..1). */
+    UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics|Isostasy")
+    float GetLandFraction() const;
+
+    /**
+     * Recalcula el nivel del mar para conservar el volumen de océano.
+     *
+     * Es lo que hace que el nivel del mar RESPONDA a la tectónica en vez de ser una
+     * constante: cuando hay mucha dorsal joven, la corteza caliente ocupa volumen, la
+     * cuenca oceánica se hace menos honda y el agua desplazada inunda los continentes.
+     * Es el mecanismo que explica los grandes mares interiores del Cretácico.
+     */
+    void UpdateSeaLevel();
+
     /** Edad de la corteza (Ma) de una celda. */
     UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics")
     float GetCrustAgeAt(ECSCubeFace Face, int32 X, int32 Y) const;
@@ -404,6 +532,21 @@ protected:
 
     FTectonicAdvectionStats AdvectionStats;
 
+    /** Nivel del mar (m). Se resuelve por bisección para conservar volumen de océano. */
+    float SeaLevel = 0.0f;
+
+    /**
+     * Volumen de océano a conservar (m·celda, unidades arbitrarias pero consistentes).
+     * Se fija al inicializar a partir de la configuración de partida y luego se mantiene.
+     */
+    double TargetOceanVolume = 0.0;
+
+    /** Recalcula toda la elevación a partir del grosor, la edad y el tipo. */
+    void RebuildElevationFromIsostasy(const FIsostasyParams& Params);
+
+    /** Volumen de agua para un nivel del mar dado (misma unidad que TargetOceanVolume). */
+    double ComputeOceanVolume(float TestSeaLevel) const;
+
     /**
      * Tiempo simulado acumulado desde la última advección.
      *
@@ -440,8 +583,8 @@ private:
     bool GetNeighborPixel(ECSCubeFace Face, int32 X, int32 Y, int32 DX, int32 DY,
                           ECSCubeFace& OutFace, int32& OutX, int32& OutY) const;
 
-    /** Elevacion del vecino (X+DX, Y+DY), cruzando caras. */
-    float SampleNeighborElevation(const TArray<TArray<float>>& AllFaces,
+    /** Valor del campo dado en el vecino (X+DX, Y+DY), cruzando caras si hace falta. */
+    float SampleNeighborField(const TArray<TArray<float>>& AllFaces,
                                   ECSCubeFace Face, int32 X, int32 Y, int32 DX, int32 DY) const;
 
     // Helpers

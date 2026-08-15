@@ -738,9 +738,46 @@ bool FOrogenyBuildsMountainsTest::RunTest(const FString& Parameters)
     TestTrue(FString::Printf(TEXT("Se forman montanas altas (maxima %.0f m)"), After),
         After > 4000.0f);
 
-    // Y acotada: si satura en el tope es que volvieron los picos infinitos de M1.5.
-    TestTrue(FString::Printf(TEXT("El relieve no satura en el tope de 12000 m (maxima %.0f m)"), After),
-        After < 11500.0f);
+    // Y acotada. Desde F2 el techo no es un clamp arbitrario sino una consecuencia
+    // fisica: MaxThickness (75 km, el limite a partir del cual la raiz se desprende por
+    // delaminacion) por la flotacion de Airy da ~7507 m.
+    //
+    // Lo que se comprueba NO es que ninguna celda llegue al techo: en la Tierra el Tibet
+    // esta justo en ese limite, asi que unos pocos picos ahi son lo correcto. Lo que
+    // seria un desbocamiento es que una parte grande del planeta este pegada al tope,
+    // que es la version F2 del bug de los picos infinitos de M1.5.
+    const FIsostasyParams Iso;
+    const float IsostaticCeiling = Iso.MaxThickness * (Iso.MantleDensity - Iso.ContinentalDensity)
+                                 / Iso.MantleDensity - Iso.IsostaticDatum;
+
+    int32 AtCeiling = 0;
+    int32 LandCells = 0;
+    for (int32 F = 0; F < 6; ++F)
+    {
+        const ECSCubeFace Face = static_cast<ECSCubeFace>(F);
+        for (int32 Y = 0; Y < Res; ++Y)
+        {
+            for (int32 X = 0; X < Res; ++X)
+            {
+                const float E = Raster->GetElevationAt(Face, X, Y);
+                if (E > 0.0f)
+                {
+                    ++LandCells;
+                    if (E > IsostaticCeiling - 100.0f)
+                    {
+                        ++AtCeiling;
+                    }
+                }
+            }
+        }
+    }
+
+    const float CeilingFraction = (LandCells > 0) ? (static_cast<float>(AtCeiling) / LandCells) : 0.0f;
+    UE_LOG(LogTemp, Log, TEXT("  %d de %d celdas emergidas al techo isostatico (%.1f%%)"),
+        AtCeiling, LandCells, CeilingFraction * 100.0f);
+
+    TestTrue(FString::Printf(TEXT("El engrosamiento no se desboca (%.1f%% de la tierra al techo de %.0f m)"),
+        CeilingFraction * 100.0f, IsostaticCeiling), CeilingFraction < 0.10f);
 
     // El relieve tiene que haber CRECIDO respecto al ruido inicial, o el test pasaria
     // con un planeta que simplemente empezo accidentado y se quedo igual.
