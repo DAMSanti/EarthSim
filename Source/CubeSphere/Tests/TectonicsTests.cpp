@@ -652,23 +652,26 @@ bool FContinentsPersistTest::RunTest(const FString& Parameters)
     TestTrue(FString::Printf(TEXT("Los continentes persisten (%d -> %d celdas)"), Before, After),
         Ratio > 0.5f);
 
-    // Cota superior deliberadamente holgada, y conviene explicar por que.
+    // Cota holgada que documenta un DEFECTO CONOCIDO, no un nivel aceptable.
     //
-    // Un crecimiento lento del area continental no es un error: en la Tierra la corteza
-    // continental ha CRECIDO a lo largo del tiempo geologico por acrecion de arcos
-    // volcanicos en los margenes convergentes. Lo que no puede es dispararse.
+    // CORRECCION (15-08-2026): una version anterior de este comentario justificaba la
+    // holgura diciendo que la erosion de F4 aportaria el sumidero que falta. Es FALSO y
+    // conviene dejarlo escrito para no repetirlo: la erosion adelgaza corteza y mueve
+    // sedimento, pero NO convierte corteza continental en oceanica. El area continental
+    // no la toca. F4 no arregla esto.
     //
-    // Ademas hoy falta el sumidero principal: la erosion. Cuando llegue F4, el material
-    // continental se desgastara y acabara como sedimento, y parte de la tierra emergida
-    // que hoy solo puede crecer volvera a desaparecer. Apretar esta cota ahora
-    // significaria calibrar contra un sistema al que le falta la mitad del ciclo.
+    // La causa real es el remuestreo de la adveccion. En una colision la continental gana
+    // y la celda de destino pasa a ser continental, convirtiendo oceano en continente. Lo
+    // que deberia compensarlo es que el borde trasero de la placa deje sitio, pero ese
+    // mecanismo quedo amortiguado al filtrar los huecos de remuestreo. Es el mismo origen
+    // que el escalonado de bordes que mide Simu.Tectonics.LongRunStability: un unico bug
+    // con dos sintomas.
     //
-    // Dato que respalda que la cota puede ser holgada: Simu.Tectonics.LongRunStability
-    // mide que la FRACCION DE TIERRA EMERGIDA se mantiene estable (24,6% -> 24,6% en
-    // 1000 Ma) aunque el area de corteza continental crezca. Buena parte de ese
-    // crecimiento es plataforma sumergida, que es exactamente lo que ocurre de verdad.
+    // Dato que acota la gravedad: la FRACCION DE TIERRA EMERGIDA si es estable (24,6% ->
+    // 24,6% en 1000 Ma), asi que el exceso es plataforma sumergida y no continentes
+    // desbordando el planeta.
     //
-    // REVISAR AL CERRAR F4.
+    // Se aprieta cuando se arregle la adveccion, no antes y no por otra via.
     TestTrue(FString::Printf(TEXT("La corteza continental no crece de forma descontrolada (%d -> %d, x%.2f)"),
         Before, After, Ratio), Ratio < 1.6f);
 
@@ -852,8 +855,37 @@ bool FLongRunStabilityTest::RunTest(const FString& Parameters)
         return N;
     };
 
+
+    // Numero de celdas que tocan una frontera de placa. Es la metrica del PEINE: las
+    // placas son rigidas, asi que la longitud total de frontera deberia mantenerse del
+    // mismo orden. Si el remuestreo va escalonando los bordes, cada tramo recto se
+    // convierte en una escalera y este numero se infla sin que la fisica lo justifique.
+    auto CountBoundaryCells = [Raster, Res]()
+    {
+        int32 N = 0;
+        const int32 DX[4] = {1,-1,0,0};
+        const int32 DY[4] = {0,0,1,-1};
+        for (int32 F = 0; F < 6; ++F)
+        {
+            const ECSCubeFace Face = static_cast<ECSCubeFace>(F);
+            for (int32 Y = 1; Y < Res - 1; ++Y)
+            {
+                for (int32 X = 1; X < Res - 1; ++X)
+                {
+                    const int32 Id = Raster->GetPlateIDAt(Face, X, Y);
+                    for (int32 D = 0; D < 4; ++D)
+                    {
+                        if (Raster->GetPlateIDAt(Face, X + DX[D], Y + DY[D]) != Id) { ++N; break; }
+                    }
+                }
+            }
+        }
+        return N;
+    };
+
     const int32 ContinentalBefore = CountContinental();
     const float LandBefore = Raster->GetLandFraction();
+    const int32 BoundaryBefore = CountBoundaryCells();
 
     // Paso pequeno y muchos pasos: es el regimen en el que corre la sesion real.
     FPlateMovementParams Params;
@@ -869,6 +901,7 @@ bool FLongRunStabilityTest::RunTest(const FString& Parameters)
 
     const int32 ContinentalAfter = CountContinental();
     const float LandAfter = Raster->GetLandFraction();
+    const int32 BoundaryAfter = CountBoundaryCells();
     const FTectonicAdvectionStats Stats = Raster->GetAdvectionStats();
 
     UE_LOG(LogTemp, Log,
@@ -877,6 +910,10 @@ bool FLongRunStabilityTest::RunTest(const FString& Parameters)
         ContinentalBefore, ContinentalAfter,
         LandBefore * 100.0f, LandAfter * 100.0f,
         Stats.CellsCreated, Stats.CellsDestroyed);
+
+    const float BoundaryRatio = static_cast<float>(BoundaryAfter) / FMath::Max(BoundaryBefore, 1);
+    UE_LOG(LogTemp, Log, TEXT("  Frontera: %d -> %d celdas (x%.2f) - metrica del escalonado"),
+        BoundaryBefore, BoundaryAfter, BoundaryRatio);
 
     if (!TestTrue(TEXT("Hubo muchas advecciones (el regimen que reproduce el problema)"),
         Stats.AdvectionCount > 100))
@@ -894,6 +931,28 @@ bool FLongRunStabilityTest::RunTest(const FString& Parameters)
     // un continente global.
     TestTrue(FString::Printf(TEXT("La tierra emergida sigue siendo plausible (%.1f%%)"), LandAfter * 100.0f),
         LandAfter < 0.60f);
+
+    // EL PEINE. Esta cota NO es un objetivo cumplido: documenta un defecto medido.
+    //
+    // Las placas son rigidas, asi que la longitud total de frontera deberia mantenerse
+    // del mismo orden. Se mide x3,15 en 196 advecciones porque el campo de IDs es
+    // categorico - no se puede interpolar, hay que tomar el vecino mas cercano - y cada
+    // adveccion re-cuantiza el borde. Encadenadas, el escalonado se acumula hasta formar
+    // el patron de peine visible en pantalla.
+    //
+    // Se intento muestrear contra un marco de referencia con rotacion acumulada, para que
+    // solo hubiera un remuestreo por lejos que se llegue. Empeoro todo (tierra emergida
+    // 24,6% -> 9,2%, montanas de 7472 m a 969 m) y se revirtio: la propiedad salia de la
+    // referencia acumulada mientras los datos se transportaban un paso atras, y cuando la
+    // referencia envejece esas dos cosas dejan de corresponderse.
+    //
+    // NINGUNA FASE POSTERIOR ARREGLA ESTO. La erosion de F4 suaviza la elevacion, no el
+    // campo de IDs; el renderizado de F6 no toca la simulacion. Hay que resolverlo aqui.
+    //
+    // La cota queda en 4.0 para detectar EMPEORAMIENTO mientras tanto. El objetivo real
+    // al arreglarlo es < 1.5.
+    TestTrue(FString::Printf(TEXT("El escalonado de bordes no empeora (%d -> %d celdas, x%.2f; objetivo <1.5)"),
+        BoundaryBefore, BoundaryAfter, BoundaryRatio), BoundaryRatio < 4.0f);
 
     return true;
 }

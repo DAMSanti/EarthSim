@@ -94,12 +94,37 @@ void ATectonicsTestActor::Tick(float DeltaTime)
     // Ejecutar simulación si está activa
     if (bSimulationRunning && bSystemsInitialized)
     {
+        // PASO FIJO, desacoplado del framerate (ver SimulationStepsPerSecond). El dt
+        // simulado no depende ya de lo que tarde el frame, asi que la fisica es
+        // reproducible y el coste esta acotado por diseno.
+        SimAccumulator += DeltaTime;
+        const float SimInterval = 1.0f / FMath::Max(SimulationStepsPerSecond, 0.1f);
+
+        // Tope de pasos por frame: si el frame va lento no se intenta recuperar el tiempo
+        // perdido a cualquier precio, porque eso realimenta la espiral de la muerte de M1.
+        // El tiempo simulado se queda atras, que es preferible a bloquear el frame.
+        const int32 MaxStepsPerFrame = 3;
+        int32 StepsThisFrame = 0;
+
         const double SimStart = FPlatformTime::Seconds();
-        StepSimulation(DeltaTime * TimeScale);
-        const double SimMs = (FPlatformTime::Seconds() - SimStart) * 1000.0;
-        // Media movil: el coste por frame varia mucho (la adveccion solo entra cada ~76
-        // pasos), y un valor instantaneo en el HUD seria ilegible.
-        AvgSimStepMs = FMath::Lerp(AvgSimStepMs, SimMs, 0.1);
+        while (SimAccumulator >= SimInterval && StepsThisFrame < MaxStepsPerFrame)
+        {
+            StepSimulation(SimulationStepMa * TimeScale);
+            SimAccumulator -= SimInterval;
+            ++StepsThisFrame;
+        }
+        if (StepsThisFrame >= MaxStepsPerFrame)
+        {
+            SimAccumulator = 0.0f;
+        }
+
+        if (StepsThisFrame > 0)
+        {
+            const double SimMs = (FPlatformTime::Seconds() - SimStart) * 1000.0;
+            // Media movil: el coste por paso varia mucho (la adveccion no entra siempre),
+            // y un valor instantaneo en el HUD seria ilegible.
+            AvgSimStepMs = FMath::Lerp(AvgSimStepMs, SimMs, 0.1);
+        }
     }
 
     // Actualizar visualización
@@ -1061,7 +1086,7 @@ void ATectonicsTestActor::DrawScreenDebugInfo()
         TEXT("[+/-] Velocidad | [1-8] Placa\n")
         TEXT("[V] Velocidades | [B] Límites\n")
         TEXT("Corteza: +%d creada / -%d destruida (%d advecciones)\n")
-        TEXT("Coste: sim %.1f ms | malla %.1f ms (%.0f Hz)\n")
+        TEXT("Coste: sim %.1f ms @%.0f Hz | malla %.1f ms @%.0f Hz\n")
         TEXT("[F/G] Campo | [U] %s\n")
         TEXT("%s"),
         SimulationTime,
@@ -1074,6 +1099,7 @@ void ATectonicsTestActor::DrawScreenDebugInfo()
         RasterizedTectonics ? RasterizedTectonics->GetAdvectionStats().CellsDestroyed : 0,
         RasterizedTectonics ? RasterizedTectonics->GetAdvectionStats().AdvectionCount : 0,
         AvgSimStepMs,
+        SimulationStepsPerSecond,
         AvgMeshUpdateMs,
         MeshUpdateHz,
         bUnlitFieldView ? TEXT("unlit") : TEXT("iluminado"),

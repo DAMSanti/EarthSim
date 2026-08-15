@@ -223,6 +223,35 @@ public:
     bool bUnlitFieldView = true;
 
     /**
+     * Pasos de simulación por segundo de tiempo real.
+     *
+     * La simulación corría UNA VEZ POR FRAME con el DeltaTime del frame. Eso tiene tres
+     * problemas, y el de rendimiento es el menos grave:
+     *
+     *  1. El coste escala con el framerate sin que la física gane nada. Un paso tectónico
+     *     de 81 ms ejecutado 60 veces por segundo es absurdo cuando la simulación avanza
+     *     en millones de años.
+     *  2. El resultado dependía del framerate: más fps significaba más pasos, y un paso
+     *     lento agrandaba el dt, cambiando la física. Un simulador no puede dar resultados
+     *     distintos según la máquina.
+     *  3. Realimentación: frame lento → dt grande → más sub-pasos → frame más lento. Es la
+     *     espiral de la muerte de M1 por otra puerta.
+     *
+     * Con paso fijo la física es reproducible y el coste está acotado por diseño, que es
+     * lo que hace falta al añadir clima, erosión y ciclo del agua encima.
+     */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tectonics|Simulation", meta = (ClampMin = "0.1"))
+    float SimulationStepsPerSecond = 10.0f;
+
+    /**
+     * Tiempo simulado (Ma) que avanza cada paso. Fijo a propósito: es lo que hace la
+     * física reproducible. Para ir más rápido se sube TimeScale, que multiplica este
+     * valor, no la frecuencia de pasos.
+     */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tectonics|Simulation", meta = (ClampMin = "0.001"))
+    float SimulationStepMa = 0.1f;
+
+    /**
      * Cuantas veces por segundo se refresca el color y la posicion de los vertices.
      *
      * Antes UpdateMeshColors() corria en CADA frame: reconstruye ~100.000 vertices
@@ -359,6 +388,9 @@ protected:
 
     /** Acumulador del limitador de refresco de malla (ver MeshUpdateHz). */
     float MeshUpdateAccumulator = 0.0f;
+
+    /** Acumulador del paso fijo de simulación. */
+    float SimAccumulator = 0.0f;
 
     /**
      * Fuerza un refresco inmediato saltandose el limitador. Se activa al cambiar de campo

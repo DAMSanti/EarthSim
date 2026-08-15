@@ -208,6 +208,35 @@ Esto hace que subducción, dorsales y apertura de océanos sean **emergentes**, 
 
 ---
 
+## Defectos abiertos — y cuáles NO los arregla ninguna fase posterior
+
+> Escrito el 15-08-2026 tras detectar que estaba aparcando un problema con una excusa que no se sostenía. La regla: **antes de diferir un defecto a una fase futura, hay que poder nombrar el mecanismo concreto que lo arreglará.** Si no se puede, no está diferido, está sin arreglar.
+
+### 🔴 Escalonado de bordes de placa ("peine") — ×3,15 medido
+
+El campo de IDs de placa es **categórico**: no se puede interpolar, hay que tomar el vecino más cercano. Cada advección re-cuantiza el borde y, encadenadas, el escalonado se acumula. Medido en `Simu.Tectonics.LongRunStability`: la longitud total de frontera crece ×3,15 en 196 advecciones, cuando con placas rígidas debería mantenerse del mismo orden.
+
+**Intento fallido (15-08-2026), documentado para no repetirlo:** muestrear contra un marco de referencia con la rotación acumulada de cada placa, para que hubiera un solo remuestreo por lejos que se llegue. Empeoró todo — tierra emergida 24,6 % → 9,2 %, montañas de 7.472 m a 969 m — y se revirtió. El fallo de diseño: la propiedad salía de la referencia acumulada mientras la edad y el grosor se transportaban un paso atrás, y cuando la referencia envejece esas dos cosas dejan de corresponderse. Añadir el centinela de material subducido mejoró pero no bastó.
+
+**No lo arregla ninguna fase posterior.** La erosión de F4 suaviza la elevación, no el campo de IDs. El renderizado de F6 no toca la simulación.
+
+### 🔴 Crecimiento del área continental — ×1,28 por 1000 Ma
+
+**Corrección de un error mío:** justifiqué esta holgura diciendo que la erosión de F4 aportaría el sumidero. Es falso. La erosión adelgaza corteza y mueve sedimento, pero **no convierte corteza continental en oceánica**; el área continental no la toca.
+
+Causa real: en una colisión la continental gana y la celda de destino pasa a ser continental, convirtiendo océano en continente. Lo que debería compensarlo — que el borde trasero de la placa deje sitio — quedó amortiguado al filtrar los huecos de remuestreo.
+
+**Es el mismo bug que el peine, con otro síntoma.** Un solo arreglo cubre los dos.
+
+Acota la gravedad: la **fracción de tierra emergida sí es estable** (24,6 % → 24,6 % en 1000 Ma), así que el exceso es plataforma sumergida, no continentes desbordando el planeta.
+
+### 🟢 Lo que sí es legítimo diferir
+
+- **Detalle sub-celda del relieve** → F4 lo aporta de verdad: la erosión hidráulica esculpe a escala menor que la celda tectónica.
+- **LOD y detalle de superficie** → F6, con el mecanismo ya decidido (malla base + displacement).
+
+---
+
 ## F2 — Isostasia y nivel del mar 🔴
 
 **Por qué antes del agua:** sin nivel del mar explícito no hay costa, y sin costa no hay dónde depositar sedimento ni desde dónde evaporar.
