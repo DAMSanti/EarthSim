@@ -5,7 +5,6 @@
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
 #include "CubeSphere/Test/TectonicsTestActor.h"
-#include "CubeSphere/Tectonics/TectonicPlanetActor.h"
 #include "DrawDebugHelpers.h"
 #include "Engine/Engine.h"
 
@@ -182,11 +181,9 @@ void APlanetApproachPawn::ApplyHeightClamp()
 
 AActor* APlanetApproachPawn::FindTargetPlanet() const
 {
-    if (AActor* Found = UGameplayStatics::GetActorOfClass(this, ATectonicsTestActor::StaticClass()))
-    {
-        return Found;
-    }
-    return UGameplayStatics::GetActorOfClass(this, ATectonicPlanetActor::StaticClass());
+    // ATectonicPlanetActor se borró el 15-08-2026 (ROADMAP.md F0): no simulaba relieve ni
+    // dibujaba terreno, solo orquestaba el pipeline Nanite por parche que se abandonó.
+    return UGameplayStatics::GetActorOfClass(this, ATectonicsTestActor::StaticClass());
 }
 
 float APlanetApproachPawn::GetTargetSurfaceRadius(const FVector& Direction) const
@@ -194,12 +191,6 @@ float APlanetApproachPawn::GetTargetSurfaceRadius(const FVector& Direction) cons
     if (ATectonicsTestActor* TestActor = Cast<ATectonicsTestActor>(TargetPlanet))
     {
         return TestActor->GetSurfaceRadiusAtDirection(Direction);
-    }
-    if (ATectonicPlanetActor* PlanetActor = Cast<ATectonicPlanetActor>(TargetPlanet))
-    {
-        // Sin datos de elevacion por direccion en esta clase - aproximacion esferica.
-        // Razonable: el desplazamiento Nanite es pequeño relativo al radio del planeta.
-        return PlanetActor->PlanetRadius;
     }
     return 0.0f;
 }

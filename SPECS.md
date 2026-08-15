@@ -13,12 +13,13 @@
 | Generación de placas (Voronoi) | ✅ Implementado | CPU |
 | Relieve por fronteras estáticas | ⚠️ Parcial — genera relieve, no lo mueve | CPU |
 | `BoundaryInteractions` | ⚠️ Calcula e **inerte**: nadie lee su salida | CPU |
-| Tectónica — vía GPU | ⚠️ Andamiaje sin dispatch real | GPU (no funcional) |
-| Malla Nanite / heightmap | ❌ Desactivada por rendimiento (§4) | — |
-| QuadTree + LOD | ⚠️ Implementado, sin uso activo | CPU |
-| Streaming de chunks | ⚠️ Implementado, **0 referencias** | CPU |
+| Tectónica — vía GPU | 🗑️ Borrada (15-08-2026, era andamiaje vacío) | — |
+| Renderizado planetario con LOD | ❌ No implementado (`PlanetNaniteMesh` borrado, ver §4) | — |
+| QuadTree + LOD | ⚠️ Implementado, dormido hasta F6 | CPU |
+| Streaming de chunks | 🗑️ Borrado (0 referencias) | — |
 | Ruido Simplex | ✅ Implementado y en uso (§7) | CPU |
 | Flujo/difusión simple | ⚠️ Test de conservación de masa, **no es erosión** | CPU |
+| Visor de campos de simulación | ❌ No implementado (F0.5 — bloquea la verificación de todo lo demás) | — |
 | UI de configuración tectónica | ✅ Implementado | — |
 | Guardado/serialización | ✅ Implementado y verificado | — |
 | Control de versiones (git) | ✅ Inicializado | — |
@@ -48,9 +49,15 @@
 
 Diseño de referencia ampliado en [`docs/02-estructura-datos-espaciales.md`](docs/02-estructura-datos-espaciales.md).
 
-## 3. LOD, QuadTree y Streaming
+## 3. LOD y QuadTree
 
-**Implementado, con deuda técnica marcada:**
+**Implementado y conservado, pero dormido hasta F6.** `Streaming/ChunkStreamingManager` se borró el 15-08-2026 (0 referencias).
+
+Se conservan `QuadTree/` y `LOD/` tras revisar su API: es lógica espacial pura (split/collapse, error geométrico, bounds, vecinos, LOD por distancia) sin dependencia de Nanite, y es la mitad-CPU del esquema de renderizado de F6.
+
+🔻 **Deuda concreta:** `FCubeSphereQuadTree::GetCrossFaceNeighbors` (`CubeSphereQuadTree.cpp:596`) contiene una **copia de la tabla de conexiones de bordes** que M3 portó desde el Grid. Esa tabla se eliminó del Grid el 15-08-2026 por estar mal (ver §2 y §5.6); esta copia sigue ahí y no está cubierta por ningún test. Si se retoma el QuadTree, migrarla a `UCubeSphereGrid::GetNeighborCell`.
+
+**Estado previo, conservado como referencia:**
 
 - `QuadTree/CubeSphereQuadTree.cpp` (~770 líneas): árbol de subdivisión/colapso por cara. Culling de frustum y mapeo de aristas entre caras **resueltos el 11-08-2026** (ver `ROADMAP.md` M3).
 - `LOD/CubeLODController.cpp` (~520 líneas): selección de LOD por distancia con `TickComponent`. Frustum culling por cono implementado en `IsInFrustum` (11-08-2026).
@@ -58,9 +65,15 @@ Diseño de referencia ampliado en [`docs/02-estructura-datos-espaciales.md`](doc
 
 Los 4 TODOs pendientes son de **correctness/performance**, no cosméticos: sin culling de frustum el coste de LOD escala con el planeta completo, no con lo visible; sin mapeo de aristas entre caras el LOD puede generar grietas (T-junctions) en los bordes del cubo.
 
-## 4. Renderizado — Malla Nanite
+## 4. Renderizado planetario
 
-**Parcial** — `Nanite/PlanetNaniteMesh.cpp` (840 líneas).
+🔻 **No implementado.** `Nanite/PlanetNaniteMesh.cpp` (840 líneas) se **borró el 15-08-2026**: construía un `UStaticMesh` completo por parche de quadtree, de forma síncrona en el hilo principal, lo que congelaba el editor. Ningún presupuesto por frame arregla que la geometría se recree en vez de instanciarse.
+
+Hoy el único renderizado es el `UProceduralMeshComponent` de `ATectonicsTestActor`: malla fija de `GridResolution = 128` por cara sobre un radio de 6371 km, es decir **~78 km por quad**. Suficiente para ver patrones globales (que es lo que necesitan F1–F3), insuficiente para redes de drenaje (F4) o para bajar a la superficie.
+
+Diseño acordado para F6, para no repetir el error: quadtree + **una sola malla-rejilla pre-construida** instanciada por parche, con desplazamiento en el vertex shader muestreando la textura de elevación. Sobrevive `Nanite/PlanetMaterialGenerator` como único ejemplo funcionando de creación de materiales por código.
+
+**Estado previo, conservado como referencia histórica:**
 
 - Genera parches reales de `UStaticMesh`, gestiona un pool de `UStaticMeshComponent`, configura Nanite build settings correctamente.
 - **Gap parcialmente cerrado (11-08-2026):** `GenerateProceduralHeightmap` ya no usa `Sin(X)*Cos(Y)` (placeholder discontinuo entre parches/caras) — ahora usa `FSimplexNoise::SphereFractalNoise` sobre la dirección 3D real en la esfera (continuo, sin costuras). Sigue sin usar la elevación calculada por la simulación tectónica: **el planeta que se renderiza sigue sin reflejar la tectónica**.

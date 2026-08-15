@@ -11,6 +11,21 @@
 - `[x]` = hecho y verificado. `[ ]` = pendiente.
 - La sección **Historial** al final recoge el trabajo previo (M0–M5) y **qué de aquello resultó ser falso**.
 
+### Regla de verificación (decisión del 15-08-2026)
+
+**Ninguna fase se da por hecha si no se puede ver en pantalla.** Cada una de F1–F5 termina con una vista concreta que permite juzgar si el fenómeno simulado es plausible, no solo con un test que pase.
+
+El motivo sale directo de la auditoría: los tres bugs de F0 sobrevivieron meses precisamente porque nadie podía *ver* lo que el código hacía. Un test dice "no ha petado"; solo mirar el planeta dice "esto no parece la Tierra".
+
+Esto obliga a separar dos cosas que antes estaban mezcladas en un único "F6 — renderizado":
+
+| | Qué es | Cuándo |
+|---|---|---|
+| **Visualización de diagnóstico** | Cualquier campo de la simulación pintado sobre el globo, con leyenda y conmutable en caliente. Barato, no necesita LOD | **F0.5, y luego en cada fase** |
+| **Renderizado de producto** | Planeta con LOD desde órbita hasta la superficie, materiales, iluminación | F6 |
+
+La primera es la que hace comprobable cada fase. La segunda es acabado, y esa sí puede esperar.
+
 ---
 
 ## Objetivo del proyecto
@@ -59,12 +74,15 @@ Lo que se ve hoy en pantalla es un **generador de relieve estático**: un mapa d
     Aprovechando, se sustituyó también la implementación: `GetNeighborCell` tenía una tabla de 24 entradas (cara, borde) → (cara vecina, rotación) más un switch de 16 ramas. Ahora resuelve el cruce por **geometría pura** — se sale del cuadrado UV sin recortar, se reproyecta la dirección, y la rotación relativa entre caras sale sola. Sin tabla que mantener.
     ⚠️ **Pendiente relacionado:** M3 "portó esa tabla" al QuadTree (`CubeSphereQuadTree.cpp:596`), así que existe una **segunda copia** con los mismos errores potenciales. No se ha tocado porque el QuadTree es candidato a borrarse en el punto siguiente; si se decide conservarlo, hay que migrarlo a `GetNeighborCell`.
 
-- [ ] **Una sola asignación placa→celda.** Hoy hay dos que no coinciden: Voronoi/JFA sobre el Grid, y una búsqueda de centroide más cercano `O(Res²·N)` en `InitializeFromPlateSystem`. La segunda sobra.
-- [ ] **Borrar código muerto** (está en git si hace falta recuperarlo):
-  - `Streaming/ChunkStreamingManager` (27 KB) — 0 referencias externas
-  - `CubeSphereVisualizerComponent` (16 KB) — 0 referencias externas
-  - `PlateSimulationGPU` + `PlateMovementShader` + los 4 `.usf` (~50 KB) — todos los `Dispatch*` son `// TODO` vacíos
-- [ ] **Decidir el actor único.** `TectonicPlanetActor` hoy no hace nada útil: Nanite comentado (no dibuja terreno) y sin `RasterizedTectonics` (no simula relieve). `TectonicsTestActor` es el que funciona. Propuesta: quedarse con uno solo y retirar `Nanite/`, `LOD/`, `QuadTree/` a F6 — la ruta correcta para un planeta es **malla base + displacement desde textura** (lo que ya hace el test actor), no un `UStaticMesh` Nanite por parche construido síncronamente.
+- [ ] **Una sola asignación placa→celda.** Siguen siendo dos y pueden discrepar cerca de las fronteras: `USphericalVoronoi` usa los centroides de Fibonacci originales, mientras que `RasterizedTectonics::InitializeFromPlateSystem` repite la búsqueda usando `FTectonicPlate::Centroid`, que `CalculatePlateStatistics` recalcula después como promedio de celdas. Desde el cambio a fuerza bruta ambas usan el mismo criterio (centroide más cercano), así que unificarlas es ya solo cuestión de que el ráster lea el mapa del Voronoi en vez de rehacer el cálculo.
+- [x] **Borrar código muerto** (15-08-2026; está en git si hace falta recuperarlo). 18 archivos, ~150 KB:
+  - `Streaming/ChunkStreamingManager` y `CubeSphereVisualizerComponent` — 0 referencias externas
+  - `PlateSimulationGPU` + `PlateMovementShader` + `PlateMovement.usf` + `TectonicRaster.usf` — todos los `Dispatch*` eran `// TODO` vacíos. Si algún día se va a GPU, será contra estructuras de datos que todavía no existen; no hay nada aquí que reutilizar
+  - `Nanite/PlanetNaniteMesh` + `NaniteTypes` — **la pieza equivocada**: construía un `UStaticMesh` por parche de forma síncrona. Ver F6 para qué la sustituye
+  - `TectonicPlanetActor` y `TectonicVisualizerComponent` — solo existían para orquestar lo anterior
+  - `PlanetApproachPawn` actualizado: ya no busca `ATectonicPlanetActor`
+  - **Conservados a propósito**, contra la recomendación inicial: `QuadTree/` y `LOD/`. Al revisar su API resultó ser lógica espacial pura (split/collapse, error geométrico, bounds, vecinos, LOD por distancia) sin ninguna dependencia de Nanite — es exactamente la mitad-CPU del esquema de F6, y reescribir un quadtree esférico desde cero no es una tarde. También sobrevive `PlanetMaterialGenerator`, único ejemplo funcionando de creación de materiales por código, que F0.5 probablemente reutilice
+- [x] **Actor único: `TectonicsTestActor`** (15-08-2026). Era el único que simulaba relieve y lo dibujaba. Conviene renombrarlo en algún momento: ya no es un actor de test, es *el* actor del planeta.
 - [ ] **Desactivar la llamada a `BoundaryInteractions::ProcessAllBoundaries`** hasta F1, donde por fin tendrá consumidor. Hoy es coste puro. **No borrar el archivo**: contiene física real (ángulos de subducción, esfuerzo acumulado, hotspots) que se conecta en F1.
 
 **Hecho cuando:** existe un único helper de mapeo de caras con test de ida-y-vuelta ✅, **la suite `Simu.*` pasa entera en verde** ✅ (11/11 el 15-08-2026), y `grep` de las clases borradas no devuelve nada.
@@ -75,6 +93,29 @@ Lo que se ve hoy en pantalla es un **generador de relieve estático**: un mapa d
 & 'E:\Unreal\UE_5.8\Engine\Binaries\Win64\UnrealEditor-Cmd.exe' "D:\Portfolio\Simu\Simu.uproject" `
     -ExecCmds="Automation RunTests Simu; Quit" -unattended -nopause -nosplash -NullRHI -log -stdout
 ```
+
+---
+
+## F0.5 — Visor de campos: la herramienta que hace comprobable todo lo demás 🔴
+
+**Por qué existe esta fase:** sin ella, cada fase siguiente tendría que improvisar su propia visualización, y acabaríamos con cinco maneras distintas de pintar el globo (el mismo patrón de duplicación que causó los tres bugs de F0). Con ella, cada fase nueva sale a pantalla escribiendo un puñado de líneas.
+
+La idea: **cualquier campo escalar de la simulación** —elevación, edad de corteza, precipitación, caudal acumulado, espesor de sedimento— es lo mismo: 6 caras × Res² valores. Un único visor los pinta todos.
+
+- [ ] Tipo común de campo escalar (6 caras × Res², con nombre, unidad y rango) y un registro donde cada sistema publica los suyos
+- [ ] Componente visor que mapea el campo activo a color de vértice sobre la malla de `TectonicsTestActor`. Generaliza el `UpdateMeshColors` que ya existe, que hoy solo sabe pintar elevación
+- [ ] Rampas de color por tipo de dato: **secuencial** (elevación, temperatura), **divergente** (anomalías respecto a un cero con significado: isostasia, balance hídrico), **categórica** (ID de placa, tipo de frontera), y **logarítmica** (caudal acumulado — sin log, un río se pierde entre la cuenca)
+- [ ] Conmutar campo con una tecla, y leyenda en pantalla con nombre, unidad y mín/máx del rango en uso
+- [ ] Campos vectoriales (velocidad de placa, viento, dirección de drenaje) como flechas de debug sobre el globo
+- [ ] Vista de sección/perfil: elevación a lo largo de un gran círculo. Es la forma más rápida de ver si una cordillera tiene un perfil plausible o es una pared de un píxel
+
+**Hecho cuando:** se puede recorrer con una tecla los campos que hoy ya existen (ID de placa, elevación, edad de corteza, tipo de corteza) con leyenda correcta, y añadir un campo nuevo cuesta registrarlo, no escribir un visualizador.
+
+### Aviso de resolución, que muerde en F4
+
+La malla de `TectonicsTestActor` es de `GridResolution = 128` por cara. Sobre un radio de 6371 km, el lado de una cara mide ~10.000 km, así que **un quad son ~78 km**. El ráster de simulación va a 256 (~39 km por celda).
+
+Para F1, F2 y F3 eso vale: continentes, sombras de lluvia y cinturones climáticos se miden en miles de km. **Para F4 no vale**: una red de drenaje a 39 km por celda no es una red de drenaje. Antes de F4 habrá que decidir entre subir la resolución del ráster (coste cuadrático) o añadir un modo de vista regional que simule y dibuje una sola cara con más detalle. Anotado aquí para que sea una decisión y no una sorpresa.
 
 ---
 
@@ -107,6 +148,13 @@ Esto hace que subducción, dorsales y apertura de océanos sean **emergentes**, 
 - Test de conservación: área de corteza creada en dorsales ≈ área destruida en subducción, dentro de un margen.
 - Visual: dos continentes que empiezan separados colisionan y levantan una cordillera en el punto de contacto.
 
+**Renderizable cuando** (campos nuevos que F1 publica al visor de F0.5):
+- **ID de placa** (rampa categórica) animado en el tiempo: se ve la deriva. Es la comprobación de un vistazo de que el bloqueador está resuelto
+- **Edad de la corteza** (secuencial): debe aparecer el patrón de bandas simétricas a ambos lados de las dorsales, como los mapas reales del fondo oceánico. Si no aparece, el spreading está mal
+- **Tipo de frontera** (categórica: convergente / divergente / transformante)
+- **Velocidad de placa** como campo vectorial de flechas
+- La prueba visual que lo resume todo: dejarlo correr y ver si los continentes se agrupan y se dispersan — un ciclo de Wilson
+
 ---
 
 ## F2 — Isostasia y nivel del mar 🔴
@@ -120,6 +168,12 @@ Esto hace que subducción, dorsales y apertura de océanos sean **emergentes**, 
 - [ ] Subsidencia térmica: la corteza oceánica se hunde al enfriarse con la edad (`CrustAge` ya se rastrea, hoy no se usa para nada)
 
 **Hecho cuando:** una cordillera erosionada en F4 rebota isostáticamente en vez de desaparecer; y el nivel del mar responde a la edad media de la corteza oceánica.
+
+**Renderizable cuando:**
+- **Máscara tierra/mar** con una costa de verdad, no "azul si la elevación es negativa". Es el primer momento en que el planeta se parece a un planeta
+- **Espesor de corteza** (secuencial) y **anomalía isostática** (divergente respecto al equilibrio): las cordilleras deben tener raíz visible
+- **Batimetría por edad**: el fondo oceánico debe hundirse al alejarse de las dorsales
+- Perfil de sección cruzando una costa: debe verse plataforma continental, talud y llanura abisal
 
 ---
 
@@ -136,13 +190,19 @@ Esta fase es deliberadamente **barata**: campos diagnósticos, no dinámica de f
 
 **Hecho cuando:** el mapa de precipitación muestra una asimetría clara barlovento/sotavento en una cordillera generada por F1, y desiertos en el interior de continentes grandes.
 
+**Renderizable cuando:**
+- **Precipitación** (secuencial) sobre el globo, comparable de un vistazo con un mapa climático real: cinturón húmedo ecuatorial, franjas desérticas subtropicales, sombras de lluvia tras las cordilleras
+- **Temperatura** (divergente en torno a 0 °C, que es el umbral con significado físico: hielo)
+- **Viento** como campo vectorial: deben verse las bandas por latitud
+- Comprobación cruzada: superponer precipitación sobre relieve y ver si la sombra de lluvia cae realmente detrás de la montaña
+
 ---
 
 ## F4 — Erosión hidráulica y transporte de sedimento 🟡
 
 **Por qué ahora:** ya hay relieve que cambia (F1), costa donde depositar (F2) y lluvia que lo alimenta (F3).
 
-- [ ] **Acumulación de flujo** sobre la esfera: dirección de drenaje por celda y caudal acumulado aguas abajo. Hay que resolver el cruce entre caras del cubo (`GetCrossFaceNeighbors` ya existe, de M3)
+- [ ] **Acumulación de flujo** sobre la esfera: dirección de drenaje por celda y caudal acumulado aguas abajo. El cruce entre caras lo resuelve `UCubeSphereGrid::GetNeighborCell`, reescrito geométricamente en F0 y cubierto por el test de reciprocidad. **No** usar `FCubeSphereQuadTree::GetCrossFaceNeighbors`: arrastra la copia de la tabla de bordes que se eliminó del Grid por estar mal
 - [ ] **Tratamiento de depresiones** (lagos/sumideros): rellenar o enrutar. Sin esto el drenaje se atasca
 - [ ] **Incisión fluvial** (stream power): erosión ∝ caudal^m · pendiente^n
 - [ ] **Transporte y deposición** de sedimento: capacidad de carga, deposición al perder pendiente ⇒ llanuras aluviales y deltas
@@ -150,6 +210,13 @@ Esta fase es deliberadamente **barata**: campos diagnósticos, no dinámica de f
 - [ ] Realimentación a F2: el sedimento depositado añade masa (subsidencia), la roca erosionada la quita (rebote isostático)
 
 **Hecho cuando:** aparecen redes de drenaje dendríticas visibles, los ríos desembocan en el mar formando deltas, y una montaña aislada se degrada con el tiempo en vez de crecer indefinidamente.
+
+**Renderizable cuando:**
+- **Caudal acumulado en escala logarítmica** — este es *el* mapa de F4. En lineal no se ve nada; en log aparecen las redes dendríticas. Si no salen ramificadas, el enrutado de drenaje está mal
+- **Tasa de erosión** y **espesor de sedimento** (divergente: erosión negativa, deposición positiva)
+- **Lagos y depresiones** marcados, para ver si el tratamiento de sumideros funciona
+- Curva temporal de altura máxima del planeta: debe estabilizarse en un equilibrio entre levantamiento tectónico y erosión, no dispararse a 12000 m ni aplanarse a cero
+- ⚠️ Aquí es donde muerde el aviso de resolución de F0.5: a 39 km por celda no hay red de drenaje que ver
 
 **Nota de calibración:** este es el punto donde `DiffusionRate`/`OrogenyFactor` dejan de ser parámetros libres. La erosión debe equilibrar el levantamiento tectónico — si no, o se aplana el planeta o se dispara a 12000 m. Ese equilibrio es un resultado observable, no un valor a fijar a mano.
 
@@ -165,13 +232,23 @@ Sustituye el clima diagnóstico de F3 por dinámica real.
 - [ ] Hielo: casquetes polares, glaciares, y su erosión (distinta de la fluvial)
 - [ ] Climatología profunda: ciclo carbono-silicatos, albedo, realimentación hielo-albedo — `docs/06-climatologia-efecto-invernadero.md`
 
+**Renderizable cuando:**
+- **Humedad y nubosidad** animadas: deben formarse y disiparse sistemas, no quedarse estáticos
+- **Corrientes oceánicas** como campo vectorial, con su transporte de calor visible en el mapa de temperatura
+- **Hielo** (casquetes y glaciares) avanzando y retrocediendo con el clima
+- Gráfica de **balance de masa de agua** en el tiempo: la suma de océano + hielo + humedad + agua superficial debe ser constante. Es la comprobación más dura de esta fase y la más fácil de leer
+
 **Riesgo conocido:** las SWE son numéricamente inestables si el paso de tiempo no respeta CFL. Es el candidato natural para invertir en GPU (mucho más sensible a paralelismo que la tectónica rasterizada).
 
 ---
 
-## F6 — Rendimiento, LOD y GPU 🟢
+## F6 — Renderizado de producto: LOD hasta la superficie 🟢
 
-Deliberadamente **al final**. Optimizar un pipeline cuya física aún no está definida es tirar el trabajo.
+Ojo con lo que esta fase **no** es: no es "por fin se ve algo". Desde F0.5 se ve todo, en vistas de diagnóstico sobre el globo. Lo que falta aquí es el **acabado**: poder bajar hasta el suelo con detalle, materiales y luz creíbles.
+
+Va al final porque optimizar un pipeline cuya física aún no está definida es tirar el trabajo, no porque la visualización se posponga.
+
+**Diseño decidido (15-08-2026), para no repetir el error de M1:** quadtree + **una sola malla-rejilla pre-construida**, instanciada por parche con distinta escala/offset, y desplazamiento en el *vertex shader* muestreando la textura de elevación. Lo que **no** se vuelve a intentar es construir un `UStaticMesh` por parche (el enfoque de `PlanetNaniteMesh`, borrado en F0): el `UStaticMesh::Build` síncrono por parche es lo que congelaba el editor, y ninguna cantidad de presupuesto por frame arregla que la geometría se recree en vez de instanciarse.
 
 - [ ] Reconsiderar el renderizado planetario: malla base + displacement desde textura, frente al `UStaticMesh` Nanite por parche que se abandonó en F0
 - [ ] Reintroducir QuadTree/LOD/streaming sobre el enfoque elegido

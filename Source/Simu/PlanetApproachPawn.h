@@ -8,7 +8,6 @@
 
 class UCameraComponent;
 class ATectonicsTestActor;
-class ATectonicPlanetActor;
 
 /**
  * APlanetApproachPawn
@@ -48,13 +47,9 @@ public:
     virtual void Tick(float DeltaTime) override;
 
     /**
-     * Planeta a seguir. Acepta ATectonicsTestActor (altura real por direccion via
-     * GetSurfaceRadiusAtDirection) o ATectonicPlanetActor (solo radio esferico, sin
-     * datos de elevacion por direccion - aproximacion razonable ya que el
-     * desplazamiento Nanite es pequeño relativo al radio del planeta). Antes solo
-     * reconocia ATectonicsTestActor; con otro tipo de actor colocado en el nivel se
-     * quedaba sin referencia de "suelo" y la camara no tenia ni velocidad adaptativa
-     * ni colision.
+     * Planeta a seguir. Hoy solo ATectonicsTestActor, que da altura real por direccion
+     * via GetSurfaceRadiusAtDirection. ATectonicPlanetActor, la otra opcion que se
+     * aceptaba antes, se borró el 15-08-2026 (ROADMAP.md F0).
      */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Planet")
     AActor* TargetPlanet = nullptr;
