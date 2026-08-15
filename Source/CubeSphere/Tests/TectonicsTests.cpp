@@ -1718,3 +1718,253 @@ bool FHydrologyDownhillTest::RunTest(const FString& Parameters)
 
     return true;
 }
+
+// ------------------------------------------------------------
+// ¿ES UNA RED DENDRITICA O SON MANCHAS?
+//
+// Mirar el mapa y decir "se ve bien" no es una respuesta, y ademas depende de que la escala
+// de color este bien elegida - ya paso: con el caudal en m3/ano y rango automatico, la
+// tierra salia de un color plano aunque la red estuviera perfectamente calculada.
+//
+// La firma cuantitativa de una red de drenaje real es que la distribucion de AREA DRENADA
+// tiene cola pesada: muchisimas cabeceras pequenas, unos pocos rios grandes, y la cuenta de
+// celdas con area mayor que A decae como una potencia de A a lo largo de varias decadas.
+// Es una de las regularidades mas robustas de la geomorfologia.
+//
+// Una mancha uniforme no tiene eso: si el agua no se organiza en jerarquia, casi todas las
+// celdas tienen area parecida y la distribucion se corta en seco.
+// ------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FHydrologyDendriticTest,
+    "Simu.Hydrology.DendriticNetwork",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FHydrologyDendriticTest::RunTest(const FString& Parameters)
+{
+    const int32 Res = 128;
+
+    UCubeSphereGrid* Grid = nullptr;
+    UTectonicPlateSystem* System = nullptr;
+    URasterizedTectonics* Raster = nullptr;
+    if (!TestTrue(TEXT("Fixture montado"), BuildF1Fixture(Res, Res, 8, 31337, Grid, System, Raster)))
+    {
+        return false;
+    }
+
+    FPlateMovementParams Params;
+    Params.DeltaTime = 0.5f;
+    for (int32 i = 0; i < 300; ++i)
+    {
+        System->Step(Params.DeltaTime);
+        Raster->Step(Params);
+    }
+
+    UPlanetClimate* Climate = NewObject<UPlanetClimate>();
+    Climate->Initialize(Raster, Grid);
+    Climate->Recompute(FClimateParams());
+
+    UPlanetHydrology* Hydro = NewObject<UPlanetHydrology>();
+    Hydro->Initialize(Raster, Climate);
+    Hydro->Recompute();
+
+    const float CellArea = Hydro->GetCellAreaKm2();
+    const float SeaLevel = Raster->GetSeaLevel();
+
+    // Cuentas acumuladas por decada: cuantas celdas drenan mas de 1, 10, 100, 1000 celdas.
+    const int32 NumDecades = 4;
+    int32 CountAbove[NumDecades] = { 0, 0, 0, 0 };
+    int32 LandCells = 0;
+
+    for (int32 F = 0; F < 6; ++F)
+    {
+        const ECSCubeFace Face = static_cast<ECSCubeFace>(F);
+        const TArray<float>& Area = Hydro->GetDrainageAreaData(Face);
+
+        for (int32 Y = 0; Y < Res; ++Y)
+        {
+            for (int32 X = 0; X < Res; ++X)
+            {
+                if (Raster->GetElevationAt(Face, X, Y) < SeaLevel) { continue; }
+                ++LandCells;
+
+                const float UpstreamCells = Area[Y * Res + X] / FMath::Max(CellArea, 0.001f);
+                float Threshold = 1.0f;
+                for (int32 D = 0; D < NumDecades; ++D)
+                {
+                    if (UpstreamCells >= Threshold) { ++CountAbove[D]; }
+                    Threshold *= 10.0f;
+                }
+            }
+        }
+    }
+
+    UE_LOG(LogTemp, Log,
+        TEXT("Dendritica: %d celdas de tierra | >1 celda: %d | >10: %d | >100: %d | >1000: %d"),
+        LandCells, CountAbove[0], CountAbove[1], CountAbove[2], CountAbove[3]);
+
+    AddInfo(FString::Printf(TEXT("tierra %d | >1: %d | >10: %d | >100: %d | >1000: %d"),
+        LandCells, CountAbove[0], CountAbove[1], CountAbove[2], CountAbove[3]));
+
+    if (!TestTrue(TEXT("Hay tierra que drenar"), LandCells > 1000))
+    {
+        return false;
+    }
+
+    // Tiene que haber cuencas grandes, pero medidas COMO FRACCION DE LA TIERRA, no en un
+    // numero absoluto de celdas.
+    //
+    // La primera version exigia cuencas de mas de 1000 celdas y fallaba, pero el error
+    // estaba en el umbral: a Res=128 una celda son 6.115 km2, asi que la mayor cuenca
+    // medida - 4,58 millones de km2, MAS GRANDE QUE LA DEL AMAZONAS - son solo 750 celdas.
+    // Un umbral absoluto ademas depende de la resolucion, que es justo lo que un test no
+    // debe hacer.
+    float LargestBasinCells = 0.0f;
+    for (int32 F = 0; F < 6; ++F)
+    {
+        const ECSCubeFace Face = static_cast<ECSCubeFace>(F);
+        const TArray<float>& Area = Hydro->GetDrainageAreaData(Face);
+        for (int32 i = 0; i < Area.Num(); ++i)
+        {
+            LargestBasinCells = FMath::Max(LargestBasinCells, Area[i] / FMath::Max(CellArea, 0.001f));
+        }
+    }
+
+    const float LargestBasinFraction = LargestBasinCells / FMath::Max(LandCells, 1);
+    UE_LOG(LogTemp, Log, TEXT("  Cuenca mayor: %.0f celdas (%.1f%% de la tierra, %.2e km2)"),
+        LargestBasinCells, LargestBasinFraction * 100.0f, LargestBasinCells * CellArea);
+
+    TestTrue(FString::Printf(TEXT("Hay una cuenca principal (%.0f celdas, %.1f%% de la tierra)"),
+        LargestBasinCells, LargestBasinFraction * 100.0f), LargestBasinFraction > 0.01f);
+
+    // Y tiene que DECAER: muchas cabeceras, pocos rios. Cada decada debe tener bastantes
+    // menos celdas que la anterior. Si no decayera, todas las celdas drenarian lo mismo,
+    // que es justo lo que pasa con una mancha uniforme.
+    for (int32 D = 1; D < NumDecades; ++D)
+    {
+        // Solo se compara mientras haya contenido: la ultima decada puede quedar vacia a
+        // resolucion baja sin que eso signifique nada malo.
+        if (CountAbove[D - 1] == 0) { break; }
+        TestTrue(FString::Printf(TEXT("La decada %d tiene menos celdas que la anterior (%d frente a %d)"),
+            D, CountAbove[D], CountAbove[D - 1]), CountAbove[D] < CountAbove[D - 1]);
+    }
+
+    // La caida tiene que ser fuerte, no un goteo: en una red dendritica cada decada de area
+    // reduce el numero de celdas en un factor grande, porque los afluentes confluyen.
+    const float DecayRatio = static_cast<float>(CountAbove[2]) / FMath::Max(CountAbove[0], 1);
+    TestTrue(FString::Printf(TEXT("La jerarquia es marcada (%.4f de las celdas drenan >100)"), DecayRatio),
+        DecayRatio < 0.25f);
+
+    return true;
+}
+
+// ------------------------------------------------------------
+// NO PUEDE HABER TIERRA PEGADA A LAS COSTURAS DEL CUBO
+//
+// El usuario detecto en pantalla una "peninsula inmutable": una franja recta de tierra con
+// bordes escalonados que no cambiaba nunca. Resulto ser un artefacto de costura - la
+// recuperacion por tolerancia recortaba los indices al rango de la cara en vez de cruzar a
+// la vecina, asi que junto a una arista miraba celdas del borde opuesto de la misma cara.
+//
+// Ningun test lo detectaba porque todos miran magnitudes GLOBALES (fraccion de tierra,
+// longitud de frontera, celdas sin resolver) y el artefacto afecta a una franja de una
+// celda de ancho a lo largo de 12 aristas: es invisible en cualquier promedio del planeta.
+//
+// Este test compara las celdas PEGADAS a una costura con las del interior de las caras. Las
+// aristas del cubo no tienen ningun significado fisico, asi que la estadistica a ambos
+// lados tiene que ser la misma. Cualquier diferencia sistematica es un artefacto de rejilla.
+// ------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSeamArtifactTest,
+    "Simu.Tectonics.NoSeamArtifacts",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FSeamArtifactTest::RunTest(const FString& Parameters)
+{
+    const int32 Res = 64;
+
+    UCubeSphereGrid* Grid = nullptr;
+    UTectonicPlateSystem* System = nullptr;
+    URasterizedTectonics* Raster = nullptr;
+    if (!TestTrue(TEXT("Fixture montado"), BuildF1Fixture(Res, Res, 8, 4242, Grid, System, Raster)))
+    {
+        return false;
+    }
+
+    // Muchas advecciones: el artefacto se acumula en las mismas celdas, asi que necesita
+    // tiempo para destacar sobre el ruido.
+    FPlateMovementParams Params;
+    Params.DeltaTime = 0.25f;
+    for (int32 i = 0; i < 2000; ++i)
+    {
+        System->Step(Params.DeltaTime);
+        Raster->Step(Params);
+    }
+
+    const float SeaLevel = Raster->GetSeaLevel();
+
+    // Se compara la primera fila pegada a la costura con una franja del interior, a la
+    // misma distancia del centro de la cara para que la distorsion gnomonica no sesgue la
+    // comparacion.
+    const int32 SeamBand = 1;
+    const int32 InteriorBand = Res / 4;
+
+    int32 SeamCells = 0, SeamLand = 0;
+    int32 InteriorCells = 0, InteriorLand = 0;
+    double SeamElevSum = 0.0, InteriorElevSum = 0.0;
+
+    for (int32 F = 0; F < 6; ++F)
+    {
+        const ECSCubeFace Face = static_cast<ECSCubeFace>(F);
+
+        for (int32 Y = 0; Y < Res; ++Y)
+        {
+            for (int32 X = 0; X < Res; ++X)
+            {
+                const int32 DistToEdge = FMath::Min(FMath::Min(X, Res - 1 - X), FMath::Min(Y, Res - 1 - Y));
+                const float Elev = Raster->GetElevationAt(Face, X, Y);
+                const bool bLand = (Elev >= SeaLevel);
+
+                if (DistToEdge < SeamBand)
+                {
+                    ++SeamCells;
+                    SeamElevSum += Elev;
+                    if (bLand) { ++SeamLand; }
+                }
+                else if (DistToEdge >= InteriorBand && DistToEdge < InteriorBand + 2)
+                {
+                    ++InteriorCells;
+                    InteriorElevSum += Elev;
+                    if (bLand) { ++InteriorLand; }
+                }
+            }
+        }
+    }
+
+    if (!TestTrue(TEXT("Hay celdas de costura y de interior"), SeamCells > 100 && InteriorCells > 100))
+    {
+        return false;
+    }
+
+    const float SeamLandFrac = static_cast<float>(SeamLand) / SeamCells;
+    const float InteriorLandFrac = static_cast<float>(InteriorLand) / InteriorCells;
+    const double SeamElevAvg = SeamElevSum / SeamCells;
+    const double InteriorElevAvg = InteriorElevSum / InteriorCells;
+
+    UE_LOG(LogTemp, Log,
+        TEXT("Costuras: tierra %.1f%% (%d celdas) frente a interior %.1f%% (%d) | elevacion media %.0f frente a %.0f m"),
+        SeamLandFrac * 100.0f, SeamCells, InteriorLandFrac * 100.0f, InteriorCells,
+        SeamElevAvg, InteriorElevAvg);
+    AddInfo(FString::Printf(TEXT("tierra en costura %.1f%% frente a interior %.1f%%; elevacion %.0f frente a %.0f m"),
+        SeamLandFrac * 100.0f, InteriorLandFrac * 100.0f, SeamElevAvg, InteriorElevAvg));
+
+    // Las aristas del cubo no significan nada fisicamente. Si aparece tierra
+    // preferentemente ahi, es artefacto de rejilla.
+    TestTrue(FString::Printf(TEXT("La costura no acumula tierra (%.1f%% frente a %.1f%% del interior)"),
+        SeamLandFrac * 100.0f, InteriorLandFrac * 100.0f),
+        SeamLandFrac < InteriorLandFrac + 0.15f);
+
+    // Y tampoco puede quedarse sistematicamente mas alta o mas baja.
+    TestTrue(FString::Printf(TEXT("La costura no tiene elevacion anomala (%.0f frente a %.0f m)"),
+        SeamElevAvg, InteriorElevAvg),
+        FMath::Abs(SeamElevAvg - InteriorElevAvg) < 1500.0);
+
+    return true;
+}

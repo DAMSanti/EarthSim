@@ -1170,17 +1170,33 @@ void ATectonicsTestActor::RegisterSimulationFields()
     {
         UPlanetHydrology* HydroRef = Hydrology;
 
+        // AREA DRENADA, no caudal, y el rango se fija a mano. Es el mapa que hace visible
+        // la red.
+        //
+        // Con rango automatico y caudal en m3/ano no se veia nada: una sola celda de 39 km
+        // ya aporta ~1,5e9 m3/ano, asi que entre una cabecera y el rio mayor hay apenas
+        // una decada, y en la rampa de color toda la variacion quedaba aplastada contra el
+        // extremo mientras el oceano (caudal 0) ocupaba el otro. Tierra de un color plano.
+        //
+        // El area drenada arranca en el area de UNA celda, que es el minimo con sentido, y
+        // llega a cuencas continentales: varias decadas limpias. Fijar el minimo del rango
+        // en una celda es lo que hace que una cabecera sea el color mas bajo y un rio
+        // principal el mas alto, en vez de repartir la rampa entre el oceano y la tierra.
+        const float CellArea = HydroRef->GetCellAreaKm2();
+
         FPlanetScalarField Field;
-        Field.Id = TEXT("Discharge");
-        Field.Label = TEXT("Caudal acumulado");
-        Field.Unit = TEXT("m3/ano");
+        Field.Id = TEXT("DrainageArea");
+        Field.Label = TEXT("Area drenada");
+        Field.Unit = TEXT("km2");
         Field.Palette = EPlanetFieldPalette::Sequential;
         Field.Scale = EPlanetFieldScale::Logarithmic;
         Field.Resolution = Res;
-        Field.bAutoRange = true;
+        Field.bAutoRange = false;
+        Field.RangeMin = CellArea;
+        Field.RangeMax = CellArea * 3000.0f;   // cuenca grande: ~3000 celdas aguas arriba
         Field.GetFaceData = [HydroRef](ECSCubeFace Face) -> const TArray<float>*
         {
-            return HydroRef->IsInitialized() ? &HydroRef->GetDischargeData(Face) : nullptr;
+            return HydroRef->IsInitialized() ? &HydroRef->GetDrainageAreaData(Face) : nullptr;
         };
         FieldRegistry->RegisterField(Field);
     }

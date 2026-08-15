@@ -98,8 +98,29 @@ public:
     bool GetDownstreamCell(ECSCubeFace Face, int32 X, int32 Y,
                            ECSCubeFace& OutFace, int32& OutX, int32& OutY) const;
 
-    /** Caudal acumulado por cara (m³/año), para el visor. */
+    /** Caudal acumulado por cara (m³/año). Es lo que alimenta la incisión fluvial. */
     const TArray<float>& GetDischargeData(ECSCubeFace Face) const;
+
+    /**
+     * Área drenada acumulada por cara (km²): cuánta superficie vierte a través de cada
+     * celda. Es la magnitud que se dibuja en los mapas de drenaje de verdad, y no es lo
+     * mismo que el caudal.
+     *
+     * La diferencia importa para VERLO. El caudal en m³/año arranca ya en ~1,5·10⁹ para
+     * una sola celda de 39 km, así que entre una cabecera y el río mayor hay apenas una
+     * década de recorrido: en la rampa de color todo el detalle queda aplastado contra el
+     * extremo. El área drenada arranca en el área de UNA celda y abarca varias décadas
+     * limpias hasta una cuenca continental, que es lo que hace visible la ramificación.
+     *
+     * Además no depende del clima: dos planetas con la misma topografía tienen la misma
+     * red de drenaje aunque llueva distinto, y eso la hace mejor para juzgar si la
+     * TOPOLOGÍA es correcta.
+     */
+    const TArray<float>& GetDrainageAreaData(ECSCubeFace Face) const;
+
+    /** Área de una celda del ráster (km²). */
+    UFUNCTION(BlueprintCallable, Category = "Hydrology")
+    float GetCellAreaKm2() const { return CellAreaKm2; }
 
     /** Profundidad de agua estancada por cara (m), en mínimos locales. */
     const TArray<float>& GetLakeDepthData(ECSCubeFace Face) const;
@@ -124,5 +145,7 @@ protected:
     TArray<TArray<uint8>> DownstreamFace;
 
     TArray<TArray<float>> DischargeData;
+    TArray<TArray<float>> DrainageAreaData;
+    float CellAreaKm2 = 0.0f;
     TArray<TArray<float>> LakeDepthData;
 };

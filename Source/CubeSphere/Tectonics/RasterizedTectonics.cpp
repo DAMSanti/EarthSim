@@ -865,25 +865,46 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
                         const FVector PrevDir = InverseRotations[P].RotateVector(Dir);
                         ECSCubeFace PF; float PU, PV;
                         CubeFaceMapping::DirectionToFaceTexUV(PrevDir, PF, PU, PV);
-                        const int32 PFaceIdx = static_cast<int32>(PF);
+                        // Posicion continua en coordenadas de celda, y celda mas cercana.
+                        const float CellX = PU * Resolution - 0.5f;
+                        const float CellY = PV * Resolution - 0.5f;
+                        const int32 NearX = FMath::Clamp(FMath::RoundToInt(CellX), 0, Resolution - 1);
+                        const int32 NearY = FMath::Clamp(FMath::RoundToInt(CellY), 0, Resolution - 1);
 
-                        // Posicion continua en coordenadas de celda. Las cuatro celdas que
-                        // la rodean son exactamente el alcance del redondeo que fallo.
-                        const float FX = PU * Resolution - 0.5f;
-                        const float FY = PV * Resolution - 0.5f;
-                        const int32 X0 = FMath::Clamp(FMath::FloorToInt(FX), 0, Resolution - 1);
-                        const int32 Y0 = FMath::Clamp(FMath::FloorToInt(FY), 0, Resolution - 1);
-                        const int32 X1 = FMath::Clamp(X0 + 1, 0, Resolution - 1);
-                        const int32 Y1 = FMath::Clamp(Y0 + 1, 0, Resolution - 1);
+                        // Hacia que lado esta la mitad de celda que el redondeo perdio.
+                        const int32 DirX = (CellX >= static_cast<float>(NearX)) ? 1 : -1;
+                        const int32 DirY = (CellY >= static_cast<float>(NearY)) ? 1 : -1;
 
-                        const int32 Candidates[4] = {
-                            Y0 * Resolution + X0, Y0 * Resolution + X1,
-                            Y1 * Resolution + X0, Y1 * Resolution + X1
-                        };
+                        // Las cuatro celdas del entorno se piden a GetNeighborPixel, que
+                        // CRUZA ENTRE CARAS.
+                        //
+                        // La primera version recortaba los indices al rango de la cara en
+                        // vez de cruzar, y eso dejaba un artefacto sistematico a lo largo
+                        // de las 12 aristas del cubo: junto a una costura, la busqueda
+                        // miraba las celdas del borde OPUESTO de la misma cara, que no
+                        // tienen ninguna relacion con el punto. Como el error dependia solo
+                        // de la geometria de la arista, fallaba siempre en las mismas
+                        // celdas y se veia en pantalla como una franja recta de tierra que
+                        // no cambiaba nunca - una peninsula inmutable con bordes
+                        // escalonados siguiendo la costura.
+                        //
+                        // Es el mismo error que F0 elimino de todo el proyecto: tratar una
+                        // cara como si fuera una imagen aislada.
+                        const int32 Offsets[4][2] = { {0, 0}, {DirX, 0}, {0, DirY}, {DirX, DirY} };
 
                         for (int32 C = 0; C < 4; ++C)
                         {
-                            if (Prev[PFaceIdx].PlateIDData[Candidates[C]] == static_cast<uint8>(P))
+                            ECSCubeFace CF;
+                            int32 CX, CY;
+                            if (!GetNeighborPixel(PF, NearX, NearY, Offsets[C][0], Offsets[C][1], CF, CX, CY))
+                            {
+                                continue;
+                            }
+
+                            const int32 CFaceIdx = static_cast<int32>(CF);
+                            const int32 CIdx = CY * Resolution + CX;
+
+                            if (Prev[CFaceIdx].PlateIDData[CIdx] == static_cast<uint8>(P))
                             {
                                 // Se prefiere la placa que ya ocupaba esta celda: el
                                 // material que estaba aqui sigue aqui salvo que otro lo
@@ -891,8 +912,8 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
                                 if (RecoveredPlate == INDEX_NONE || P == static_cast<int32>(OwnerBefore))
                                 {
                                     RecoveredPlate = P;
-                                    RecoveredFace = PFaceIdx;
-                                    RecoveredIdx = Candidates[C];
+                                    RecoveredFace = CFaceIdx;
+                                    RecoveredIdx = CIdx;
                                 }
                                 break;
                             }

@@ -2,6 +2,7 @@
 
 #include "SphericalVoronoi.h"
 #include "../CubeSphereGrid.h"
+#include "../Noise/SimplexNoise.h"
 
 USphericalVoronoi::USphericalVoronoi()
     : Grid(nullptr)
@@ -133,6 +134,36 @@ void USphericalVoronoi::GenerateFibonacciSphere(int32 NumPoints, TArray<FVector>
 // de placa pasa a advectarse, no a recalcularse), entonces sí tocaría volver a un JFA,
 // pero en GPU y con los saltos cruzando caras de verdad.
 // ============================================================
+FVector USphericalVoronoi::WarpDirection(const FVector& UnitDir, const FPlateShapeParams& Params)
+{
+    if (Params.WarpStrength <= 0.0f)
+    {
+        return UnitDir;
+    }
+
+    // Tres muestras de ruido independientes para formar un vector de desplazamiento. Se
+    // toman en puntos bien separados del espacio de ruido (los offsets) porque muestrear
+    // el mismo campo tres veces daria las tres componentes iguales, y el desplazamiento
+    // seria siempre en la diagonal (1,1,1): las fronteras se deformarian todas en la misma
+    // direccion en vez de serpentear.
+    const FVector OffsetA(0.0f, 0.0f, 0.0f);
+    const FVector OffsetB(37.2f, 11.7f, -23.4f);
+    const FVector OffsetC(-19.8f, 44.1f, 7.6f);
+
+    const float NX = FSimplexNoise::SphereFractalNoise(
+        (UnitDir + OffsetA).GetSafeNormal(), Params.WarpFrequency, Params.WarpOctaves, 2.0f, 0.5f);
+    const float NY = FSimplexNoise::SphereFractalNoise(
+        (UnitDir + OffsetB).GetSafeNormal(), Params.WarpFrequency, Params.WarpOctaves, 2.0f, 0.5f);
+    const float NZ = FSimplexNoise::SphereFractalNoise(
+        (UnitDir + OffsetC).GetSafeNormal(), Params.WarpFrequency, Params.WarpOctaves, 2.0f, 0.5f);
+
+    const FVector Displacement(NX, NY, NZ);
+
+    // Se renormaliza: el desplazamiento saca el punto de la esfera, y lo que interesa es
+    // mirar en una DIRECCION distinta, no a un radio distinto.
+    return (UnitDir + Displacement * Params.WarpStrength).GetSafeNormal();
+}
+
 bool USphericalVoronoi::AssignCellsToPlates()
 {
     if (!bIsInitialized || Centroids.Num() == 0)
@@ -161,7 +192,10 @@ bool USphericalVoronoi::AssignCellsToPlates()
         {
             for (int32 X = 0; X < Resolution; ++X)
             {
-                const FVector CellPoint = CellToSpherePoint(Face, X, Y);
+                // El punto pregunta por su centroide mas cercano desde una posicion
+                // DEFORMADA. Deformar el espacio antes de medir es lo que convierte las
+                // fronteras rectas del Voronoi en contornos fractales.
+                const FVector CellPoint = WarpDirection(CellToSpherePoint(Face, X, Y), ShapeParams);
 
                 // Sobre la esfera unitaria, la distancia geodésica es acos(dot) — monótona
                 // decreciente en dot. Basta con quedarse con el producto escalar mayor:

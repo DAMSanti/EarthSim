@@ -22,6 +22,7 @@ void UPlanetHydrology::Initialize(URasterizedTectonics* InTectonics, UPlanetClim
     DownstreamIndex.SetNum(6);
     DownstreamFace.SetNum(6);
     DischargeData.SetNum(6);
+    DrainageAreaData.SetNum(6);
     LakeDepthData.SetNum(6);
 
     for (int32 F = 0; F < 6; ++F)
@@ -29,6 +30,7 @@ void UPlanetHydrology::Initialize(URasterizedTectonics* InTectonics, UPlanetClim
         DownstreamIndex[F].Init(INDEX_NONE, PixelsPerFace);
         DownstreamFace[F].SetNumZeroed(PixelsPerFace);
         DischargeData[F].SetNumZeroed(PixelsPerFace);
+        DrainageAreaData[F].SetNumZeroed(PixelsPerFace);
         LakeDepthData[F].SetNumZeroed(PixelsPerFace);
     }
 
@@ -145,6 +147,7 @@ void UPlanetHydrology::Recompute()
         for (int32 i = 0; i < PixelsPerFace; ++i)
         {
             DischargeData[F][i] = 0.0f;
+            DrainageAreaData[F][i] = 0.0f;
             LakeDepthData[F][i] = 0.0f;
 
             if (Elev[i] >= SeaLevel)
@@ -168,6 +171,7 @@ void UPlanetHydrology::Recompute()
     const float RadiusMetres = 6371000.0f;
     const float CellSideMetres = (PI * 0.5f * RadiusMetres) / static_cast<float>(Resolution);
     const float CellAreaM2 = CellSideMetres * CellSideMetres;
+    CellAreaKm2 = CellAreaM2 / 1.0e6f;
 
     for (const FCellRef& Cell : Ordered)
     {
@@ -183,13 +187,17 @@ void UPlanetHydrology::Recompute()
         const float LocalVolume = (LocalPrecipMm / 1000.0f) * CellAreaM2;
 
         DischargeData[Cell.Face][Cell.Index] += LocalVolume;
+        DrainageAreaData[Cell.Face][Cell.Index] += CellAreaKm2;
+
         const float Total = DischargeData[Cell.Face][Cell.Index];
+        const float TotalArea = DrainageAreaData[Cell.Face][Cell.Index];
 
         const int32 DownIdx = DownstreamIndex[Cell.Face][Cell.Index];
         if (DownIdx != INDEX_NONE)
         {
             const int32 DownFace = static_cast<int32>(DownstreamFace[Cell.Face][Cell.Index]);
             DischargeData[DownFace][DownIdx] += Total;
+            DrainageAreaData[DownFace][DownIdx] += TotalArea;
         }
         else
         {
@@ -249,6 +257,13 @@ const TArray<float>& UPlanetHydrology::GetDischargeData(ECSCubeFace Face) const
     static const TArray<float> Empty;
     const int32 F = static_cast<int32>(Face);
     return (bIsInitialized && F >= 0 && F < 6) ? DischargeData[F] : Empty;
+}
+
+const TArray<float>& UPlanetHydrology::GetDrainageAreaData(ECSCubeFace Face) const
+{
+    static const TArray<float> Empty;
+    const int32 F = static_cast<int32>(Face);
+    return (bIsInitialized && F >= 0 && F < 6) ? DrainageAreaData[F] : Empty;
 }
 
 const TArray<float>& UPlanetHydrology::GetLakeDepthData(ECSCubeFace Face) const
