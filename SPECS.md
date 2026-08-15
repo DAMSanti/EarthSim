@@ -12,7 +12,9 @@
 | **Movimiento de placas** | ✅ Implementado (advección del campo de IDs, §5.1) | CPU |
 | Generación de placas (Voronoi) | ✅ Implementado | CPU |
 | Orogenia / dorsales / subducción | ✅ Emergentes de la advección | CPU |
-| Isostasia / grosor de corteza | ❌ No implementado (bloquea conservar continente) | — |
+| Isostasia (Airy) / grosor de corteza | ✅ Implementado, estado primario (§12) | CPU |
+| Batimetría por edad (hundimiento térmico) | ✅ Implementado (§12) | CPU |
+| Nivel del mar con volumen conservado | ✅ Implementado (§12) | CPU |
 | `BoundaryInteractions` | ⏸️ Desactivado hasta F1 (era inerte: nadie leía su salida) | — |
 | Tectónica — vía GPU | 🗑️ Borrada (15-08-2026, era andamiaje vacío) | — |
 | Renderizado planetario con LOD | ❌ No implementado (`PlanetNaniteMesh` borrado, ver §4) | — |
@@ -201,3 +203,30 @@ Existe porque todo campo que produce la simulación tiene la misma forma: 6 cara
 - Campos registrados hoy: elevación (rango fijo a propósito, para que se note si el relieve se desboca), ID de placa, edad de corteza, tipo de corteza.
 - **Pendiente:** campos vectoriales (flechas) y vista de sección/perfil.
 - Cobertura: `Tests/PlanetFieldTests.cpp`, 6 tests.
+
+
+## 12. Isostasia, batimetría y nivel del mar (F2, 15/16-08-2026)
+
+**Implementado y verificado en editor.** Desde F2 el estado primario ya no es la elevación sino el **grosor de corteza**; la elevación se deriva.
+
+- **Flotación de Airy**: una columna de grosor T y densidad Rc sobre manto Rm sobresale `T·(Rm−Rc)/Rm`. Con densidades reales (continental 2750, oceánica 2900, manto 3300) y 35 km de corteza salen 5.833 m; restando el datum, +840 m — la altura media real de los continentes. Que el número correcto salga de densidades reales y no de una constante ajustada es la validación de la fórmula.
+- **Batimetría por hundimiento térmico**: `d = 2500 + 350·√(edad en Ma)`, acotado a 5.750 m. Por eso un mapa de profundidad oceánica real es esencialmente un mapa de la edad del fondo, y por eso el campo de edad tiene ahora consecuencia visible.
+- **Nivel del mar** explícito, resuelto por **Newton** (no bisección — ver §13) para conservar el volumen de océano. Responde a la tectónica: mucha dorsal joven ⇒ corteza caliente ocupando volumen ⇒ cuenca menos honda ⇒ agua desplazada que inunda continentes.
+- **Conservación de corteza continental**: en colisión continente-continente el material se apila en vez de destruirse; las montañas salen de ahí por flotación, sin término de levantamiento inventado.
+
+Fracción de tierra emergida resultante: 22–32 % según la semilla, frente al 29 % real.
+
+## 13. Rendimiento del paso de simulación
+
+Instrumentado por fases (`FTectonicStepTimings`, visible en el HUD). Medir cambió la lista de sospechosos por completo — la intuición falló dos veces antes de instrumentar.
+
+| Fase | Antes | Después |
+|---|---|---|
+| Nivel del mar + isostasia | 78,2 ms | **6,8 ms** |
+| Simulación por frame | 116,6 ms | **27,6 ms** |
+
+- **Nivel del mar**: hacía 40 iteraciones de bisección, cada una recorriendo 6×Res² celdas — 15,7 M de lecturas por paso para resolver un único número. Sustituido por Newton, que aprovecha dos cosas que la bisección tiraba: el nivel apenas se mueve entre pasos (el valor anterior ya es buena estimación) y la derivada es gratis (`dV/dS` = área sumergida, contada en la misma pasada). 2-3 pasadas.
+- **Advección**: las pasadas de conteo y de resolución hacían el mismo trabajo caro. Se cachea el caso mayoritario (un único reclamante).
+- **Paso fijo** desacoplado del framerate: la física dejó de depender de a qué fps corras.
+
+Coste dominante restante: la advección (~174 ms por ejecución, amortizada a ~11 ms/paso porque no corre en todos).
