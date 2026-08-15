@@ -1,467 +1,320 @@
-# ROADMAP.md — Plan de Desarrollo (basado en estado real)
+# ROADMAP.md — Plan de Desarrollo
 
-> Reescrito el **15-08-2026** tras una auditoría de código completa que contradijo partes de la versión anterior de este documento. Ver [`SPECS.md`](SPECS.md) para el inventario por archivo.
+> Basado en el inventario real de código ([`SPECS.md`](SPECS.md)), no en una estimación de calendario. Reescrito el 15-08-2026 tras una auditoría que contradijo la versión anterior; actualizado el 16-08-2026.
 >
-> `docs/ROADMAP.md` y `docs/10-hoja-de-ruta.md` son el plan aspiracional original (12+ meses, fases F1–F5). Se conservan como referencia de **alcance**, no de fecha ni de orden.
+> **Estructura:** el plan y sus checklists van arriba. Todo lo demás —defectos abiertos, hipótesis descartadas, mediciones e historial— está en el [Anexo](#anexo) al final, enlazado desde donde hace falta.
 
-## Cómo leer esto
-
-- Las fases **F0…F7** son secuenciales por **dependencia técnica**, no por tiempo. Cada una desbloquea la siguiente.
-- Cada fase tiene una definición de "hecho" **verificable en código**: existe el archivo/función/test que lo prueba, no "se ve bien".
-- `[x]` = hecho y verificado. `[ ]` = pendiente.
-- La sección **Historial** al final recoge el trabajo previo (M0–M5) y **qué de aquello resultó ser falso**.
-
-### Regla de verificación (decisión del 15-08-2026)
-
-**Ninguna fase se da por hecha si no se puede ver en pantalla.** Cada una de F1–F5 termina con una vista concreta que permite juzgar si el fenómeno simulado es plausible, no solo con un test que pase.
-
-El motivo sale directo de la auditoría: los tres bugs de F0 sobrevivieron meses precisamente porque nadie podía *ver* lo que el código hacía. Un test dice "no ha petado"; solo mirar el planeta dice "esto no parece la Tierra".
-
-Esto obliga a separar dos cosas que antes estaban mezcladas en un único "F6 — renderizado":
-
-| | Qué es | Cuándo |
-|---|---|---|
-| **Visualización de diagnóstico** | Cualquier campo de la simulación pintado sobre el globo, con leyenda y conmutable en caliente. Barato, no necesita LOD | **F0.5, y luego en cada fase** |
-| **Renderizado de producto** | Planeta con LOD desde órbita hasta la superficie, materiales, iluminación | F6 |
-
-La primera es la que hace comprobable cada fase. La segunda es acabado, y esa sí puede esperar.
-
----
-
-## Objetivo del proyecto
+## Objetivo
 
 Un simulador planetario completo y **acoplado**: tectónica → relieve → clima → agua → erosión → sedimento → de vuelta a la tectónica. El acoplamiento es el objetivo, no un extra: un relieve que no se erosiona y una lluvia que no depende de las montañas son dos maquetas independientes, no un simulador.
 
----
+## Cómo leer esto
 
-## Diagnóstico de partida (auditoría 15-08-2026)
-
-Lo que se creía hecho y **no lo está**:
-
-| Creencia | Realidad en código |
-|---|---|
-| "Motor CPU de tectónica maduro (~2800 líneas)" | Las placas **nunca se mueven**. `UPlateKinematics` solo lo llaman los tests |
-| "`BoundaryInteractions` calcula datos que nadie consume" | Correcto, pero peor: `ApplyElevationChanges()` está **vacía**. Se ejecuta 6×Res² celdas por paso para no producir nada |
-| "Erosión: reemplazar el `SimpleFlowSimulation` actual" | No hay nada que reemplazar. `SimpleFlowSimulation` es un test de conservación de masa, no hidrología |
-| "Hidrosfera parcial" | Cero. No existe ni una constante de nivel del mar |
-
-Lo que se ve hoy en pantalla es un **generador de relieve estático**: un mapa de placas Voronoi fijo + ruido fractal, con crestas que crecen siempre en las mismas líneas hasta topar a 12000 m y difusión que las suaviza. No hay deriva continental, ni apertura/cierre de océanos, ni ciclo de Wilson, ni conservación de corteza.
-
-**Consecuencia para el orden de trabajo:** el movimiento de placas es el bloqueador absoluto. Erosionar un relieve que nunca cambia no es un simulador acoplado, es un filtro de imagen.
+- Las fases **F0…F7** son secuenciales por **dependencia técnica**, no por tiempo.
+- Cada fase tiene una definición de "hecho" verificable en código, y otra de "renderizable": **ninguna fase se da por hecha si no se puede ver en pantalla** ([por qué](#a1-la-regla-de-verificación)).
+- `[x]` = hecho y verificado. `[ ]` = pendiente.
 
 ---
 
-## F0 — Cimientos: limpiar y unificar ✅ COMPLETO (15-08-2026)
+## Estado por fases
 
-**Por qué primero:** hay un bug de mapeo de caras que corrompería en silencio cualquier sistema nuevo que muestree por cara, tres tests en rojo que nadie estaba mirando, y ~150 KB de código muerto que hace ruido en cada búsqueda.
+### F0 — Cimientos ✅ COMPLETO (15-08-2026)
 
-> **Patrón que se repite tres veces en esta fase, y conviene tenerlo presente en las siguientes:** cada bug encontrado aquí era una *tabla escrita a mano* que enumeraba casos de la geometría del cubo — el mapeo cara↔dirección (7 copias), las conexiones de bordes (2 copias), y las pasadas del JFA entre caras. Las tres se sustituyeron por cálculo geométrico directo, que no tiene casos que enumerar y por tanto no puede desincronizarse. Cuando en F4/F5 haga falta vecindad o advección cruzando caras, la respuesta por defecto es la misma: proyectar y reproyectar, no tabular.
+- [x] Mapeo cara↔dirección unificado en `CubeFaceMapping.h` — estaba escrito a mano **8 veces** y ya se había desincronizado ([detalle](#a2-el-mapeo-de-caras))
+- [x] Vecindad entre caras por geometría, sin tabla de rotaciones
+- [x] Voronoi por fuerza bruta exacta, sustituyendo un JFA que dejaba 11–19 % de celdas sin asignar
+- [x] Los 3 tests que estaban en rojo, arreglados ([detalle](#a3-tests-que-no-comprobaban-nada))
+- [x] Código muerto borrado: 18 archivos, ~150 KB
+- [x] Actor único: `TectonicsTestActor`
+- [x] Criterio de asignación placa→celda unificado
+- [x] `BoundaryInteractions` desactivado hasta que tenga consumidor
 
-- [x] **Unificar el mapeo cara↔dirección 3D en un único helper** — `CubeFaceMapping.h` (15-08-2026). Estaba escrito a mano **8 veces** (5 previstas, más la tabla de tangentes de `RasterizedTectonics` y dos bloques de `UpdateMeshColors`) y ya se había desincronizado:
-  - `UCubeSphereGrid::GetFaceAxes` para `+Z` da `U=(1,0,0) V=(0,1,0)` → dirección `(U, V, 1)`
-  - `URasterizedTectonics` case 4 (`+Z`) usa `FVector(U, -V, 1)` → **V invertida**. Lo mismo en `−Z`, invertida al revés.
-  - Efecto: el mapa de IDs de placa (Voronoi, sobre el Grid) y el de elevación (Raster) están **espejados en los dos casquetes polares**. Las fronteras dibujadas no coinciden con las montañas allí.
-  - Copias eliminadas: 3 en `TectonicsTestActor` (`GetSurfaceRadiusAtDirection`, `CreatePlanetMesh`, `UpdateMeshColors`), 2 en `RasterizedTectonics` (`InitializeFromPlateSystem`, `ApplyFractalNoise`), la tabla de tangentes de `RasterizedTectonics`, y las 2 de generación de vértices de malla. `UCubeSphereGrid::GetFaceAxes` ahora delega en el helper en vez de tener su propia tabla.
-  - Efecto secundario que no se había previsto: el convenio antiguo era **levógiro** en las dos caras polares (`AxisU × AxisV == −Normal`), lo que además de espejar los datos invertía el winding de los triángulos generados allí. Al unificar se corrige también eso.
-  - Cubierto por 4 tests nuevos en `Tests/CubeFaceMappingTests.cpp`: ida-y-vuelta exacta, dextrogiro en las 6 caras, acuerdo con el `Grid`, y cobertura de la esfera sin huecos.
-  - ⚠️ **La primera pasada dejó 2 copias sin migrar** dentro de `UpdateMeshColors`, porque su texto no era idéntico al de las otras (una no llevaba comentarios `// Face N`, la otra tenía líneas intermedias distintas). Eso dejó las dos caras polares inconsistentes entre `CreatePlanetMesh` (ya convertida) y `UpdateMeshColors` (no) — una regresión introducida al arreglar el bug original. Detectada y corregida al integrar el visor de F0.5. Es la mejor ilustración posible de por qué el mapeo no debía estar duplicado: ni siquiera una migración deliberada, buscándolas a propósito, las encontró todas a la primera.
+### F0.5 — Visor de campos 🟡 NÚCLEO HECHO
 
-- [ ] 🔴 **Arreglar los 3 tests que ya estaban en rojo** (descubierto el 15-08-2026 al ejecutar la suite; verificado que fallan también en `HEAD` sin ninguno de los cambios de F0). Que M3 y M4 se cerraran como "✅ completo" con la suite roja indica que **nunca se llegó a ejecutar**, solo a compilar:
-  - [x] `Simu.Tectonics.BoundaryInteractionsSanity` y `Simu.Tectonics.ElevationStaysBounded` — **arreglados (15-08-2026)**. Ambos abortaban en la primera aserción porque `GeneratePlates()` devolvía `false`: el Jump Flooding dejaba entre el 11 % y el 19 % de las celdas sin asignar. Causa raíz: **las pasadas de salto del JFA no cruzaban entre caras del cubo** (admitido en un comentario del propio código); la propagación entre caras avanzaba una sola celda por pasada y solo sobre las filas de borde, así que cualquier cara del cubo sin ningún centroide dentro no llegaba a rellenarse en las log2(Res)+2 pasadas disponibles. Con ~12 placas repartidas por Fibonacci sobre 6 caras, que alguna cara quede sin centroide es lo normal.
-    **Solución: eliminar el JFA**, no repararlo. El JFA es una aproximación que compensa con miles de semillas o en GPU; aquí hay 12-30 placas y esto se ejecuta una sola vez al generar el planeta. La fuerza bruta (para cada celda, el centroide más cercano) es exacta por definición, garantiza cobertura total, no tiene casos límite entre caras, y cuesta milisegundos. Se fue con ella ~150 líneas de propagación cross-face delicada, `JFAIterations`, y cuatro helpers privados que quedaron muertos.
-    Confirmación de que ahora sí ejercitan lo que dicen: `ElevationStaysBounded` pasó de 24 ms (abortaba) a 389 ms (corre sus 500 pasos).
-  - [x] `Simu.CubeSphere.AdjacencyContinuity` — **arreglado (15-08-2026), pero el bug principal estaba en el test**. Afirmaba que ir "arriba" desde una celda de borde y luego "abajo" desde la vecina debía devolver a la celda de partida. **Esa propiedad es falsa en un cubo** y ninguna implementación correcta puede satisfacerla: al cruzar de `+X` hacia arriba se entra en `+Z` por su borde `+U`, no por su borde `−V` (el eje `+V` de `+X` es el eje `+U` de `+Z`), así que "abajo" en el marco local de `+Z` lleva hacia `−Y`, no de vuelta. Solo cumplían el ida-y-vuelta las adyacencias sin rotación relativa: 64 de 192, más 4 casos rotados que caían por poco dentro de la tolerancia. De ahí los 124 fallos exactos.
-    Reescrito alrededor de la propiedad que **sí** es cierta y que es además la que necesitan los algoritmos de vecindad: **reciprocidad** (si B es vecina de A, A está entre las vecinas de B), más proximidad geométrica y no-identidad. 24.576 comprobaciones, todas en verde.
-    Aprovechando, se sustituyó también la implementación: `GetNeighborCell` tenía una tabla de 24 entradas (cara, borde) → (cara vecina, rotación) más un switch de 16 ramas. Ahora resuelve el cruce por **geometría pura** — se sale del cuadrado UV sin recortar, se reproyecta la dirección, y la rotación relativa entre caras sale sola. Sin tabla que mantener.
-    ⚠️ **Pendiente relacionado:** M3 "portó esa tabla" al QuadTree (`CubeSphereQuadTree.cpp:596`), así que existe una **segunda copia** con los mismos errores potenciales. No se ha tocado porque el QuadTree es candidato a borrarse en el punto siguiente; si se decide conservarlo, hay que migrarlo a `GetNeighborCell`.
+- [x] `FPlanetScalarField` + `UPlanetFieldRegistry`, sin copiar datos
+- [x] Paleta y escala **ortogonales** (`Sequential`/`Diverging`/`Categorical`/`Terrain` × `Linear`/`Logarithmic`)
+- [x] Rango automático por percentiles 2/98
+- [x] Conmutar con **F/G**, leyenda en el HUD, material unlit con **U**
+- [x] 6 campos registrados: elevación, ID de placa, edad y tipo de corteza, grosor, altura sobre el nivel del mar
+- [ ] Campos vectoriales (velocidad, viento, drenaje) como flechas
+- [ ] Vista de sección/perfil a lo largo de un gran círculo
 
-- [x] **Criterio de asignación placa→celda unificado** (15-08-2026). `RasterizedTectonics::InitializeFromPlateSystem` usaba `FTectonicPlate::Centroid`, que `CalculatePlateStatistics` recalcula como promedio de celdas, mientras el Voronoi usaba los centroides de Fibonacci: dos mapas distintos cerca de las fronteras. Ahora el ráster lee los centroides del Voronoi y aplica el mismo criterio (producto escalar mayor), así que solo pueden diferir por resolución, no por criterio.
-  - **Pendiente para F1**, deliberadamente: que el ráster sea la *única* fuente de verdad y que `UTectonicPlateSystem` lea de él. Hacerlo ahora sería a medias — en cuanto las placas se muevan, el mapa del Voronoi queda obsoleto al primer paso y pasa a ser solo la condición inicial, que es su papel correcto.
-- [x] **Borrar código muerto** (15-08-2026; está en git si hace falta recuperarlo). 18 archivos, ~150 KB:
-  - `Streaming/ChunkStreamingManager` y `CubeSphereVisualizerComponent` — 0 referencias externas
-  - `PlateSimulationGPU` + `PlateMovementShader` + `PlateMovement.usf` + `TectonicRaster.usf` — todos los `Dispatch*` eran `// TODO` vacíos. Si algún día se va a GPU, será contra estructuras de datos que todavía no existen; no hay nada aquí que reutilizar
-  - `Nanite/PlanetNaniteMesh` + `NaniteTypes` — **la pieza equivocada**: construía un `UStaticMesh` por parche de forma síncrona. Ver F6 para qué la sustituye
-  - `TectonicPlanetActor` y `TectonicVisualizerComponent` — solo existían para orquestar lo anterior
-  - `PlanetApproachPawn` actualizado: ya no busca `ATectonicPlanetActor`
-  - **Conservados a propósito**, contra la recomendación inicial: `QuadTree/` y `LOD/`. Al revisar su API resultó ser lógica espacial pura (split/collapse, error geométrico, bounds, vecinos, LOD por distancia) sin ninguna dependencia de Nanite — es exactamente la mitad-CPU del esquema de F6, y reescribir un quadtree esférico desde cero no es una tarde. También sobrevive `PlanetMaterialGenerator`, único ejemplo funcionando de creación de materiales por código, que F0.5 probablemente reutilice
-- [x] **Actor único: `TectonicsTestActor`** (15-08-2026). Era el único que simulaba relieve y lo dibujaba. Conviene renombrarlo en algún momento: ya no es un actor de test, es *el* actor del planeta.
-- [x] **Desactivada la llamada a `BoundaryInteractions::ProcessAllBoundaries`** hasta F1 (15-08-2026), donde por fin tendrá consumidor. **No se borra el archivo**: contiene física real (ángulos de subducción, esfuerzo acumulado, hotspots) que se conecta en F1. Desactivada también `DetectBoundaries()` en el paso: recalculaba 6×Res² celdas un mapa que no puede haber cambiado, porque las placas todavía no se mueven. Ambas se reactivan en F1.
+### F1 — Movimiento real de placas 🟡 NÚCLEO HECHO
 
-**Hecho cuando:** existe un único helper de mapeo de caras con test de ida-y-vuelta ✅, **la suite `Simu.*` pasa entera en verde** ✅ (11/11 el 15-08-2026), y `grep` de las clases borradas no devuelve nada.
+- [x] `UPlateKinematics` por fin cableada; los centroides rotan
+- [x] **Advección hacia atrás** del campo de IDs: el número de reclamantes *es* la clasificación del borde (1 = movimiento, 0 = rift, ≥2 = colisión)
+- [x] Colisión por densidad: océano subduce bajo continente; entre océanos subduce la más vieja
+- [x] Creación de corteza en rifts y destrucción en subducción, con contabilidad explícita
+- [x] Se advectan edad, tipo y grosor junto con el ID
+- [x] La advección no corre en cada paso, sino al acumular ~1 píxel de desplazamiento
+- [x] Orogenia calibrada contra el Himalaya ([detalle](#a4-calibración-de-la-orogenia))
+- [x] Verificado en editor: deriva, cordilleras de ~8.600 m y **bandas de edad en las dorsales**
+- [ ] ⏸️ **Aparcado, y con motivo** — los dos puntos que quedaban se replantean tras F2 ([por qué](#a9-los-dos-puntos-aparcados-de-f1))
 
-**Cómo ejecutar la suite** (no estaba documentado en ningún sitio, de ahí que se cerraran hitos sin correrla):
+### F2 — Isostasia y nivel del mar ✅ COMPLETO (16-08-2026)
 
-```
-& 'E:\Unreal\UE_5.8\Engine\Binaries\Win64\UnrealEditor-Cmd.exe' "D:\Portfolio\Simu\Simu.uproject" `
-    -ExecCmds="Automation RunTests Simu; Quit" -unattended -nopause -nosplash -NullRHI -log -stdout
-```
+- [x] **Grosor de corteza** como estado primario; la elevación se deriva
+- [x] **Flotación de Airy** con densidades reales → +840 m para 35 km continentales, la altura media real de los continentes
+- [x] **Batimetría por hundimiento térmico**: `d = 2500 + 350·√(edad)`
+- [x] **Nivel del mar** explícito, con volumen de océano conservado
+- [x] Conservación de corteza continental: en colisión el material se apila, no se destruye
+- [x] Tierra emergida resultante: 22–32 % según semilla (Tierra real: 29 %), y **converge al subir resolución**
+- [x] Renderizable: grosor de corteza y altura sobre el nivel del mar registrados en el visor
 
----
+### F3 — Clima mínimo viable ✅ COMPLETO (16-08-2026)
 
-## F0.5 — Visor de campos: la herramienta que hace comprobable todo lo demás 🟡 NÚCLEO HECHO (15-08-2026)
+**Por qué antes de la erosión:** la erosión hidráulica necesita **caudal**, y el caudal necesita **precipitación**. Sin esto, F4 tendría que inventarse una lluvia uniforme, que es justo lo que impide que se formen desiertos, sombras de lluvia y cuencas realistas.
 
-**Por qué existe esta fase:** sin ella, cada fase siguiente tendría que improvisar su propia visualización, y acabaríamos con cinco maneras distintas de pintar el globo (el mismo patrón de duplicación que causó los tres bugs de F0). Con ella, cada fase nueva sale a pantalla escribiendo un puñado de líneas.
+Deliberadamente barata: campos diagnósticos, no dinámica de fluidos. La atmósfera completa es F5.
 
-La idea: **cualquier campo escalar de la simulación** —elevación, edad de corteza, precipitación, caudal acumulado, espesor de sedimento— es lo mismo: 6 caras × Res² valores. Un único visor los pinta todos.
+- [x] **Temperatura** = f(latitud, altitud), gradiente adiabático de 6,5 °C/km. Ecuador 27 °C, 45° 1 °C, polo −25 °C; a 6 km sobre el ecuador se baja de 0 °C, que es por lo que hay glaciares ecuatoriales
+- [x] **Viento** por bandas: alisios del este, oestes, del este otra vez cerca del polo. Que **alternen** es lo que decide qué ladera es barlovento, y por tanto de qué lado cae el desierto
+- [x] **Humedad** transportada a barlovento, con continentalidad (lejos del mar llega menos aunque no haya montañas)
+- [x] **Precipitación orográfica y sombra de lluvia**. Perfil por bandas: 2500 mm/año en el ecuador, **200 en los subtrópicos** (donde están el Sahara, Arabia y el Kalahari), 1100 en latitudes medias, 200 en los polos. No es monótono: el mínimo subtropical es lo que separa un planeta con desiertos de una bola con lluvia decreciente
+- [x] El aire frío retiene menos vapor: los polos salen como desiertos pese a estar helados
 
-- [x] `FPlanetScalarField` (6 caras × Res², con nombre, unidad, paleta, escala y rango) y `UPlanetFieldRegistry` donde cada sistema publica los suyos. Los datos **no se copian**: el campo guarda una lambda que devuelve el array vivo, así la vista siempre refleja el estado actual sin sincronización explícita
-- [x] Coloreado de la malla de `TectonicsTestActor` desde el campo activo. Generaliza el `UpdateMeshColors` que antes solo sabía pintar color de placa modulado por elevación
-- [x] **Paleta y escala separadas**, corrigiendo el diseño que figuraba antes aquí. En el planteamiento original "logarítmica" era una rampa más, y es un error de categoría: el logaritmo es una **escala** (transforma el valor) y la paleta es un **mapa de color** (interpreta el valor ya normalizado). Son ortogonales — cualquier paleta puede pintarse en log:
-  - Paletas: `Sequential` (viridis), `Diverging` (azul-blanco-rojo, centrada en un cero con significado), `Categorical` (20 colores discretos, sin interpolar), `Terrain` (azules bajo el nivel del mar, verde-marrón-blanco encima)
-  - Escalas: `Linear`, `Logarithmic`
-- [x] Conmutar con **F / G**, y leyenda en el HUD con nombre, escala, rango en uso y unidad
-- [x] Rango automático por **percentiles 2/98** en vez de mín/máx crudos: un único píxel extremo comprimía todo el resto del rango y dejaba el mapa plano
-- [x] Registrados los 4 campos que hoy existen: elevación (Terrain, rango **fijo** a propósito — con rango automático la escala se reajusta sola y es imposible notar que el relieve crece), ID de placa, edad de corteza, tipo de corteza
-- [x] 6 tests en `Tests/PlanetFieldTests.cpp`: escala lineal y saturación, escala log y monotonía, rango automático frente a outliers, simetría de la paleta divergente, no-interpolación de campos categóricos, y gestión del registro
-- [ ] Campos vectoriales (velocidad de placa, viento, dirección de drenaje) como flechas de debug sobre el globo
-- [ ] Vista de sección/perfil: elevación a lo largo de un gran círculo. Es la forma más rápida de ver si una cordillera tiene un perfil plausible o es una pared de un píxel
-- [x] **Primera verificación en editor (15-08-2026)** — y salieron tres defectos que ningún test unitario podía haber visto. Justifica por sí sola la regla de "ninguna fase se da por hecha si no se puede ver en pantalla":
-  1. **Muescas en V en la silueta y hemisferios que desaparecían.** Regresión de F0: `CreatePlanetMesh` tenía un `bFlipWinding` que invertía los triángulos de `PositiveZ` y `NegativeZ`. Existía para compensar que el convenio antiguo era **levógiro justo en esas dos caras**. Al unificar el convenio (las 6 pasaron a dextrógiras) el parche dejó de compensar y pasó a romper: los dos casquetes quedaron con las normales hacia dentro, y por *backface culling* se veía a través de ellos. Eliminado; con convenio uniforme el winding es el mismo en las 6 caras.
-  2. **Colores lavados.** La paleta categórica define un rojo `(0.90, 0.24, 0.24)` y en pantalla salía salmón pálido: `M_VertexColor` es un material iluminado y el actor pone dos direccionales (sol a 10 + relleno a 2), así que lo que llegaba al ojo era `paleta × iluminación × exposición`. Eso invalida el propósito del visor — un mismo valor no puede verse de dos colores según dónde dé el sol. Añadido `M_PlanetFieldUnlit` (generado por código, vertex color → Emissive), por defecto, con **tecla U** para volver al iluminado, que sí ayuda a leer la forma del relieve.
-  3. **Escalón en el limbo.** No era un artefacto de render sino un **bug de simulación**: `SmoothElevation` y la difusión de `Step()` recortaban con `FMath::Clamp` al borde de la cara, o sea trataban cada cara como una imagen aislada. En el borde el kernel se muestreaba a sí mismo en vez de al vecino real del otro lado de la costura, y como la difusión corre en cada paso, la discontinuidad crecía a lo largo de las 12 aristas del cubo. Corregido reproyectando geométricamente (mismo patrón que `GetNeighborCell`), con instantánea previa para que el resultado no dependa del orden de las caras.
-- [x] Test de regresión `Simu.Tectonics.SeamContinuity`. **La primera versión del test no detectaba el bug**: comparaba saltos entre vecinos tras 300 pasos, y el ruido fractal deja saltos tan grandes por todas partes que el sesgo de costura quedaba enterrado. Rediseñado con suavizado fuerte (60 iteraciones), que aplana el interior de cada cara y hace destacar cualquier escalón que sobreviva en las costuras. **Verificado que falla al restaurar el código antiguo**, que es lo único que demuestra que un test sirve
-- [x] **Cámara de órbita** (15-08-2026, pedida por el usuario). El vuelo libre estorbaba para inspeccionar campos: cualquier giro desencuadraba el planeta. Ahora el ratón orbita alrededor del centro manteniendo la distancia y mirando siempre al centro, con W/S o rueda para acercarse. **O** conmuta a vuelo libre, que sigue haciendo falta para bajar a la superficie.
-  - El estado orbital se guarda como lat/lon/distancia propios, no se deriva de la transform: acumular giros sobre la transform cuela *roll* y la cámara acaba escorada sola.
-  - El zoom es proporcional a la altitud, no un paso fijo — es lo que hace que se sienta igual a 15.000 km que a 10 km.
-  - Latitud recortada a ±89° en vez de dar la vuelta: al pasar por el polo la longitud se invierte de golpe y la cámara pega un tirón.
-- [x] 🔻 **El ratón no capturaba, y probablemente no lo hizo nunca.** No había un solo `SetInputMode` ni `bShowMouseCursor` en todo `Source/`, y sin captura `GetInputMouseDelta()` devuelve cero siempre: ningún giro con ratón podía funcionar, ni la órbita nueva ni el vuelo libre de M1.6. Encaja con que M1.6 se cerrara como "implementado, sin verificar en editor".
-- [x] **La brújula al planeta pasa a ser HUD 2D real** (`ASimuHUD`). Era un `DrawDebugDirectionalArrow` dibujado en el MUNDO a 500 uu delante de la cámara, así que se comportaba como un objeto de la escena: al girar se quedaba clavada en el centro mientras el planeta pasaba por detrás, dando la impresión de que la cámara orbitaba *la flecha*. Ahora solo se dibuja en modo libre y solo si el planeta está fuera de pantalla, anclada al borde y no al centro (en el centro tapaba justo lo que se mira).
-- [ ] ⚠️ **Pendiente de volver a mirar en el editor** tras todas estas correcciones
+**Hecho:** `Simu.Climate.RainShadow` sobre un planeta simulado 200 Ma — **74 cordilleras medidas, sotavento más seco en el 89 %, 1.612 mm/año a barlovento frente a 359 a sotavento**. Un contraste de 4,5×.
 
-**Hecho cuando:** se puede recorrer con una tecla los campos que hoy ya existen (ID de placa, elevación, edad de corteza, tipo de corteza) con leyenda correcta, y añadir un campo nuevo cuesta registrarlo, no escribir un visualizador.
+Cuatro tests: perfil de temperatura, bandas de precipitación (comprueba explícitamente que **no** sea monótono), alternancia de vientos, y sombra de lluvia sobre terreno real.
 
-### Aviso de resolución, que muerde en F4
+**Renderizable:** temperatura (divergente centrada en 0 °C, que es el umbral con significado físico) y precipitación (secuencial) registradas en el visor. Pendiente el viento como campo vectorial, que va con los campos vectoriales de F0.5.
 
-La malla de `TectonicsTestActor` es de `GridResolution = 128` por cara. Sobre un radio de 6371 km, el lado de una cara mide ~10.000 km, así que **un quad son ~78 km**. El ráster de simulación va a 256 (~39 km por celda).
+⚠️ **Sin verificar en el editor todavía.**
 
-Para F1, F2 y F3 eso vale: continentes, sombras de lluvia y cinturones climáticos se miden en miles de km. **Para F4 no vale**: una red de drenaje a 39 km por celda no es una red de drenaje. Antes de F4 habrá que decidir entre subir la resolución del ráster (coste cuadrático) o añadir un modo de vista regional que simule y dibuje una sola cara con más detalle. Anotado aquí para que sea una decisión y no una sorpresa.
+### F4 — Erosión hidráulica y sedimento 🔴 SIGUIENTE
 
----
+- [ ] **Acumulación de flujo** sobre la esfera, con `UCubeSphereGrid::GetNeighborCell` para cruzar caras (**no** `GetCrossFaceNeighbors` del QuadTree: arrastra la tabla vieja)
+- [ ] Tratamiento de depresiones (lagos/sumideros)
+- [ ] **Incisión fluvial** (stream power): erosión ∝ caudal^m · pendiente^n
+- [ ] Transporte y deposición de sedimento → llanuras aluviales y deltas
+- [ ] Migrar aquí la erosión termal que hoy vive como `DiffusionRate`
+- [ ] Realimentación isostática: el sedimento hunde, la erosión rebota
+- [ ] Revisar la cota de crecimiento continental ([por qué](#a5-crecimiento-del-área-continental))
 
-## F1 — Movimiento real de placas 🟡 NÚCLEO HECHO (15-08-2026)
+**Hecho cuando:** redes de drenaje dendríticas, deltas en las desembocaduras, y una montaña aislada que se degrada en vez de crecer indefinidamente.
 
-**Por qué:** sin esto no hay tectónica, y sin tectónica cambiante el resto del simulador no tiene nada que simular.
+**Renderizable cuando:** **caudal acumulado en escala logarítmica** — es *el* mapa de F4; en lineal no se ve nada. Más tasa de erosión, espesor de sedimento y curva temporal de altura máxima.
 
-Algoritmo elegido: **advección hacia atrás del campo de IDs de placa**. Para cada píxel de dirección `d`, se rota `d` hacia atrás por la rotación de cada placa (`−ω·Δt` sobre su polo de Euler) y se pregunta quién poseía ese punto el paso anterior:
+⚠️ **Aviso de resolución:** la malla va a 128 por cara sobre 6371 km, o sea ~78 km por celda; el ráster a 256 (~39 km). Vale para patrones globales pero **no para redes de drenaje**. Hay que decidir antes de F4 entre subir resolución (coste ×16 desde 32 a 96, medido) o una vista regional de más detalle.
 
-- **Un candidato** → la placa simplemente se movió.
-- **Dos o más** → colisión. Según los tipos de corteza: océano-continente y océano-océano ⇒ subducción; continente-continente ⇒ orogenia.
-- **Ninguno** → hueco. Es un rift: se crea corteza oceánica nueva con edad 0.
+### F5 — Atmósfera y ciclo del agua completo 🟢
 
-Esto hace que subducción, dorsales y apertura de océanos sean **emergentes**, no guionizadas — y es donde `BoundaryInteractions` por fin tiene a quién alimentar.
+- [ ] Shallow Water Equations + Coriolis
+- [ ] Ciclo del agua cerrado con balance de masa verificable
+- [ ] Corrientes oceánicas y transporte de calor
+- [ ] Hielo: casquetes, glaciares y su erosión
+- [ ] Climatología profunda: carbono-silicatos, albedo, realimentación hielo-albedo
 
-- [x] `UTectonicPlateSystem::Step` llama de verdad a `UPlateKinematics::CalculatePlateRotation` y rota el centroide de cada placa. El polo de Euler se mantiene fijo (referencia = manto): es una simplificación, pero hace el movimiento predecible analíticamente, que es lo que necesitan los tests
-- [x] **Advección hacia atrás del campo de IDs** — `URasterizedTectonics::AdvectPlateField`. Semi-lagrangiana: para cada píxel de la rejilla nueva se pregunta de dónde viene, en vez de empujar cada píxel viejo hacia donde va. Empujar hacia delante deja huecos y solapes por redondeo y no da forma natural de detectar colisiones; preguntando hacia atrás cada celda se resuelve exactamente una vez y **el número de reclamantes es por sí solo la clasificación del borde**
-- [x] **La advección no corre en cada paso, y no es una optimización sino lo correcto.** Con los valores por defecto la placa más rápida gira ~8e-5 rad por paso mientras un píxel abarca ~6.1e-3 rad: 1/76 de píxel. Advectar ahí no movería nada y cada remuestreo mete difusión numérica, así que hacerlo 76 veces en vez de una emborrona el campo a cambio de nada. Se acumula hasta que el desplazamiento alcanza un píxel
-- [x] Resolución de colisión por tipo de corteza:
-  - océano vs continente → subduce el océano (más denso). Es la razón de que los continentes duren miles de millones de años mientras el fondo oceánico se recicla entero
-  - océano vs océano → subduce **la más vieja**, que se ha enfriado y es más densa
-  - continente vs continente → ninguna subduce; se queda la más alta
-- [x] Creación de corteza en huecos (0 reclamantes): rift, corteza oceánica nueva con edad 0 y elevación de dorsal. Se suelda a la placa que estaba antes ahí, que es la que se aleja
-- [x] Destrucción de corteza en subducción: cada reclamante perdedor es una celda que desaparece. Es la contraparte que faltaba (el TODO de `BoundaryInteractions.cpp:609`), y ahora hay contabilidad explícita en `FTectonicAdvectionStats`
-- [ ] Conectar `ElevationRateMaps` de `BoundaryInteractions` al raster: rellenar `ApplyElevationChanges()`, que hoy está vacía
-- [ ] Reactivar `ProcessAllBoundaries` (desactivada en F0)
-- [x] Se advectan `CrustAge`, `CrustType` y `Elevation` junto con el ID, y se recalcula `Velocity` tras resolver la propiedad (depende de dónde está el punto **ahora** y de quién lo posee ahora)
+### F6 — Renderizado de producto 🟢
 
-**Coste:** `O(Res²·N)` por paso. Con Res=512 y 12 placas son ~3,1 M operaciones — asumible si el paso tectónico corre a baja frecuencia (no cada frame). Presupuestarlo explícitamente, no dejarlo en el `Tick`.
+- [ ] Quadtree + **malla-rejilla única instanciada por parche**, desplazamiento en vertex shader (**no** `UStaticMesh` por parche: es lo que congelaba el editor)
+- [ ] Reintroducir LOD y streaming sobre ese enfoque
+- [ ] Mover campos a texturas GPU y pasos a compute shaders
+- [ ] Cachear el dibujo de fronteras de placa
 
-**Hecho cuando:**
-- [x] `Simu.Tectonics.PlateCentroidsMove` — el centroide recorre el ángulo que predice la fórmula del cono (`cos(recorrido) = cos²α + sin²α·cos θ`), no una aproximación
-- [x] `Simu.Tectonics.PlateFieldEvolves` — las placas cambian de tamaño; falla si el campo vuelve a congelarse
-- [x] `Simu.Tectonics.CrustBudget` — se crea y se destruye corteza, y ninguna supera al doble de la otra
-- [x] `Simu.Tectonics.ContinentsPersist` — los continentes sobreviven; detecta que la regla de subducción esté invertida
-- [x] `Simu.Tectonics.OrogenyBuildsMountains` — **8.645 m de elevación máxima tras 200 Ma** (partiendo de 2.217 m de ruido inicial), sin saturar el tope de 12.000 m. Añadido tras probar F1 en el editor: había deriva de placas pero **ninguna montaña**.
-  - Causa: no faltaba física, era una **asimetría de unidades**. El levantamiento se escalaba por `dt` y la difusión **no** — se aplicaba tal cual en cada paso. A 60 fps eso significa que la difusión borraba ~70 % del relieve por Ma mientras el levantamiento aportaba 5·10⁻⁴ m/Ma: desacoplados unos 7 órdenes de magnitud, y el resultado además dependía del framerate.
-  - `DiffusionRate` pasa a ser una tasa **por Ma**, integrada como tal.
-  - `OrogenyFactor` pasa a ser una **eficiencia adimensional**: la convergencia se convierte a m/Ma (rad/Ma × radio del planeta) antes de multiplicar, así que el número se lee directo — 0.005 = por cada metro que dos placas se acercan, la frontera sube 5 mm. Antes era una constante sin unidades multiplicando rad/Ma, sin significado físico posible.
-  - **Integración por sub-pasos** (máx. 0.5 Ma cada uno): el `dt` que llega no está acotado porque el usuario puede subir `TimeScale` a 1000, y a 60 fps eso son ~16 Ma de golpe. Integrar eso de una vez daba saltos de miles de metros y una fracción de mezcla mayor que 1, que en vez de suavizar oscila. Que el resultado dependa del framerate no es aceptable en un simulador.
-- [x] Visual: cordilleras confirmadas en el editor (15-08-2026)
-- [x] **Rendimiento** (15-08-2026, tras confirmar "pocos fps, pero hay montañas"). Dos costes dominantes, ninguno de ellos la física en sí:
-  - `UpdateMeshColors()` corría **en cada frame**: reconstruía ~100.000 vértices (6×129²) con su muestreo bilineal y su conversión de color, y resubía la sección de malla entera a la GPU. No tiene sentido a 60 Hz cuando la simulación avanza en millones de años. Limitado a `MeshUpdateHz` (10 por defecto), con refresco inmediato al cambiar de campo o de material, que es donde el usuario sí espera respuesta instantánea.
-  - La difusión pasaba **los 3,5 M de taps por sub-paso** por `SampleNeighborElevation`, con doble indirección y comprobación de cruce de cara. Ahora se parte en interior (98,4 % de los píxeles a Res=256, indexado directo por filas) y anillo de borde (el único que paga la reproyección). Además el barrido de fronteras y la difusión van en `ParallelFor` por cara.
-  - Añadida instrumentación al HUD: **coste de simulación y de malla en ms**, con media móvil. Para no volver a optimizar a ciegas.
-  - Verificado que es refactor puro: elevación máxima y contabilidad de corteza **idénticas** antes y después (8.645 m, +59.168/−56.606).
+### F7 — Biosfera 🟢
 
-**Contabilidad medida (15-08-2026):**
-
-| Magnitud | Valor |
-|---|---|
-| Elevación máxima tras 200 Ma | 2.217 m → **8.645 m** |
-| Corteza creada / destruida | +59.168 / −56.606 (**4,3 % de desequilibrio**) |
-| Corteza continental tras la simulación | 1.380 → 976 celdas (**71 %**) |
-
-> ⚠️ **Ese 71 % es un problema físico conocido, no un éxito.** En una colisión continente-continente ninguna de las dos subduce: la corteza se **engrosa**. Pero como hoy el estado primario es la elevación y no el grosor, la resolución de colisión no tiene forma de apilar material y destruye la celda perdedora. Perder un 29 % de continente cada 200 Ma implicaría no quedar nada en ~700 Ma, y en la Tierra el área continental es aproximadamente constante desde hace miles de millones de años. **Lo arregla F2**, que convierte el grosor de corteza en el estado primario y deriva la elevación por isostasia — es exactamente el caso de uso que lo justifica.
-
-> **Los cuatro tests se validaron saboteando el código** (desactivando la advección y la rotación) para comprobar que fallan. `ContinentsPersist` **no fallaba**: con el campo congelado el recuento no cambia, el ratio sale 1.0 y todas sus aserciones se cumplen. Se reforzó exigiendo que la advección se haya ejecutado y que haya habido colisiones. Es el segundo test de esta sesión que pasaba sin comprobar nada.
-
-**Pendiente de F1, siguiente tanda:**
-- [ ] Rellenar `BoundaryInteractions::ApplyElevationChanges()` y reactivar `ProcessAllBoundaries` para que su física (ángulos de subducción, esfuerzo acumulado, hotspots) alimente por fin la elevación del ráster
-- [ ] Reactivar `DetectBoundaries()`, que ahora sí tiene sentido: los límites cambian de verdad
-- [ ] Que el ráster sea la **única fuente de verdad** del campo de IDs y `UTectonicPlateSystem` lea de él — desde ahora el mapa del Voronoi es solo la condición inicial y queda obsoleto al primer paso
-
-**Renderizable cuando** (campos nuevos que F1 publica al visor de F0.5):
-- **ID de placa** (rampa categórica) animado en el tiempo: se ve la deriva. Es la comprobación de un vistazo de que el bloqueador está resuelto
-- **Edad de la corteza** (secuencial): debe aparecer el patrón de bandas simétricas a ambos lados de las dorsales, como los mapas reales del fondo oceánico. Si no aparece, el spreading está mal
-- **Tipo de frontera** (categórica: convergente / divergente / transformante)
-- **Velocidad de placa** como campo vectorial de flechas
-- La prueba visual que lo resume todo: dejarlo correr y ver si los continentes se agrupan y se dispersan — un ciclo de Wilson
+- [ ] Agentes evolutivos, genoma vectorial, Niagara
 
 ---
 
-## Defectos abiertos — y cuáles NO los arregla ninguna fase posterior
+## Defectos abiertos
 
-> Escrito el 15-08-2026 tras detectar que estaba aparcando un problema con una excusa que no se sostenía. La regla: **antes de diferir un defecto a una fase futura, hay que poder nombrar el mecanismo concreto que lo arreglará.** Si no se puede, no está diferido, está sin arreglar.
+Ninguno bloquea, todos están medidos y acotados. Detalle completo en [A6](#a6-defectos-abiertos-en-detalle).
 
-### 🔴 Escalonado de bordes de placa ("peine") — ×2,02 medido
-
-> **Diagnóstico corregido el 16-08-2026.** Lo que sigue debajo describía la causa como "encadenar remuestreos". **Es falso, medido y descartado** — ver el bloque de abajo. Se conserva porque documenta un razonamiento equivocado que costó dos intentos de arreglo.
-
-**Causa real: el error de CADA advección, que crece con el tamaño del paso.** Medido con `Simu.Tectonics.AdvectionChainingHypothesis`, mismo tiempo simulado en los tres casos:
-
-| Paso | Advecciones | Frontera |
+| Defecto | Medida | ¿Lo arregla una fase posterior? |
 |---|---|---|
-| 1 px | 196 | **×2,02** |
-| 2 px | 98 | ×2,52 |
-| 4 px | 49 | ×3,09 |
+| Escalonado de bordes de placa | ×2,3 | **No.** Y está bloqueado por falta de métrica válida |
+| Crecimiento del área continental | ×1,3 / 1000 Ma | **No** (la erosión no convierte continente en océano) |
+| Celdas sin resolver en la advección | 0,016 % | Residual, vigilado por test |
 
-Menos advecciones dan **más** escalonado, justo lo contrario de lo que predecía la hipótesis del encadenamiento. La explicación: una rotación no es una traslación uniforme — las celdas lejanas al polo de Euler recorren más que las cercanas — y ese diferencial es despreciable en un paso de un píxel y grande en uno de cuatro. Un paso de ~1 píxel es casi una traslación pura, que el vecino más cercano reproduce bien.
+## Riesgos vigentes
 
-**Consecuencia práctica:** el mando ya está en su mejor valor (`AdvectionPixelStride = 1`), y la reescritura en coordenadas materiales que estaba planificada **no habría arreglado nada**. El experimento se hizo antes de emprenderla y ahorró el trabajo entero. Ahora un test custodia la conclusión: si alguien sube el stride para ahorrar coste, sabrá que empeora la geometría.
+- **Coste `O(Res²)` por campo.** Cada fase añade campos que recorren las 6 caras, y el coste escala con el número de celdas (medido: ×16 de Res 32 a 96). Es el riesgo principal de F3/F4.
+- **Calibración cruzada de parámetros.** `OrogenyFactor` y `DiffusionRate` forman un equilibrio; tocar uno obliga a revisar el otro.
+- **Bordes del cubo.** Cada sistema nuevo con vecindad vuelve a pagarlo. Usar siempre `CubeFaceMapping` y `GetNeighborCell`.
+- **Estabilidad numérica de las SWE** y **VRAM a resolución alta** (heredados del plan original).
 
-**Qué queda por probar,** en orden de coste: subir la resolución del ráster (el escalonado es relativo al tamaño de celda), o un filtro de mayoría más agresivo en la frontera — con la advertencia de que un filtro de mayoría tiende a producir bordes en bloque, que es otro artefacto distinto y no necesariamente mejor.
+---
 
-<details>
-<summary>Diagnóstico antiguo, incorrecto (conservado como registro)</summary>
+## Cómo trabajar aquí
 
-### Lo que se creía: encadenar remuestreos — ×3,15 medido</summary>
+```
+# Compilar
+& 'E:\Unreal\UE_5.8\Engine\Build\BatchFiles\Build.bat' SimuEditor Win64 Development `
+    -Project="D:\Portfolio\Simu\Simu.uproject" -WaitMutex
 
-El campo de IDs de placa es **categórico**: no se puede interpolar, hay que tomar el vecino más cercano. Cada advección re-cuantiza el borde y, encadenadas, el escalonado se acumula. Medido en `Simu.Tectonics.LongRunStability`: la longitud total de frontera crece ×3,15 en 196 advecciones, cuando con placas rígidas debería mantenerse del mismo orden.
+# Pasar la suite (30 tests)
+& 'E:\Unreal\UE_5.8\Engine\Binaries\Win64\UnrealEditor-Cmd.exe' "D:\Portfolio\Simu\Simu.uproject" `
+    -ExecCmds="Automation RunTests Simu; Quit" -unattended -nopause -nosplash -NullRHI -stdout
+```
 
-**Intento fallido (15-08-2026), documentado para no repetirlo:** muestrear contra un marco de referencia con la rotación acumulada de cada placa, para que hubiera un solo remuestreo por lejos que se llegue. Empeoró todo — tierra emergida 24,6 % → 9,2 %, montañas de 7.472 m a 969 m — y se revirtió. El fallo de diseño: la propiedad salía de la referencia acumulada mientras la edad y el grosor se transportaban un paso atrás, y cuando la referencia envejece esas dos cosas dejan de corresponderse. Añadir el centinela de material subducido mejoró pero no bastó.
+**Reglas que se han ganado su sitio:**
 
-**No lo arregla ninguna fase posterior.** La erosión de F4 suaviza la elevación, no el campo de IDs. El renderizado de F6 no toca la simulación.
+1. **Un test que solo se ha visto pasar no demuestra nada.** Sabotear el código y comprobar que falla. Tres tests de esta sesión pasaban sin comprobar nada.
+2. **Cota por los dos lados.** Un límite de un solo lado en una magnitud que puede irse en ambos es media comprobación.
+3. **Medir antes de optimizar.** La intuición falló dos veces; instrumentar por fases encontró el coste real en un sitio inesperado.
+4. **Antes de diferir un defecto, nombrar el mecanismo que lo arreglará.** Si no se puede, no está diferido: está sin arreglar.
 
-</details>
+---
 
-### 🔴 Crecimiento del área continental — ×1,28 por 1000 Ma
+# Anexo
 
-**Corrección de un error mío:** justifiqué esta holgura diciendo que la erosión de F4 aportaría el sumidero. Es falso. La erosión adelgaza corteza y mueve sedimento, pero **no convierte corteza continental en oceánica**; el área continental no la toca.
+## A1. La regla de verificación
 
-Causa real: en una colisión la continental gana y la celda de destino pasa a ser continental, convirtiendo océano en continente. Lo que debería compensarlo — que el borde trasero de la placa deje sitio — quedó amortiguado al filtrar los huecos de remuestreo.
+**Ninguna fase se da por hecha si no se puede ver en pantalla.** El motivo sale de la propia auditoría: los tres bugs de F0 sobrevivieron meses precisamente porque nadie podía *ver* lo que el código hacía. Un test dice "no ha petado"; mirar el planeta dice "esto no parece la Tierra".
 
-**Es el mismo bug que el peine, con otro síntoma.** Un solo arreglo cubre los dos.
+Eso obliga a separar dos cosas que estaban mezcladas:
 
-Acota la gravedad: la **fracción de tierra emergida sí es estable** (24,6 % → 24,6 % en 1000 Ma), así que el exceso es plataforma sumergida, no continentes desbordando el planeta.
+| | Qué es | Cuándo |
+|---|---|---|
+| **Visualización de diagnóstico** | Campos sobre el globo, con leyenda, conmutables. Barata, sin LOD | **F0.5, y luego cada fase** |
+| **Renderizado de producto** | LOD hasta la superficie, materiales, luz | F6 |
 
-### ✅ Cordones de corteza congelada — RESUELTO (16-08-2026)
+La primera hace comprobable cada fase; la segunda es acabado. Ha demostrado su valor: la primera vista real destapó tres defectos que ningún test unitario podía ver (winding invertido, colores lavados por el material iluminado, y un escalón en el limbo que resultó ser un bug de simulación, no de render).
 
-Líneas elevadas que atravesaban el océano nuevo sin envejecer ni reciclarse, uniendo continentes. Detectado por el usuario en pantalla.
+## A2. El mapeo de caras
 
-**Causa raíz.** El test de reclamación era `prev[nearest(R⁻¹·d)].PlateID == P`, y ese `nearest()` redondea al centro de celda más cercano: **hasta media celda de error**. Una celda que pertenece legítimamente a la placa P pero está a menos de media celda de la frontera anterior de P puede caer, al redondear, justo fuera de la región de P. Resultado: cero reclamantes para una celda que no es rift ni colisión — **un fallo de búsqueda, no física**.
+`UCubeSphereGrid::GetFaceAxes` daba para `+Z` el eje `V = (0,1,0)` mientras `RasterizedTectonics` usaba `FVector(U, -V, 1)` — V invertida, y en `−Z` invertida al revés. Las cuatro caras ecuatoriales sí coincidían, así que el bug solo se manifestaba en los casquetes: el mapa de placas y el de elevación quedaban **espejados** allí.
 
-Y como el error de redondeo depende de la geometría local, a lo largo de una frontera con orientación desfavorable **fallaban siempre las mismas celdas**, advección tras advección. Esa era la línea persistente.
+El convenio antiguo era además **levógiro** en esas dos caras (`AxisU × AxisV = −Normal`), lo que invertía el winding de los triángulos generados. Al unificar hubo que quitar el `bFlipWinding` que lo compensaba — y no hacerlo dejó los casquetes renderizando del revés hasta que se vio en pantalla.
 
-**Por qué los tres parches anteriores no podían funcionar.** Crear océano, rellenar del vecindario o conservar el estado son tres respuestas a *"¿qué hacemos con el hueco?"*, y el hueco **no debería existir**. Cualquier respuesta era elegir qué artefacto preferir.
+La primera pasada dejó **2 de las 8 copias sin migrar**, porque su texto no era idéntico al de las otras. Es la mejor ilustración de por qué no debía estar duplicado: ni una migración deliberada, buscándolas a propósito, las encontró todas.
 
-**El arreglo.** Cuando la búsqueda estricta no encuentra a nadie, se repite mirando las cuatro celdas que rodean la posición continua exacta — que es justo el alcance del redondeo que falló. Aplicado **solo** en ese caso: las celdas de interior (un reclamante) y las de colisión (dos o más) no se tocan, lo cual es esencial porque un intento anterior aplicó tolerancia a todas y triplicó las colisiones.
+## A3. Tests que no comprobaban nada
 
-**El orden importa, y equivocarlo costó una iteración.** Al poner la recuperación *antes* del test de rift, la tolerancia se tragaba los rifts: con pasos de advección de un píxel, una banda de rift es de **un píxel de ancho**, exactamente lo que la tolerancia de media celda alcanza. La creación de corteza se hundió de 45.830 a 1.758 celdas frente a 39.360 destruidas — el fondo oceánico dejaba de renovarse. Con el test de rift primero y la recuperación solo para huecos aislados, ambas cosas funcionan.
+Tres casos en dos sesiones:
 
-**Medido en `Simu.Tectonics.LongRunStability`** (1000 Ma, 196 advecciones):
+1. **M3/M4 se cerraron con la suite en rojo.** 3 de 8 tests fallaban; se había compilado, no ejecutado. El comando para correr la suite no estaba documentado en ningún sitio.
+2. **`ContinentsPersist` pasaba con las placas quietas.** Con el campo congelado el recuento no cambia, el ratio sale 1.0 y todas sus aserciones se cumplen. Detectado saboteando la advección.
+3. **`LongRunStability` acotaba solo por arriba.** Dejó pasar un desplome de tierra emergida del 24,6 % al 11,3 % sin decir una palabra.
+
+## A4. Calibración de la orogenia
+
+Al probar F1 había deriva pero **ninguna montaña**. No faltaba física: era una **asimetría de unidades**. El levantamiento se escalaba por `dt` y la difusión no —se aplicaba tal cual en cada paso—, así que a 60 fps la difusión borraba ~70 % del relieve por Ma mientras el levantamiento aportaba 5·10⁻⁴ m/Ma. Desacoplados unos 7 órdenes de magnitud, y el resultado dependía del framerate.
+
+Corregido: `DiffusionRate` pasa a ser tasa **por Ma**; `OrogenyFactor` pasa a ser **eficiencia adimensional** (la convergencia se convierte a m/Ma antes de multiplicar). Integración por sub-pasos de máx. 0,5 Ma, porque con `TimeScale` alto llegaban ~16 Ma de golpe.
+
+Desde F2 lo que engrosa es el **grosor de corteza**, no la elevación, y las montañas salen por flotación. Calibrado contra el Himalaya (35 → 70 km en ~50 Ma). Resultado: 1.184 → 7.472 m en 200 Ma, con solo el 0,3 % de la tierra contra el techo isostático. Ese techo tampoco es un clamp arbitrario: `MaxThickness` (75 km, límite de delaminación) por Airy da ~7.507 m.
+
+## A5. Crecimiento del área continental
+
+**Corrección de un error propio:** se justificó la cota holgada diciendo que la erosión de F4 aportaría el sumidero. **Es falso.** La erosión adelgaza corteza y mueve sedimento, pero **no convierte corteza continental en oceánica**; el área continental no la toca.
+
+Causa real: en una colisión la continental gana y la celda de destino pasa a ser continental, convirtiendo océano en continente. Lo que debería compensarlo —que el borde trasero de la placa deje sitio— quedó amortiguado al filtrar los huecos de remuestreo.
+
+Acota la gravedad: la **fracción de tierra emergida sí es estable**, así que el exceso es plataforma sumergida, no continentes desbordando el planeta.
+
+## A6. Defectos abiertos en detalle
+
+### Escalonado de bordes ("peine")
+
+El campo de IDs es **categórico**: no se puede interpolar, hay que tomar el vecino más cercano, y cada advección re-cuantiza el borde.
+
+**Cuatro intentos, dos hipótesis falsadas por medición:**
+
+| Intento | Resultado |
+|---|---|
+| Marco de referencia con rotación acumulada | **Peor**: tierra 24,6 → 9,2 %, montañas 7.472 → 969 m. La propiedad salía de la referencia acumulada mientras los datos se transportaban un paso atrás; al envejecer la referencia dejan de corresponderse |
+| Submuestreo 4× por mayoría | **Peor**: colisiones ×3. Dos placas pueden reclamar la misma celda, y todo el algoritmo se apoya en cuántas reclaman |
+| Limpieza de motas | **Mejor**: ×3,15 → ×2,02. Es lo que está en el código |
+| Subir resolución | **Peor y ×16 de coste** ([tabla](#a7-mediciones)) |
+
+**Hipótesis descartadas por medición:**
+
+- *"Viene de encadenar remuestreos"* — **falso**. Menos advecciones dan **más** escalonado. La causa es el error de *cada* advección, que crece con el paso: una rotación no es una traslación uniforme, y ese diferencial es despreciable en un paso de un píxel. El paso ya está en su valor óptimo.
+- *"Es cuantización, se encoge con la rejilla"* — **falso**. Empeora al subir resolución.
+
+**Bloqueado por falta de métrica.** El cociente `frontera_final/frontera_inicial` ha inducido a error tres veces: mejora cuando el borde pasa a ser rectangular (más corto que un peine fino), sugirió una causa falsa, y no es comparable entre resoluciones. Antes de un quinto intento hace falta una métrica que mida **rectitud antinatural** —densidad de esquinas de 90° frente a la esperada para un círculo máximo— y no simple longitud.
+
+### Cordones de corteza congelada — RESUELTO (16-08-2026)
+
+Líneas elevadas que atravesaban el océano sin envejecer ni reciclarse.
+
+**Causa raíz:** el test de reclamación era `prev[nearest(R⁻¹·d)].PlateID == P`, y ese `nearest()` redondea al centro de celda más cercano: **hasta media celda de error**. Una celda que pertenece a la placa P pero está a menos de media celda de su frontera anterior puede caer, al redondear, fuera de su propia región. Cero reclamantes para una celda que no es rift ni colisión: **un fallo de búsqueda, no física**. Y como el error depende de la geometría local, fallaban **siempre las mismas celdas**.
+
+Los tres parches previos (crear océano / rellenar del vecindario / conservar) eran respuestas a *"¿qué hacemos con el hueco?"*, y el hueco **no debía existir**.
+
+**Arreglo:** cuando la búsqueda estricta falla, se repite mirando las cuatro celdas que rodean la posición continua exacta — justo el alcance del redondeo. Solo en ese caso: las celdas de interior y de colisión no se tocan.
+
+**El orden importa:** poner la recuperación antes del test de rift hacía que la tolerancia se tragara los rifts (con pasos de un píxel, una banda de rift es de un píxel de ancho). La creación se hundió a 1.758 frente a 39.360 destruidas.
 
 | | Antes | Después |
 |---|---|---|
 | Celdas congeladas | ~22.900 | **748 (0,0157 %)** |
 | Creación / destrucción | 14k / 50k | **48.199 / 51.078** |
-| Tierra emergida | 25,1 % | 18,8 % |
 
-Un test vigila que las celdas sin resolver sigan siendo residuales: si vuelven a ser una fracción apreciable, los cordones están de vuelta.
+La tierra emergida bajó de 25,1 % a 18,8 %, y **no es una regresión**: el 25,1 % estaba inflado por el propio bug, porque los cordones eran corteza continental elevada que no debía estar ahí.
 
-> **Sobre la tierra emergida:** bajó de 25,1 % a 18,8 %, y no es una regresión. **El 25,1 % estaba inflado por el propio bug**: los cordones congelados eran corteza continental elevada que no debía estar ahí. El 18,8 % es lo que queda al resolver esas celdas correctamente, y sigue en rango plausible (la Tierra está en 29 %).
+## A7. Mediciones
 
-### ⚠️ Subir la resolución NO arregla el escalonado — medido y descartado
+### Rendimiento por fase
 
-Segunda hipótesis falsada sobre el mismo tema. Se esperaba que el escalonado fuera un artefacto de cuantización y se encogiera con la rejilla. `Simu.Tectonics.ResolutionScan`, 200 Ma en cada caso:
+Instrumentar cambió por completo la lista de sospechosos.
+
+```
+antes:  sim 116.6 ms | adv 147.8 (motas 5.3) front 2.5 dif 2.7 iso 78.2
+después: sim  27.6 ms | adv 174.1 (motas 9.2) front 2.9 dif 2.9 iso  6.8
+```
+
+- **Nivel del mar**: hacía 40 iteraciones de bisección × 393.000 celdas = 15,7 M de lecturas por paso para resolver *un número*. Sustituido por **Newton**, que aprovecha lo que la bisección tiraba: el nivel apenas se mueve entre pasos, y la derivada es gratis (`dV/dS` = área sumergida, contada en la misma pasada). 78,2 → 6,8 ms.
+- **Advección**: las pasadas de conteo y resolución hacían el mismo trabajo caro; se cachea el caso mayoritario de un único reclamante.
+- **Malla**: se reconstruía entera cada frame (~100.000 vértices). Limitada a 10 Hz.
+- **Paso fijo** desacoplado del framerate: la física dejó de depender de a qué fps corras.
+
+### Coste frente a resolución
 
 | Res | Escalonado | ms/paso | Advecciones |
 |---|---|---|---|
 | 32 | ×1,28 | 0,56 | 19 |
 | 48 | ×1,42 | 1,96 | 39 |
 | 64 | ×1,54 | 1,86 | 39 |
-| **96** | **×1,63** | **9,07** | 78 |
+| 96 | ×1,63 | 9,07 | 78 |
 
-**Cuesta ×16 y lo empeora ×1,27.** Decisión: no se sube la resolución para esto.
+El coste escala con el número de celdas. Es el dato que dimensiona F3 y F4: **cada campo nuevo paga ese factor**.
 
-El barrido se conserva como **medida de coste frente a resolución**, que sí es fiable y hace falta para dimensionar F3 y F4: el coste escala con el número de celdas, así que cada campo nuevo que se añada paga ese factor.
-
-### ⚠️ La métrica del escalonado es insuficiente — y ha inducido a error tres veces
-
-El cociente `frontera_final / frontera_inicial` ha llevado a conclusiones equivocadas tres veces:
-
-1. Bajó a ×2,02 con la limpieza de motas, pero las capturas mostraban bordes en **bloque rectangular** — un borde en bloques grandes es *más corto* que uno en peine fino, así que la métrica mejora mientras el resultado sigue siendo igual de artificial.
-2. Sugirió que encadenar advecciones era la causa; el experimento de paso lo desmintió.
-3. **No es comparable entre resoluciones**: a más resolución hay sitio para rugosidad más fina, así que el cociente crece aunque el borde no sea peor en ningún sentido útil.
-
-Solo sirve para detectar un empeoramiento catastrófico **a resolución fija**. Antes de volver a atacar el escalonado hay que tener una métrica que mida *rectitud antinatural* — por ejemplo densidad de esquinas de 90° frente a la esperada para un círculo máximo — y no simple longitud. **Sin esa métrica, cualquier intento de arreglo es a ciegas.**
-
-### Un test que no comprobaba nada, otra vez
-
-`LongRunStability` acotaba la tierra emergida **solo por arriba**, así que dejó pasar un desplome del 24,6 % al 11,3 % sin decir una palabra. Ya está con cota por los dos lados. Es el tercer caso en dos sesiones: **un límite de un solo lado en una magnitud que puede irse en ambos no es un test, es media comprobación.**
-
-### 🟢 Lo que sí es legítimo diferir
-
-- **Detalle sub-celda del relieve** → F4 lo aporta de verdad: la erosión hidráulica esculpe a escala menor que la celda tectónica.
-- **LOD y detalle de superficie** → F6, con el mecanismo ya decidido (malla base + displacement).
-
----
-
-## Rendimiento — medido, no supuesto (16-08-2026)
-
-Instrumentar por fases cambió por completo la lista de sospechosos. Lectura del HUD antes de tocar nada:
-
-```
-sim 116.6 ms @10 Hz | malla 8.6 ms
-  adv 147.8 (motas 5.3) front 2.5 dif 2.7 iso 78.2 ms
-```
-
-**`iso 78,2 ms` en cada paso** — más que todo lo demás junto, y nadie lo habría señalado a ojo: no era la isostasia sino `UpdateSeaLevel`, que hacía **40 iteraciones de bisección** y cada una recorría las 6×Res² celdas. 15,7 millones de lecturas por paso para resolver un único número.
-
-- [x] **Nivel del mar por Newton en vez de bisección.** La bisección desperdiciaba dos cosas: que el nivel apenas se mueve entre pasos (el valor anterior ya es una estimación excelente, y la bisección la tira para reempezar desde un rango de 40 km) y que la derivada es gratis (dV/dS es exactamente el área sumergida, que se cuenta en la misma pasada). Con Newton bastan 2-3 pasadas.
-- [x] **Advección: cachear el caso de un único reclamante.** Las pasadas de conteo y de resolución hacían el mismo trabajo caro — una rotación de cuaternión y una reproyección por placa y por celda — para calcular dos veces lo mismo. La gran mayoría de celdas están en el interior de una placa y tienen exactamente un reclamante, así que se guarda y se reutiliza. Solo las de frontera se recalculan.
-  - Un bug propio por el camino: se empaquetó cara e índice en un `int32` desplazando 29 bits, y la cara 5 hace el valor **negativo**; el desplazamiento a la derecha es aritmético y devolvía −3, con acceso fuera de rango y caída de la suite. Sustituido por dos arrays, sin trucos de bits.
-- [x] Ambos verificados como **refactor puro**: elevación máxima, contabilidad de corteza y escalonado idénticos antes y después.
-- [ ] Volver a leer el HUD y decidir si hace falta más.
-
----
-
-## F2 — Isostasia y nivel del mar 🔴
-
-**Por qué antes del agua:** sin nivel del mar explícito no hay costa, y sin costa no hay dónde depositar sedimento ni desde dónde evaporar.
-
-- [ ] Constante/estado de **nivel del mar** explícito (hoy no existe: el océano es "elevación negativa" pintada de azul)
-- [ ] **Grosor de corteza** como campo simulado, no solo elevación. La elevación pasa a derivarse de la isostasia, no a ser el estado primario
-- [ ] **Equilibrio isostático** (flotación de Airy): corteza gruesa/ligera flota alta. Es lo que hace que las montañas tengan raíz y que al erosionarlas la superficie rebote
-- [ ] **Conservación del volumen de océano**: el nivel del mar sube si la cuenca oceánica se reduce (dorsales jóvenes y calientes ocupan volumen)
-- [ ] Subsidencia térmica: la corteza oceánica se hunde al enfriarse con la edad (`CrustAge` ya se rastrea, hoy no se usa para nada)
-
-**Hecho cuando:** una cordillera erosionada en F4 rebota isostáticamente en vez de desaparecer; y el nivel del mar responde a la edad media de la corteza oceánica.
-
-**Renderizable cuando:**
-- **Máscara tierra/mar** con una costa de verdad, no "azul si la elevación es negativa". Es el primer momento en que el planeta se parece a un planeta
-- **Espesor de corteza** (secuencial) y **anomalía isostática** (divergente respecto al equilibrio): las cordilleras deben tener raíz visible
-- **Batimetría por edad**: el fondo oceánico debe hundirse al alejarse de las dorsales
-- Perfil de sección cruzando una costa: debe verse plataforma continental, talud y llanura abisal
-
----
-
-## F3 — Clima mínimo viable 🟡
-
-**Por qué aquí y no después de la erosión:** la erosión hidráulica necesita **caudal**, y el caudal necesita **precipitación**. Sin esto, F4 tendría que inventarse una lluvia uniforme, que es exactamente lo que impide que se formen desiertos, sombras de lluvia y cuencas realistas.
-
-Esta fase es deliberadamente **barata**: campos diagnósticos, no dinámica de fluidos. La atmósfera completa es F5.
-
-- [ ] **Temperatura** = f(latitud, altitud, ¿estación?). Gradiente adiabático con la altura
-- [ ] **Humedad** transportada por un campo de viento sencillo (bandas por latitud: alisios, oestes, polares). No SWE todavía
-- [ ] **Precipitación orográfica**: la humedad precipita al subir sobre relieve, y la masa de aire queda seca a sotavento ⇒ sombras de lluvia
-- [ ] Evaporación proporcional a temperatura sobre superficie de agua
-
-**Hecho cuando:** el mapa de precipitación muestra una asimetría clara barlovento/sotavento en una cordillera generada por F1, y desiertos en el interior de continentes grandes.
-
-**Renderizable cuando:**
-- **Precipitación** (secuencial) sobre el globo, comparable de un vistazo con un mapa climático real: cinturón húmedo ecuatorial, franjas desérticas subtropicales, sombras de lluvia tras las cordilleras
-- **Temperatura** (divergente en torno a 0 °C, que es el umbral con significado físico: hielo)
-- **Viento** como campo vectorial: deben verse las bandas por latitud
-- Comprobación cruzada: superponer precipitación sobre relieve y ver si la sombra de lluvia cae realmente detrás de la montaña
-
----
-
-## F4 — Erosión hidráulica y transporte de sedimento 🟡
-
-**Por qué ahora:** ya hay relieve que cambia (F1), costa donde depositar (F2) y lluvia que lo alimenta (F3).
-
-- [ ] **Acumulación de flujo** sobre la esfera: dirección de drenaje por celda y caudal acumulado aguas abajo. El cruce entre caras lo resuelve `UCubeSphereGrid::GetNeighborCell`, reescrito geométricamente en F0 y cubierto por el test de reciprocidad. **No** usar `FCubeSphereQuadTree::GetCrossFaceNeighbors`: arrastra la copia de la tabla de bordes que se eliminó del Grid por estar mal
-- [ ] **Tratamiento de depresiones** (lagos/sumideros): rellenar o enrutar. Sin esto el drenaje se atasca
-- [ ] **Incisión fluvial** (stream power): erosión ∝ caudal^m · pendiente^n
-- [ ] **Transporte y deposición** de sedimento: capacidad de carga, deposición al perder pendiente ⇒ llanuras aluviales y deltas
-- [ ] **Erosión termal / mass wasting**: ya existe de facto como `FPlateMovementParams::DiffusionRate`. **Migrarla aquí** con su justificación física en vez de dejarla como un hack anti-picos dentro del paso tectónico
-- [ ] Realimentación a F2: el sedimento depositado añade masa (subsidencia), la roca erosionada la quita (rebote isostático)
-
-**Hecho cuando:** aparecen redes de drenaje dendríticas visibles, los ríos desembocan en el mar formando deltas, y una montaña aislada se degrada con el tiempo en vez de crecer indefinidamente.
-
-**Renderizable cuando:**
-- **Caudal acumulado en escala logarítmica** — este es *el* mapa de F4. En lineal no se ve nada; en log aparecen las redes dendríticas. Si no salen ramificadas, el enrutado de drenaje está mal
-- **Tasa de erosión** y **espesor de sedimento** (divergente: erosión negativa, deposición positiva)
-- **Lagos y depresiones** marcados, para ver si el tratamiento de sumideros funciona
-- Curva temporal de altura máxima del planeta: debe estabilizarse en un equilibrio entre levantamiento tectónico y erosión, no dispararse a 12000 m ni aplanarse a cero
-- ⚠️ Aquí es donde muerde el aviso de resolución de F0.5: a 39 km por celda no hay red de drenaje que ver
-
-**Nota de calibración:** este es el punto donde `DiffusionRate`/`OrogenyFactor` dejan de ser parámetros libres. La erosión debe equilibrar el levantamiento tectónico — si no, o se aplana el planeta o se dispara a 12000 m. Ese equilibrio es un resultado observable, no un valor a fijar a mano.
-
----
-
-## F5 — Atmósfera y ciclo del agua completo 🟢
-
-Sustituye el clima diagnóstico de F3 por dinámica real.
-
-- [ ] Shallow Water Equations + Coriolis — `docs/04-atmosfera-clima.md`
-- [ ] Ciclo del agua cerrado: evaporación → advección → condensación → precipitación → escorrentía → océano, con **balance de masa verificable**
-- [ ] Corrientes oceánicas y transporte de calor
-- [ ] Hielo: casquetes polares, glaciares, y su erosión (distinta de la fluvial)
-- [ ] Climatología profunda: ciclo carbono-silicatos, albedo, realimentación hielo-albedo — `docs/06-climatologia-efecto-invernadero.md`
-
-**Renderizable cuando:**
-- **Humedad y nubosidad** animadas: deben formarse y disiparse sistemas, no quedarse estáticos
-- **Corrientes oceánicas** como campo vectorial, con su transporte de calor visible en el mapa de temperatura
-- **Hielo** (casquetes y glaciares) avanzando y retrocediendo con el clima
-- Gráfica de **balance de masa de agua** en el tiempo: la suma de océano + hielo + humedad + agua superficial debe ser constante. Es la comprobación más dura de esta fase y la más fácil de leer
-
-**Riesgo conocido:** las SWE son numéricamente inestables si el paso de tiempo no respeta CFL. Es el candidato natural para invertir en GPU (mucho más sensible a paralelismo que la tectónica rasterizada).
-
----
-
-## F6 — Renderizado de producto: LOD hasta la superficie 🟢
-
-Ojo con lo que esta fase **no** es: no es "por fin se ve algo". Desde F0.5 se ve todo, en vistas de diagnóstico sobre el globo. Lo que falta aquí es el **acabado**: poder bajar hasta el suelo con detalle, materiales y luz creíbles.
-
-Va al final porque optimizar un pipeline cuya física aún no está definida es tirar el trabajo, no porque la visualización se posponga.
-
-**Diseño decidido (15-08-2026), para no repetir el error de M1:** quadtree + **una sola malla-rejilla pre-construida**, instanciada por parche con distinta escala/offset, y desplazamiento en el *vertex shader* muestreando la textura de elevación. Lo que **no** se vuelve a intentar es construir un `UStaticMesh` por parche (el enfoque de `PlanetNaniteMesh`, borrado en F0): el `UStaticMesh::Build` síncrono por parche es lo que congelaba el editor, y ninguna cantidad de presupuesto por frame arregla que la geometría se recree en vez de instanciarse.
-
-- [ ] Reconsiderar el renderizado planetario: malla base + displacement desde textura, frente al `UStaticMesh` Nanite por parche que se abandonó en F0
-- [ ] Reintroducir QuadTree/LOD/streaming sobre el enfoque elegido
-- [ ] Mover los campos de simulación a texturas GPU y los pasos a compute shaders
-- [ ] Cachear el dibujo de fronteras de placa (deuda de M1: `DrawPlateBoundaries` recorre la rejilla entera cada frame; hoy solo está desactivado por defecto, no arreglado)
-
----
-
-## F7 — Biosfera 🟢
-
-- [ ] Agentes evolutivos, genoma vectorial, Niagara — `docs/07-biosfera-evolucion.md`
-
----
-
-## Riesgos vigentes
-
-- **Calibración cruzada de parámetros.** `DiffusionRate`, `OrogenyFactor`, `SpreadingFactor`, `TimeScale`, `ElevationScale` no están calibrados contra nada real ni entre sí; tocar uno obliga a reajustar los demás. F4 debería convertir parte de esto en un equilibrio emergente en vez de valores fijados a mano.
-- **Coste `O(Res²)` acumulativo.** Cada fase añade campos que recorren las 6 caras. Sin presupuesto de tiempo por paso y desacople del framerate, se repite la espiral de la muerte de M1.
-- **Bordes del cubo.** Cada sistema nuevo que necesite vecindad (drenaje en F4, advección en F5) vuelve a pagar el problema de las costuras entre caras. Es la razón por la que F0 unifica el mapeo antes de empezar.
-- **Estabilidad numérica de las SWE** y **VRAM a resolución alta** (heredados del plan original).
-
----
-
-## Historial — M0 a M5 (10 y 11-08-2026)
-
-Trabajo previo, resumido. Se conserva porque documenta bugs reales y decisiones, pero **léelo con las correcciones de la auditoría del 15-08-2026**.
+## A8. Historial M0–M5 (10 y 11-08-2026)
 
 ### Válido y aprovechable
 - **M0** — `git init`, `.gitignore`, baseline commiteado.
-- **M1.5** — Sesión de depuración de `TectonicsTestActor`: bug de picos infinitos en fronteras convergentes (fix: término difusivo) y su sobrecorrección (fix: mezcla parcial 0.02). Fórmula de exageración de elevación desacoplada del radio. Escala de juguete → escala real de la Tierra.
-- **M1.6** — `PlanetApproachPawn`: cámara con velocidad interpolada logarítmicamente según altitud, y "colisión" por consulta de altura (`GetSurfaceRadiusAtDirection`) en vez de colisión física. Brújula de depuración.
-- **M3** — Culling de frustum (`UCubeLODController::IsInFrustum`) y mapeo de aristas entre caras (`FCubeSphereQuadTree::GetCrossFaceNeighbors`). **`GetCrossFaceNeighbors` se reutiliza en F4** para el drenaje.
-- **M5** — Persistencia (`UTectonicSaveGame`): guarda semilla, estado cinemático y elevación; la topología se regenera desde la semilla. Verificado en editor.
+- **M1.5** — Bug de picos infinitos en fronteras convergentes y su sobrecorrección. Elevación desacoplada del radio. Escala real de la Tierra.
+- **M1.6** — `PlanetApproachPawn` con velocidad log-interpolada y "colisión" por consulta de altura.
+- **M3** — Culling de frustum y mapeo de aristas entre caras.
+- **M5** — Persistencia (`UTectonicSaveGame`), verificada en editor.
 
 ### Correcciones de la auditoría
-- **M1** quedó parado en el punto correcto: la elevación de `RasterizedTectonics` nunca llegó al heightmap Nanite. El diagnóstico de "deuda arquitectónica seria" en `UPlanetNaniteMesh` (build síncrono y bloqueante por parche) era acertado — **F0 propone abandonar ese pipeline**, no arreglarlo.
-- **M2** cerró como "decidido y documentado" que CPU es la ruta activa. Correcto, pero la conclusión de que existían "dos pipelines CPU redundantes" se quedó corta: `BoundaryInteractions` no es redundante, es **inerte** (`ApplyElevationChanges()` vacía).
-- **M4** dio por buena la cobertura de tests. Los tests pasan, pero **ninguno detecta que las placas no se mueven** — `UPlateKinematics` se testea de forma aislada mientras nadie lo llama en producción. F1 añade los tests que habrían pillado esto.
-- El antiguo **M6+** listaba "Erosión real (Pipe Model reemplazando el `SimpleFlowSimulation` actual)". Redacción engañosa: no hay nada que reemplazar.
+- **M1** quedó parado en el punto correcto; el diagnóstico de deuda en `UPlanetNaniteMesh` era acertado, y F0 abandonó ese pipeline en vez de arreglarlo.
+- **M2** cerró como "CPU es la ruta activa". Correcto, pero se quedó corto: `BoundaryInteractions` no era redundante, era **inerte**.
+- **M4** dio por buena una cobertura que no detectaba que las placas no se movían.
+- El antiguo **M6+** decía "Erosión real (Pipe Model reemplazando el `SimpleFlowSimulation` actual)". Redacción engañosa: no había nada que reemplazar.
+
+## A9. Los dos puntos aparcados de F1
+
+Quedaban dos: *conectar `BoundaryInteractions`* y *que el ráster sea la única fuente de verdad del campo de IDs*. Ninguno se ha hecho, y no es descuido.
+
+### El primero está escrito para un modelo que ya no existe
+
+`BoundaryInteractions` produce `ElevationRateMaps`, es decir **tasas de elevación en metros**. Eso tenía sentido cuando la elevación era el estado primario.
+
+Desde F2 no lo es: la elevación **se deriva** del grosor de corteza por isostasia, y `RebuildElevationFromIsostasy` la reconstruye entera al final de cada paso. Cualquier metro que `BoundaryInteractions` sumara se perdería en el mismo paso en que lo escribe.
+
+Además lee `PlateSystem->GetPlateIDAt`, que consulta el mapa del Voronoi — la condición inicial, obsoleta desde la primera advección.
+
+O sea: reconectarlo tal cual **escribiría en un campo derivado usando un mapa de placas caducado**. Las dos mitades están rotas.
+
+Lo que sí sigue siendo aprovechable de esas 693 líneas: **hotspots y vulcanismo**, que no dependen del mapa de fronteras de la misma manera, y las fórmulas de ángulo de subducción y esfuerzo acumulado, que podrían reescribirse para producir **cambios de grosor** en vez de cambios de elevación. Eso es trabajo de rediseño, no de reconexión, y encaja mejor junto a F4 —cuando la erosión también toque el grosor— que colgando de F1.
+
+### El segundo no tiene ningún consumidor todavía
+
+Los únicos que llaman a `PlateSystem->GetPlateIDAt` son `BoundaryInteractions` (desactivado) y un camino de reserva del actor que solo se usa si el ráster no está inicializado.
+
+Hacerlo ahora sería exactamente el patrón que destapó la auditoría: **calcular algo correcto que nadie lee**. Se hace cuando el primero lo necesite, y entonces será su prerequisito natural.
+
+### Consecuencia para el estado de F1
+
+F1 cumple su definición de hecho: las placas se mueven, la subducción y las dorsales son emergentes, hay conservación de corteza, y está verificado en pantalla con bandas de edad en las dorsales. Lo que queda no es F1 sin terminar, es **trabajo que cambió de sitio**.
+
+## A10. Documentos relacionados
+
+- [`SPECS.md`](SPECS.md) — inventario por archivo, con el estado real de cada subsistema.
+- [`docs/`](docs/) — visión de producto original. Referencia de **alcance y contenido físico** (qué modelos, qué ecuaciones), no de orden ni fechas.

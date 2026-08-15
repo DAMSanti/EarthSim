@@ -8,6 +8,7 @@
 #include "Tectonics/TectonicPlateSystem.h"
 #include "Tectonics/RasterizedTectonics.h"
 #include "Tectonics/BoundaryInteractions.h"
+#include "Climate/PlanetClimate.h"
 
 // ============================================================
 // Rotación por cuaterniones: resultado verificable analíticamente
@@ -1229,6 +1230,290 @@ bool FResolutionScanTest::RunTest(const FString& Parameters)
     TestTrue(FString::Printf(TEXT("La tierra emergida no depende fuertemente de la resolucion (%.1f%% a Res 32, %.1f%% a Res 96)"),
         LandEnd[0] * 100.0f, LandEnd[3] * 100.0f),
         FMath::Abs(LandEnd[3] - LandEnd[0]) < 0.10f);
+
+    return true;
+}
+
+// ============================================================
+// F3 — CLIMA MINIMO VIABLE
+//
+// Lo que hay que comprobar no es que el codigo corra, sino que el clima resultante se
+// PAREZCA AL DE UN PLANETA. Un campo de precipitacion que no tenga franjas secas y humedas
+// alternas no sirve para F4: la erosion saldria uniforme y todas las cuencas iguales.
+// ============================================================
+
+// ------------------------------------------------------------
+// La temperatura tiene que caer del ecuador al polo y con la altura.
+// ------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FClimateTemperatureProfileTest,
+    "Simu.Climate.TemperatureProfile",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FClimateTemperatureProfileTest::RunTest(const FString& Parameters)
+{
+    FClimateParams Params;
+
+    const float Equator = UPlanetClimate::ComputeSeaLevelTemperature(0.0f, Params);
+    const float Mid     = UPlanetClimate::ComputeSeaLevelTemperature(FMath::Sin(FMath::DegreesToRadians(45.0f)), Params);
+    const float Pole    = UPlanetClimate::ComputeSeaLevelTemperature(1.0f, Params);
+
+    AddInfo(FString::Printf(TEXT("Temperatura a nivel del mar: ecuador %.1f C, 45 grados %.1f C, polo %.1f C"),
+        Equator, Mid, Pole));
+
+    TestTrue(TEXT("Hace mas calor en el ecuador que a media latitud"), Equator > Mid);
+    TestTrue(TEXT("Hace mas calor a media latitud que en el polo"), Mid > Pole);
+
+    // Simetria hemisferica: sin estaciones, los dos hemisferios son iguales.
+    TestNearlyEqual(TEXT("Los dos hemisferios son simetricos"),
+        UPlanetClimate::ComputeSeaLevelTemperature(0.5f, Params),
+        UPlanetClimate::ComputeSeaLevelTemperature(-0.5f, Params), 0.01f);
+
+    // El gradiente adiabatico tiene que ser capaz de helar el ecuador: es la razon de que
+    // haya glaciares en montanas ecuatoriales.
+    const float EquatorAt6km = Equator - 6.0f * Params.LapseRatePerKm;
+    TestTrue(FString::Printf(TEXT("A 6 km sobre el ecuador se baja de 0 C (%.1f C)"), EquatorAt6km),
+        EquatorAt6km < 0.0f);
+
+    return true;
+}
+
+// ------------------------------------------------------------
+// El perfil de precipitacion tiene que tener BANDAS, no un gradiente monotono.
+//
+// Es la diferencia entre un planeta con desiertos donde toca y una bola con lluvia que
+// decrece del ecuador al polo. Las franjas secas subtropicales existen porque el aire que
+// asciende en el ecuador desciende ya seco hacia los 30 grados, y ahi es donde estan el
+// Sahara, Arabia, el Kalahari y los desiertos australianos.
+// ------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FClimatePrecipitationBandsTest,
+    "Simu.Climate.PrecipitationBands",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FClimatePrecipitationBandsTest::RunTest(const FString& Parameters)
+{
+    FClimateParams Params;
+
+    auto At = [&Params](float LatDeg)
+    {
+        return UPlanetClimate::ComputeZonalPrecipitation(FMath::Sin(FMath::DegreesToRadians(LatDeg)), Params);
+    };
+
+    const float Eq = At(0.0f);
+    const float Sub = At(30.0f);
+    const float MidLat = At(55.0f);
+    const float Polar = At(85.0f);
+
+    AddInfo(FString::Printf(TEXT("Precipitacion: ecuador %.0f, 30 grados %.0f, 55 grados %.0f, 85 grados %.0f mm/ano"),
+        Eq, Sub, MidLat, Polar));
+
+    // La estructura que importa: seco en los subtropicos, y humedo A AMBOS LADOS.
+    TestTrue(TEXT("El ecuador es humedo"), Eq > Sub * 2.0f);
+    TestTrue(TEXT("Los subtropicos son secos"), Sub < MidLat);
+    TestTrue(TEXT("Las latitudes medias vuelven a ser humedas"), MidLat > Sub * 2.0f);
+    TestTrue(TEXT("Los polos son secos"), Polar < MidLat);
+
+    // Lo anterior implica que NO es monotono: hay un minimo intermedio. Sin eso no habria
+    // desiertos subtropicales y el mapa no se pareceria al de la Tierra.
+    TestTrue(TEXT("El perfil no es monotono: hay un minimo en los subtropicos"),
+        Sub < Eq && Sub < MidLat);
+
+    return true;
+}
+
+// ------------------------------------------------------------
+// Las bandas de viento tienen que alternar de sentido con la latitud.
+// ------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FClimateWindBandsTest,
+    "Simu.Climate.WindBands",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FClimateWindBandsTest::RunTest(const FString& Parameters)
+{
+    auto ZonalComponent = [](float LatDeg)
+    {
+        const float Lat = FMath::DegreesToRadians(LatDeg);
+        const FVector Dir(FMath::Cos(Lat), 0.0f, FMath::Sin(Lat));
+        const FVector Wind = UPlanetClimate::ComputeWindDirection(Dir.GetSafeNormal());
+
+        // Direccion "hacia el este" en ese punto
+        const FVector East = FVector::CrossProduct(FVector(0, 0, 1), Dir.GetSafeNormal()).GetSafeNormal();
+        return static_cast<float>(FVector::DotProduct(Wind, East));
+    };
+
+    const float Trade = ZonalComponent(15.0f);     // alisios: del este
+    const float Westerly = ZonalComponent(45.0f);  // oestes
+    const float PolarEast = ZonalComponent(75.0f); // del este
+
+    AddInfo(FString::Printf(TEXT("Componente zonal: 15 grados %.2f, 45 grados %.2f, 75 grados %.2f"),
+        Trade, Westerly, PolarEast));
+
+    TestTrue(TEXT("Alisios del este en el tropico"), Trade < -0.5f);
+    TestTrue(TEXT("Oestes en latitudes medias"), Westerly > 0.5f);
+    TestTrue(TEXT("Del este otra vez cerca del polo"), PolarEast < -0.5f);
+
+    // Que alternen es lo que determina que ladera de una cordillera es barlovento, y por
+    // tanto de que lado cae el desierto. Si no alternaran, todas las sombras de lluvia
+    // caerian del mismo lado en todo el planeta.
+    TestTrue(TEXT("El sentido del viento alterna con la latitud"),
+        (Trade * Westerly) < 0.0f && (Westerly * PolarEast) < 0.0f);
+
+    return true;
+}
+
+// ------------------------------------------------------------
+// SOMBRA DE LLUVIA: la comprobacion que de verdad valida F3.
+//
+// Sobre un planeta simulado, el lado de sotavento de las cordilleras tiene que ser mas
+// seco que el de barlovento. Sin esto la erosion de F4 no tendria nada que esculpir de
+// forma asimetrica.
+// ------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FClimateRainShadowTest,
+    "Simu.Climate.RainShadow",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FClimateRainShadowTest::RunTest(const FString& Parameters)
+{
+    // Resolucion mas alta que en el resto de tests: a Res=48 solo hay ~49 celdas por
+    // encima de 1200 m y la mitad son costeras, lo que deja una muestra demasiado pequena
+    // para una estadistica. Las cordilleras salen en margenes convergentes, o sea junto al
+    // mar, asi que hace falta rejilla mas fina para tener interior suficiente.
+    const int32 Res = 64;
+
+    UCubeSphereGrid* Grid = nullptr;
+    UTectonicPlateSystem* System = nullptr;
+    URasterizedTectonics* Raster = nullptr;
+    if (!TestTrue(TEXT("Fixture montado"), BuildF1Fixture(Res, Res, 8, 31337, Grid, System, Raster)))
+    {
+        return false;
+    }
+
+    // Se deja correr para que la tectonica levante relieve de verdad: sin montanas no hay
+    // sombra de lluvia que medir.
+    FPlateMovementParams Params;
+    Params.DeltaTime = 0.5f;
+    for (int32 i = 0; i < 400; ++i)
+    {
+        System->Step(Params.DeltaTime);
+        Raster->Step(Params);
+    }
+
+    UPlanetClimate* Climate = NewObject<UPlanetClimate>();
+    Climate->Initialize(Raster, Grid);
+    if (!TestTrue(TEXT("Clima inicializado"), Climate->IsInitialized()))
+    {
+        return false;
+    }
+
+    FClimateParams ClimateParams;
+    Climate->Recompute(ClimateParams);
+
+    // Se busca terreno elevado y se compara la precipitacion a barlovento y a sotavento.
+    const float SeaLevel = Raster->GetSeaLevel();
+    int32 Compared = 0;
+    int32 DrierLeeward = 0;
+    double SumWind = 0.0, SumLee = 0.0;
+
+    // Contadores de diagnostico: si el test no encuentra puntos, hay que saber cual de los
+    // filtros los descarta en vez de adivinar.
+    int32 HighCells = 0;
+    int32 RejectedByBounds = 0;
+    int32 RejectedByOcean = 0;
+    float MaxElevSeen = -100000.0f;
+
+    for (int32 F = 0; F < 6; ++F)
+    {
+        const ECSCubeFace Face = static_cast<ECSCubeFace>(F);
+        for (int32 Y = 6; Y < Res - 6; ++Y)
+        {
+            for (int32 X = 6; X < Res - 6; ++X)
+            {
+                const float Elev = Raster->GetElevationAt(Face, X, Y);
+                MaxElevSeen = FMath::Max(MaxElevSeen, Elev - SeaLevel);
+                if (Elev - SeaLevel < 1200.0f)
+                {
+                    continue;   // solo terreno con relieve apreciable
+                }
+                ++HighCells;
+
+                const FVector Dir = CubeFaceMapping::PixelToDirection(Face, X, Y, Res);
+                const FVector Wind = UPlanetClimate::ComputeWindDirection(Dir);
+
+                FVector TU, TV, FN;
+                CubeFaceMapping::GetFaceAxes(Face, TU, TV, FN);
+                const FVector2f WindUV(
+                    static_cast<float>(FVector::DotProduct(Wind, TU)),
+                    static_cast<float>(FVector::DotProduct(Wind, TV)));
+
+                if (WindUV.IsNearlyZero())
+                {
+                    continue;
+                }
+                const FVector2f Step = WindUV.GetSafeNormal();
+
+                // Cuatro celdas a cada lado del pico, a lo largo del viento
+                const int32 Offset = 2;
+                const int32 WX = X - FMath::RoundToInt(Step.X * Offset);
+                const int32 WY = Y - FMath::RoundToInt(Step.Y * Offset);
+                const int32 LX = X + FMath::RoundToInt(Step.X * Offset);
+                const int32 LY = Y + FMath::RoundToInt(Step.Y * Offset);
+
+                if (WX < 0 || WX >= Res || WY < 0 || WY >= Res ||
+                    LX < 0 || LX >= Res || LY < 0 || LY >= Res)
+                {
+                    ++RejectedByBounds;
+                    continue;
+                }
+
+                // Ambos lados tienen que ser tierra, o se estaria comparando con el mar
+                if (Raster->GetElevationAt(Face, WX, WY) < SeaLevel ||
+                    Raster->GetElevationAt(Face, LX, LY) < SeaLevel)
+                {
+                    ++RejectedByOcean;
+                    continue;
+                }
+
+                const float PrecipWind = Climate->GetPrecipitationAt(Face, WX, WY);
+                const float PrecipLee  = Climate->GetPrecipitationAt(Face, LX, LY);
+
+                SumWind += PrecipWind;
+                SumLee += PrecipLee;
+                ++Compared;
+                if (PrecipLee < PrecipWind)
+                {
+                    ++DrierLeeward;
+                }
+            }
+        }
+    }
+
+    UE_LOG(LogTemp, Log,
+        TEXT("RainShadow diagnostico: elevacion maxima %.0f m | %d celdas altas | %d fuera de rango | %d con mar al lado | %d comparadas"),
+        MaxElevSeen, HighCells, RejectedByBounds, RejectedByOcean, Compared);
+
+    if (!TestTrue(FString::Printf(TEXT("Hay cordilleras que comparar (%d puntos de %d celdas altas, maxima %.0f m)"),
+        Compared, HighCells, MaxElevSeen), Compared > 20))
+    {
+        return false;
+    }
+
+    const float Fraction = static_cast<float>(DrierLeeward) / Compared;
+    const double AvgWind = SumWind / Compared;
+    const double AvgLee = SumLee / Compared;
+
+    UE_LOG(LogTemp, Log,
+        TEXT("RainShadow: %d puntos | sotavento mas seco en %.0f%% | media barlovento %.0f mm/ano frente a sotavento %.0f"),
+        Compared, Fraction * 100.0f, AvgWind, AvgLee);
+    AddInfo(FString::Printf(TEXT("%d puntos, sotavento mas seco en %.0f%%, %.0f frente a %.0f mm/ano"),
+        Compared, Fraction * 100.0f, AvgWind, AvgLee));
+
+    // No se exige el 100%: la geometria local puede hacer que un punto concreto no cumpla
+    // (un valle orientado de otra forma, una segunda barrera detras). Lo que tiene que
+    // haber es una tendencia clara.
+    TestTrue(FString::Printf(TEXT("El sotavento es mas seco en la mayoria de los casos (%.0f%%)"), Fraction * 100.0f),
+        Fraction > 0.65f);
+
+    TestTrue(FString::Printf(TEXT("La media de sotavento es menor (%.0f frente a %.0f mm/ano)"), AvgLee, AvgWind),
+        AvgLee < AvgWind);
 
     return true;
 }

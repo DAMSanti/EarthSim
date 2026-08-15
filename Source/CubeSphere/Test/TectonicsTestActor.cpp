@@ -5,6 +5,7 @@
 #include "../CubeFaceMapping.h"
 #include "../Visualization/PlanetFieldRegistry.h"
 #include "../Visualization/PlanetFieldMaterial.h"
+#include "../Climate/PlanetClimate.h"
 #include "TectonicTypes.h"
 #include "TectonicPlateSystem.h"
 #include "PlateKinematics.h"
@@ -197,6 +198,12 @@ void ATectonicsTestActor::InitializeSystems()
     RasterizedTectonics->Initialize(CubeSphereGrid, PlateSystem, RasterResolution);
     UE_LOG(LogTemp, Log, TEXT("  - RasterizedTectonics inicializado (Resolución: %d)"), RasterResolution);
 
+    // 3.15 Clima diagnostico (ROADMAP.md F3)
+    Climate = NewObject<UPlanetClimate>(this, TEXT("Climate"));
+    Climate->Initialize(RasterizedTectonics, CubeSphereGrid);
+    Climate->Recompute(FClimateParams());
+    UE_LOG(LogTemp, Log, TEXT("  - Clima diagnostico inicializado"));
+
     // 3.2 Registro de campos de diagnóstico (ROADMAP.md F0.5)
     FieldRegistry = NewObject<UPlanetFieldRegistry>(this, TEXT("FieldRegistry"));
     RegisterSimulationFields();
@@ -261,6 +268,8 @@ void ATectonicsTestActor::ShutdownSystems()
         FieldRegistry->Reset();
         FieldRegistry = nullptr;
     }
+
+    Climate = nullptr;
 
     BoundaryInteractions = nullptr;
     Kinematics = nullptr;
@@ -341,8 +350,24 @@ void ATectonicsTestActor::StepSimulation(float DeltaTime)
         // float del visor hay que rehacerlos o mostraria un mapa de placas congelado -
         // justo la comprobacion principal de esta fase. Se compara el contador en vez de
         // refrescar cada paso porque la adveccion ocurre cada ~76 pasos, no en todos.
+        // El ID y el tipo de corteza solo cambian al advectar, pero el grosor y la altura
+        // sobre el nivel del mar cambian en CADA paso (orogenia, difusion, nivel del mar),
+        // asi que hay que rehacer los espejos aunque no haya habido adveccion. Se hace
+        // solo si el visor esta mostrando uno de esos dos campos, para no pagar el
+        // recorrido cuando no se esta mirando.
         const int32 AdvectionCount = RasterizedTectonics->GetAdvectionStats().AdvectionCount;
-        if (AdvectionCount != LastSeenAdvectionCount)
+        bool bNeedsRefresh = (AdvectionCount != LastSeenAdvectionCount);
+
+        if (!bNeedsRefresh && FieldRegistry)
+        {
+            if (const FPlanetScalarField* Active = FieldRegistry->GetActiveField())
+            {
+                bNeedsRefresh = (Active->Id == FName(TEXT("CrustThickness")))
+                             || (Active->Id == FName(TEXT("AboveSeaLevel")));
+            }
+        }
+
+        if (bNeedsRefresh)
         {
             LastSeenAdvectionCount = AdvectionCount;
             RefreshCategoricalFieldCaches();
@@ -351,6 +376,13 @@ void ATectonicsTestActor::StepSimulation(float DeltaTime)
 
     SimulationTime += DeltaTime;
     SimulationSteps++;
+
+    // El clima depende del relieve, que cambia despacio, asi que no hace falta cada paso.
+    if (Climate && Climate->IsInitialized() &&
+        ClimateUpdateIntervalSteps > 0 && (SimulationSteps % ClimateUpdateIntervalSteps) == 0)
+    {
+        Climate->Recompute(FClimateParams());
+    }
 
     // 3. Refrescar la malla visual periódicamente para reflejar la elevación actual
     // (por defecto la malla se genera una vez y queda congelada, ver comentario en el header)
@@ -908,6 +940,22 @@ void ATectonicsTestActor::RefreshCategoricalFieldCaches()
         {
             CrustTypeFieldCache[FaceIdx][i] = static_cast<float>(Face->CrustTypeData[i]);
         }
+
+        // Grosor en km, que es la unidad en la que se piensa la corteza (35 km, 70 km),
+        // no en metros.
+        CrustThicknessFieldCache[FaceIdx].SetNumUninitialized(Face->CrustThicknessData.Num());
+        for (int32 i = 0; i < Face->CrustThicknessData.Num(); ++i)
+        {
+            CrustThicknessFieldCache[FaceIdx][i] = Face->CrustThicknessData[i] / 1000.0f;
+        }
+
+        // Altura referida al nivel del mar actual, que se mueve con la tectonica.
+        const float CurrentSeaLevel = RasterizedTectonics->GetSeaLevel();
+        AboveSeaLevelFieldCache[FaceIdx].SetNumUninitialized(Face->ElevationData.Num());
+        for (int32 i = 0; i < Face->ElevationData.Num(); ++i)
+        {
+            AboveSeaLevelFieldCache[FaceIdx][i] = Face->ElevationData[i] - CurrentSeaLevel;
+        }
     }
 }
 
@@ -1001,6 +1049,99 @@ void ATectonicsTestActor::RegisterSimulationFields()
             return (Idx >= 0 && Idx < 6) ? &Self->CrustTypeFieldCache[Idx] : nullptr;
         };
         FieldRegistry->RegisterField(Field);
+    }
+
+    // --- Grosor de corteza -----------------------------------------------------
+    // El estado primario desde F2. Aqui se ve la RAIZ de las cordilleras: una montana
+    // alta tiene debajo una columna gruesa, que es lo que la sostiene por flotacion.
+    {
+        FPlanetScalarField Field;
+        Field.Id = TEXT("CrustThickness");
+        Field.Label = TEXT("Grosor de corteza");
+        Field.Unit = TEXT("km");
+        Field.Palette = EPlanetFieldPalette::Sequential;
+        Field.Resolution = Res;
+        Field.bAutoRange = true;
+        ATectonicsTestActor* Self = this;
+        Field.GetFaceData = [Self](ECSCubeFace Face) -> const TArray<float>*
+        {
+            const int32 Idx = static_cast<int32>(Face);
+            return (Idx >= 0 && Idx < 6) ? &Self->CrustThicknessFieldCache[Idx] : nullptr;
+        };
+        FieldRegistry->RegisterField(Field);
+    }
+
+    // --- Altura sobre el nivel del mar -----------------------------------------
+    // Distinto de la elevacion: esta referida al nivel del mar ACTUAL, que se mueve con
+    // la tectonica. Con paleta divergente centrada en cero, la costa es exactamente donde
+    // cambia el color, asi que la linea de costa se lee de un vistazo en vez de haber que
+    // adivinarla entre azules.
+    {
+        FPlanetScalarField Field;
+        Field.Id = TEXT("AboveSeaLevel");
+        Field.Label = TEXT("Altura sobre el nivel del mar");
+        Field.Unit = TEXT("m");
+        Field.Palette = EPlanetFieldPalette::Diverging;
+        Field.Scale = EPlanetFieldScale::Linear;
+        Field.Resolution = Res;
+        Field.bAutoRange = false;
+        Field.RangeMin = -8000.0f;
+        Field.RangeMax = 8000.0f;
+        Field.DivergingCenter = 0.0f;
+        ATectonicsTestActor* Self = this;
+        Field.GetFaceData = [Self](ECSCubeFace Face) -> const TArray<float>*
+        {
+            const int32 Idx = static_cast<int32>(Face);
+            return (Idx >= 0 && Idx < 6) ? &Self->AboveSeaLevelFieldCache[Idx] : nullptr;
+        };
+        FieldRegistry->RegisterField(Field);
+    }
+
+    // --- Clima (ROADMAP.md F3) -------------------------------------------------
+    if (Climate && Climate->IsInitialized())
+    {
+        UPlanetClimate* ClimateRef = Climate;
+
+        // Temperatura: paleta DIVERGENTE centrada en 0 grados, porque el cero tiene aqui
+        // significado fisico - es donde el agua se hiela - y no es un punto medio
+        // arbitrario. Con una paleta secuencial la isoterma de 0 no se veria.
+        {
+            FPlanetScalarField Field;
+            Field.Id = TEXT("Temperature");
+            Field.Label = TEXT("Temperatura");
+            Field.Unit = TEXT("C");
+            Field.Palette = EPlanetFieldPalette::Diverging;
+            Field.Resolution = Res;
+            Field.bAutoRange = false;
+            Field.RangeMin = -40.0f;
+            Field.RangeMax = 40.0f;
+            Field.DivergingCenter = 0.0f;
+            Field.GetFaceData = [ClimateRef](ECSCubeFace Face) -> const TArray<float>*
+            {
+                return ClimateRef->IsInitialized() ? &ClimateRef->GetTemperatureData(Face) : nullptr;
+            };
+            FieldRegistry->RegisterField(Field);
+        }
+
+        // Precipitacion: el mapa que valida F3. Debe verse cinturon humedo ecuatorial,
+        // franjas deserticas hacia los 30 grados, y sombras de lluvia detras de las
+        // cordilleras.
+        {
+            FPlanetScalarField Field;
+            Field.Id = TEXT("Precipitation");
+            Field.Label = TEXT("Precipitacion");
+            Field.Unit = TEXT("mm/ano");
+            Field.Palette = EPlanetFieldPalette::Sequential;
+            Field.Resolution = Res;
+            Field.bAutoRange = false;
+            Field.RangeMin = 0.0f;
+            Field.RangeMax = 3000.0f;
+            Field.GetFaceData = [ClimateRef](ECSCubeFace Face) -> const TArray<float>*
+            {
+                return ClimateRef->IsInitialized() ? &ClimateRef->GetPrecipitationData(Face) : nullptr;
+            };
+            FieldRegistry->RegisterField(Field);
+        }
     }
 
     FieldRegistry->RefreshRanges();

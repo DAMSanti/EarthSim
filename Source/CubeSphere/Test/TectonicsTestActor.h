@@ -13,6 +13,7 @@ class UTectonicPlateSystem;
 class UPlateKinematics;
 class UBoundaryInteractions;
 class UPlanetFieldRegistry;
+class UPlanetClimate;
 class URasterizedTectonics;
 class UProceduralMeshComponent;
 class UDirectionalLightComponent;
@@ -270,6 +271,22 @@ public:
     URasterizedTectonics* RasterizedTectonics;
 
     /**
+     * Clima diagnóstico (ROADMAP.md F3): temperatura, viento y precipitación derivados de
+     * la geografía actual. No integra nada en el tiempo, así que responde de inmediato a
+     * que la tectónica mueva una cordillera. Es lo que da a F4 un patrón de lluvia con
+     * estructura real en vez de precipitación uniforme.
+     */
+    UPROPERTY(BlueprintReadOnly, Category = "Tectonics|Systems")
+    UPlanetClimate* Climate;
+
+    /**
+     * Cada cuántos pasos se recalcula el clima. No hace falta cada paso: depende del
+     * relieve, que cambia despacio, y recorre 6xRes² celdas con muestreo a barlovento.
+     */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Tectonics|Simulation", meta = (ClampMin = "1"))
+    int32 ClimateUpdateIntervalSteps = 20;
+
+    /**
      * Registro de campos escalares para visualización de diagnóstico (ROADMAP.md F0.5).
      * Cada sistema de simulación publica aquí sus campos y el visor los pinta sobre la
      * malla; conmutar con F / G. Es lo que hace comprobable cada fase: sin poder ver un
@@ -406,6 +423,10 @@ protected:
     /** Espejos en float de los campos uint8 del ráster (ver arriba). */
     TArray<float> PlateIDFieldCache[6];
     TArray<float> CrustTypeFieldCache[6];
+
+    /** Grosor de corteza en km y altura sobre el nivel del mar actual, para el visor. */
+    TArray<float> CrustThicknessFieldCache[6];
+    TArray<float> AboveSeaLevelFieldCache[6];
 
     /** Actualizar rotación del sol */
     void UpdateSunOrbit(float DeltaTime);

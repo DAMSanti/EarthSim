@@ -427,6 +427,17 @@ public:
     static float ComputeIsostaticElevation(float ThicknessMetres, bool bContinental, float AgeMa,
                                            const FIsostasyParams& Params);
 
+    /**
+     * Vecino de un pixel cruzando caras, expuesto para que otros sistemas que recorren la
+     * rejilla (el clima de F3, el drenaje de F4) no reimplementen la vecindad. Reimplantar
+     * geometria de caras es exactamente lo que produjo los bugs de F0.
+     */
+    bool GetClimateNeighbor(ECSCubeFace Face, int32 X, int32 Y, int32 DX, int32 DY,
+                            ECSCubeFace& OutFace, int32& OutX, int32& OutY) const
+    {
+        return GetNeighborPixel(Face, X, Y, DX, DY, OutFace, OutX, OutY);
+    }
+
     /** Grosor de corteza (m) en una celda. Estado primario desde F2. */
     UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics|Isostasy")
     float GetCrustThicknessAt(ECSCubeFace Face, int32 X, int32 Y) const;
