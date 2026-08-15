@@ -185,6 +185,21 @@ struct CUBESPHERE_API FPlateMovementParams
     /** Isostasia y batimetría (ROADMAP.md F2). */
     UPROPERTY(EditAnywhere, BlueprintReadWrite)
     FIsostasyParams Isostasy;
+
+    /**
+     * Cuántos píxeles se deja avanzar a la placa más rápida antes de advectar.
+     *
+     * Es el mando que controla el compromiso del remuestreo. Con 1, cada advección mueve
+     * poco y aproxima bien el transporte, pero para un tiempo dado se encadenan muchas y
+     * el error de cuantización se acumula. Con valores mayores hay menos advecciones —
+     * menos acumulación — a costa de que cada una aproxime peor.
+     *
+     * Existe como parámetro y no como constante porque sirvió para comprobar la hipótesis
+     * de que el patrón de peine viene de encadenar remuestreos: si es cierta, subir esto
+     * tiene que reducirlo.
+     */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "1.0", ClampMax = "8.0"))
+    float AdvectionPixelStride = 1.0f;
 };
 
 /**

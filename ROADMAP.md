@@ -212,13 +212,36 @@ Esto hace que subducción, dorsales y apertura de océanos sean **emergentes**, 
 
 > Escrito el 15-08-2026 tras detectar que estaba aparcando un problema con una excusa que no se sostenía. La regla: **antes de diferir un defecto a una fase futura, hay que poder nombrar el mecanismo concreto que lo arreglará.** Si no se puede, no está diferido, está sin arreglar.
 
-### 🔴 Escalonado de bordes de placa ("peine") — ×3,15 medido
+### 🔴 Escalonado de bordes de placa ("peine") — ×2,02 medido
+
+> **Diagnóstico corregido el 16-08-2026.** Lo que sigue debajo describía la causa como "encadenar remuestreos". **Es falso, medido y descartado** — ver el bloque de abajo. Se conserva porque documenta un razonamiento equivocado que costó dos intentos de arreglo.
+
+**Causa real: el error de CADA advección, que crece con el tamaño del paso.** Medido con `Simu.Tectonics.AdvectionChainingHypothesis`, mismo tiempo simulado en los tres casos:
+
+| Paso | Advecciones | Frontera |
+|---|---|---|
+| 1 px | 196 | **×2,02** |
+| 2 px | 98 | ×2,52 |
+| 4 px | 49 | ×3,09 |
+
+Menos advecciones dan **más** escalonado, justo lo contrario de lo que predecía la hipótesis del encadenamiento. La explicación: una rotación no es una traslación uniforme — las celdas lejanas al polo de Euler recorren más que las cercanas — y ese diferencial es despreciable en un paso de un píxel y grande en uno de cuatro. Un paso de ~1 píxel es casi una traslación pura, que el vecino más cercano reproduce bien.
+
+**Consecuencia práctica:** el mando ya está en su mejor valor (`AdvectionPixelStride = 1`), y la reescritura en coordenadas materiales que estaba planificada **no habría arreglado nada**. El experimento se hizo antes de emprenderla y ahorró el trabajo entero. Ahora un test custodia la conclusión: si alguien sube el stride para ahorrar coste, sabrá que empeora la geometría.
+
+**Qué queda por probar,** en orden de coste: subir la resolución del ráster (el escalonado es relativo al tamaño de celda), o un filtro de mayoría más agresivo en la frontera — con la advertencia de que un filtro de mayoría tiende a producir bordes en bloque, que es otro artefacto distinto y no necesariamente mejor.
+
+<details>
+<summary>Diagnóstico antiguo, incorrecto (conservado como registro)</summary>
+
+### Lo que se creía: encadenar remuestreos — ×3,15 medido</summary>
 
 El campo de IDs de placa es **categórico**: no se puede interpolar, hay que tomar el vecino más cercano. Cada advección re-cuantiza el borde y, encadenadas, el escalonado se acumula. Medido en `Simu.Tectonics.LongRunStability`: la longitud total de frontera crece ×3,15 en 196 advecciones, cuando con placas rígidas debería mantenerse del mismo orden.
 
 **Intento fallido (15-08-2026), documentado para no repetirlo:** muestrear contra un marco de referencia con la rotación acumulada de cada placa, para que hubiera un solo remuestreo por lejos que se llegue. Empeoró todo — tierra emergida 24,6 % → 9,2 %, montañas de 7.472 m a 969 m — y se revirtió. El fallo de diseño: la propiedad salía de la referencia acumulada mientras la edad y el grosor se transportaban un paso atrás, y cuando la referencia envejece esas dos cosas dejan de corresponderse. Añadir el centinela de material subducido mejoró pero no bastó.
 
 **No lo arregla ninguna fase posterior.** La erosión de F4 suaviza la elevación, no el campo de IDs. El renderizado de F6 no toca la simulación.
+
+</details>
 
 ### 🔴 Crecimiento del área continental — ×1,28 por 1000 Ma
 
@@ -257,6 +280,25 @@ Elegido conservar: un artefacto visual localizado es preferible a perder la mita
 
 - **Detalle sub-celda del relieve** → F4 lo aporta de verdad: la erosión hidráulica esculpe a escala menor que la celda tectónica.
 - **LOD y detalle de superficie** → F6, con el mecanismo ya decidido (malla base + displacement).
+
+---
+
+## Rendimiento — medido, no supuesto (16-08-2026)
+
+Instrumentar por fases cambió por completo la lista de sospechosos. Lectura del HUD antes de tocar nada:
+
+```
+sim 116.6 ms @10 Hz | malla 8.6 ms
+  adv 147.8 (motas 5.3) front 2.5 dif 2.7 iso 78.2 ms
+```
+
+**`iso 78,2 ms` en cada paso** — más que todo lo demás junto, y nadie lo habría señalado a ojo: no era la isostasia sino `UpdateSeaLevel`, que hacía **40 iteraciones de bisección** y cada una recorría las 6×Res² celdas. 15,7 millones de lecturas por paso para resolver un único número.
+
+- [x] **Nivel del mar por Newton en vez de bisección.** La bisección desperdiciaba dos cosas: que el nivel apenas se mueve entre pasos (el valor anterior ya es una estimación excelente, y la bisección la tira para reempezar desde un rango de 40 km) y que la derivada es gratis (dV/dS es exactamente el área sumergida, que se cuenta en la misma pasada). Con Newton bastan 2-3 pasadas.
+- [x] **Advección: cachear el caso de un único reclamante.** Las pasadas de conteo y de resolución hacían el mismo trabajo caro — una rotación de cuaternión y una reproyección por placa y por celda — para calcular dos veces lo mismo. La gran mayoría de celdas están en el interior de una placa y tienen exactamente un reclamante, así que se guarda y se reutiliza. Solo las de frontera se recalculan.
+  - Un bug propio por el camino: se empaquetó cara e índice en un `int32` desplazando 29 bits, y la cara 5 hace el valor **negativo**; el desplazamiento a la derecha es aritmético y devolvía −3, con acceso fuera de rango y caída de la suite. Sustituido por dos arrays, sin trucos de bits.
+- [x] Ambos verificados como **refactor puro**: elevación máxima, contabilidad de corteza y escalonado idénticos antes y después.
+- [ ] Volver a leer el HUD y decidir si hace falta más.
 
 ---
 

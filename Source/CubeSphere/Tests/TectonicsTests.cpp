@@ -962,3 +962,110 @@ bool FLongRunStabilityTest::RunTest(const FString& Parameters)
 
     return true;
 }
+
+// ------------------------------------------------------------
+// DE QUE DEPENDE EL ESCALONADO DE BORDES
+//
+// HIPOTESIS PROBADA Y DESCARTADA (16-08-2026). Se creia que el patron de peine venia de
+// ENCADENAR remuestreos: cada adveccion re-cuantiza el borde con vecino mas cercano, luego
+// el error deberia acumularse con el NUMERO de advecciones. Sobre esa idea se habia
+// planificado reescribir la adveccion en coordenadas materiales.
+//
+// La medida dice lo contrario:
+//
+//     stride 1 px -> 196 advecciones -> frontera x2,02
+//     stride 2 px ->  98 advecciones -> frontera x2,52
+//     stride 4 px ->  49 advecciones -> frontera x3,09
+//
+// MENOS advecciones dan MAS escalonado. El error no viene de encadenar sino de cada
+// adveccion por separado, y crece con el tamano del paso: una rotacion no es una
+// traslacion uniforme - las celdas lejanas al polo de Euler recorren mas que las cercanas
+// - y ese diferencial es pequeno en un paso de un pixel y grande en uno de cuatro. Un paso
+// de ~1 pixel es casi una traslacion pura, que el vecino mas cercano reproduce bien.
+//
+// Consecuencia: la reescritura planificada no habria arreglado nada, y el mando correcto
+// ya esta en su mejor valor. Este test pasa a custodiar esa conclusion.
+// ------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAdvectionChainingHypothesisTest,
+    "Simu.Tectonics.AdvectionChainingHypothesis",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FAdvectionChainingHypothesisTest::RunTest(const FString& Parameters)
+{
+    const int32 Res = 48;
+    const float Strides[3] = { 1.0f, 2.0f, 4.0f };
+    float Ratios[3] = { 0.0f, 0.0f, 0.0f };
+    int32 Advections[3] = { 0, 0, 0 };
+
+    for (int32 Case = 0; Case < 3; ++Case)
+    {
+        UCubeSphereGrid* Grid = nullptr;
+        UTectonicPlateSystem* System = nullptr;
+        URasterizedTectonics* Raster = nullptr;
+        if (!TestTrue(TEXT("Fixture montado"), BuildF1Fixture(48, Res, 8, 4242, Grid, System, Raster)))
+        {
+            return false;
+        }
+
+        auto CountBoundary = [Raster, Res]()
+        {
+            int32 N = 0;
+            const int32 DX[4] = {1,-1,0,0};
+            const int32 DY[4] = {0,0,1,-1};
+            for (int32 F = 0; F < 6; ++F)
+            {
+                const ECSCubeFace Face = static_cast<ECSCubeFace>(F);
+                for (int32 Y = 1; Y < Res - 1; ++Y)
+                {
+                    for (int32 X = 1; X < Res - 1; ++X)
+                    {
+                        const int32 Id = Raster->GetPlateIDAt(Face, X, Y);
+                        for (int32 D = 0; D < 4; ++D)
+                        {
+                            if (Raster->GetPlateIDAt(Face, X + DX[D], Y + DY[D]) != Id) { ++N; break; }
+                        }
+                    }
+                }
+            }
+            return N;
+        };
+
+        const int32 Before = CountBoundary();
+
+        FPlateMovementParams Params;
+        Params.DeltaTime = 0.25f;
+        Params.TimeScale = 1.0f;
+        Params.AdvectionPixelStride = Strides[Case];
+
+        for (int32 i = 0; i < 4000; ++i)
+        {
+            System->Step(Params.DeltaTime);
+            Raster->Step(Params);
+        }
+
+        Ratios[Case] = static_cast<float>(CountBoundary()) / FMath::Max(Before, 1);
+        Advections[Case] = Raster->GetAdvectionStats().AdvectionCount;
+
+        UE_LOG(LogTemp, Log, TEXT("Encadenado: stride %.0f px -> %d advecciones -> frontera x%.2f"),
+            Strides[Case], Advections[Case], Ratios[Case]);
+    }
+
+    AddInfo(FString::Printf(TEXT("stride 1: %d adv, x%.2f | stride 2: %d adv, x%.2f | stride 4: %d adv, x%.2f"),
+        Advections[0], Ratios[0], Advections[1], Ratios[1], Advections[2], Ratios[2]));
+
+    // Menos advecciones para el mismo tiempo simulado: el mando hace lo que dice.
+    TestTrue(TEXT("Subir el paso reduce el numero de advecciones"), Advections[2] < Advections[0]);
+
+    // Lo que custodia este test: pasos pequenos escalonan MENOS, asi que el valor por
+    // defecto de AdvectionPixelStride tiene que quedarse en 1. Si alguien lo sube para
+    // ahorrar coste, estara empeorando la geometria de los bordes sin saberlo.
+    TestTrue(FString::Printf(TEXT("Un paso de 1 pixel escalona menos que uno de 4 (x%.2f frente a x%.2f)"),
+        Ratios[0], Ratios[2]), Ratios[0] < Ratios[2]);
+
+    // Y la tendencia tiene que ser monotona: si dejara de serlo, la explicacion de arriba
+    // ya no describiria lo que hace el codigo.
+    TestTrue(FString::Printf(TEXT("La tendencia es monotona (x%.2f <= x%.2f <= x%.2f)"),
+        Ratios[0], Ratios[1], Ratios[2]), Ratios[0] <= Ratios[1] + 0.05f && Ratios[1] <= Ratios[2] + 0.05f);
+
+    return true;
+}

@@ -424,26 +424,64 @@ void URasterizedTectonics::UpdateSeaLevel()
         return;
     }
 
-    // Biseccion. El volumen es monotono creciente con el nivel del mar (subir el nivel
-    // solo puede anadir agua), asi que la biseccion converge siempre y no hace falta nada
-    // mas sofisticado. 40 iteraciones sobre un rango de 40 km dan precision submilimetrica.
-    float Low = -20000.0f;
-    float High = 20000.0f;
+    // NEWTON, NO BISECCION (16-08-2026).
+    //
+    // Esto costaba 78 ms por paso, mas que todo el resto de la simulacion junto. La causa
+    // era la biseccion: 40 iteraciones sobre un rango de 40 km, y cada iteracion recorre
+    // las 6xRes^2 celdas. A Resolution=256 son 15,7 millones de lecturas por paso para
+    // resolver un unico numero.
+    //
+    // La biseccion no aprovecha dos cosas que aqui son ciertas:
+    //   - El nivel del mar apenas se mueve entre pasos, asi que el valor anterior ya es
+    //     una estimacion excelente. La biseccion tira esa informacion y vuelve a empezar
+    //     desde un rango de 40 km cada vez.
+    //   - La derivada es gratis: dV/dS es exactamente el AREA sumergida, que se cuenta en
+    //     la misma pasada que el volumen.
+    //
+    // Con Newton partiendo del nivel anterior bastan 2-3 pasadas en vez de 40. Y la
+    // funcion es monotona creciente y convexa a trozos, asi que Newton converge sin
+    // sobresaltos; se conserva un recorte de seguridad por si el area sumergida se anula
+    // (planeta sin oceano), caso en el que Newton no esta definido.
+    const int32 MaxIterations = 8;
+    const double Tolerance = TargetOceanVolume * 1e-6;
 
-    for (int32 Iter = 0; Iter < 40; ++Iter)
+    for (int32 Iter = 0; Iter < MaxIterations; ++Iter)
     {
-        const float Mid = (Low + High) * 0.5f;
-        if (ComputeOceanVolume(Mid) < TargetOceanVolume)
-        {
-            Low = Mid;
-        }
-        else
-        {
-            High = Mid;
-        }
-    }
+        double Volume = 0.0;
+        int32 SubmergedCells = 0;
 
-    SeaLevel = (Low + High) * 0.5f;
+        for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
+        {
+            const TArray<float>& Elev = FaceData[FaceIdx].ElevationData;
+            for (int32 i = 0; i < Elev.Num(); ++i)
+            {
+                if (Elev[i] < SeaLevel)
+                {
+                    Volume += static_cast<double>(SeaLevel - Elev[i]);
+                    ++SubmergedCells;
+                }
+            }
+        }
+
+        const double Error = TargetOceanVolume - Volume;
+        if (FMath::Abs(Error) <= Tolerance)
+        {
+            break;
+        }
+
+        if (SubmergedCells == 0)
+        {
+            // Sin celdas sumergidas la derivada es cero y Newton no aplica. Se baja el
+            // nivel un salto fijo para volver a tocar agua en la siguiente iteracion.
+            SeaLevel -= 1000.0f;
+            continue;
+        }
+
+        // dV/dS = area sumergida (en celdas). El paso de Newton es exacto mientras no
+        // cambie el conjunto de celdas sumergidas, que es justo lo que pasa cerca de la
+        // solucion.
+        SeaLevel += static_cast<float>(Error / SubmergedCells);
+    }
 }
 
 float URasterizedTectonics::GetLandFraction() const
@@ -574,11 +612,29 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
     // espurio dentro de un continente lo convertia en oceano, y esa conversion es
     // irreversible. Medido en Simu.Tectonics.LongRunStability: la tierra emergida caia
     // del 24,6% al 8,9% en 1000 Ma, con los continentes disolviendose desde dentro.
+    // La pasada de conteo y la de resolucion hacian EXACTAMENTE el mismo trabajo caro: una
+    // rotacion de cuaternion y una reproyeccion por placa y por celda, o sea 2 x 6 x Res^2
+    // x NumPlates operaciones para calcular dos veces lo mismo. Ahora la primera guarda lo
+    // que encuentra y la segunda lo reutiliza.
+    //
+    // La gran mayoria de las celdas tienen exactamente un reclamante (estan en el interior
+    // de una placa), asi que basta con cachear ese caso: se guarda la placa y el pixel de
+    // origen. Las celdas con cero o con varios reclamantes son las de frontera, un pequeno
+    // porcentaje, y esas si se recalculan.
     TArray<TArray<uint8>> ClaimCounts;
+    TArray<TArray<uint8>> CachedPlate;
+    TArray<TArray<uint8>> CachedSourceFace;
+    TArray<TArray<int32>> CachedSourceIdx;
     ClaimCounts.SetNum(6);
+    CachedPlate.SetNum(6);
+    CachedSourceFace.SetNum(6);
+    CachedSourceIdx.SetNum(6);
     for (int32 F = 0; F < 6; ++F)
     {
         ClaimCounts[F].SetNumZeroed(Resolution * Resolution);
+        CachedPlate[F].SetNumZeroed(Resolution * Resolution);
+        CachedSourceFace[F].SetNumZeroed(Resolution * Resolution);
+        CachedSourceIdx[F].SetNumZeroed(Resolution * Resolution);
     }
 
 
@@ -592,6 +648,10 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
                     static_cast<ECSCubeFace>(FaceIdx), X, Y, Resolution);
 
                 int32 Count = 0;
+                int32 LastPlate = 0;
+                int32 LastSourceFace = 0;
+                int32 LastSourceIdx = 0;
+
                 for (int32 P = 0; P < NumPlates; ++P)
                 {
                     const FVector PrevDir = InverseRotations[P].RotateVector(Dir);
@@ -599,12 +659,26 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
                     CubeFaceMapping::DirectionToFaceTexUV(PrevDir, PF, PU, PV);
                     const int32 PX = FMath::Clamp(FMath::FloorToInt(PU * Resolution), 0, Resolution - 1);
                     const int32 PY = FMath::Clamp(FMath::FloorToInt(PV * Resolution), 0, Resolution - 1);
-                    if (Prev[static_cast<int32>(PF)].PlateIDData[PY * Resolution + PX] == static_cast<uint8>(P))
+                    const int32 PFaceIdx = static_cast<int32>(PF);
+                    const int32 PIdx = PY * Resolution + PX;
+
+                    if (Prev[PFaceIdx].PlateIDData[PIdx] == static_cast<uint8>(P))
                     {
                         ++Count;
+                        LastPlate = P;
+                        LastSourceFace = PFaceIdx;
+                        LastSourceIdx = PIdx;
                     }
                 }
-                ClaimCounts[FaceIdx][Y * Resolution + X] = static_cast<uint8>(FMath::Min(Count, 255));
+
+                const int32 CellIdx = Y * Resolution + X;
+                ClaimCounts[FaceIdx][CellIdx] = static_cast<uint8>(FMath::Min(Count, 255));
+                if (Count == 1)
+                {
+                    CachedPlate[FaceIdx][CellIdx] = static_cast<uint8>(LastPlate);
+                    CachedSourceFace[FaceIdx][CellIdx] = static_cast<uint8>(LastSourceFace);
+                    CachedSourceIdx[FaceIdx][CellIdx] = LastSourceIdx;
+                }
             }
         }
     });
@@ -642,6 +716,17 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
                 Claimants.Reset();
                 SourceFace.Reset();
                 SourceIdx.Reset();
+
+                // Caso mayoritario: un unico reclamante, ya resuelto en la pasada de
+                // conteo. Se evita repetir NumPlates rotaciones y reproyecciones.
+                const uint8 CachedCount = ClaimCounts[FaceIdx][Idx];
+                if (CachedCount == 1)
+                {
+                    Claimants.Add(CachedPlate[FaceIdx][Idx]);
+                    SourceFace.Add(CachedSourceFace[FaceIdx][Idx]);
+                    SourceIdx.Add(CachedSourceIdx[FaceIdx][Idx]);
+                }
+                else
 
                 // NOTA (15-08-2026): aqui se probo submuestreo 4x en las celdas de
                 // frontera, para situar el borde con precision de media celda y frenar la
@@ -1035,7 +1120,8 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
             // Se trocea igual que la integracion: varias advecciones de un pixel en vez
             // de una de veinte. El limite de iteraciones evita bloquear el frame; el
             // tiempo sobrante se descarta, misma decision que en el resto del paso.
-            const float MaxAdvectionDt = PixelAngle / MaxAngularSpeed;
+            const float Stride = FMath::Max(Params.AdvectionPixelStride, 1.0f);
+            const float MaxAdvectionDt = (PixelAngle * Stride) / MaxAngularSpeed;
             const int32 MaxAdvectionsPerStep = 8;
 
             int32 Done = 0;
