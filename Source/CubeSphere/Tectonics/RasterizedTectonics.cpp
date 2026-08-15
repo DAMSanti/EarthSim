@@ -610,118 +610,174 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
         }
     }
 
-    // Procesar cada cara
+    // Envejecer la corteza. Va fuera del bucle de sub-pasos porque es lineal en el
+    // tiempo: trocearlo daria exactamente el mismo resultado a mas coste.
     for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
     {
-        FTectonicFaceTextureData& Face = FaceData[FaceIdx];
-        
-        // Actualizar edad de corteza
-        for (int32 i = 0; i < Face.CrustAgeData.Num(); ++i)
+        TArray<float>& AgeData = FaceData[FaceIdx].CrustAgeData;
+        for (int32 i = 0; i < AgeData.Num(); ++i)
         {
-            Face.CrustAgeData[i] += DeltaTimeScaled;
-        }
-        
-        // Detectar y procesar bordes de placa (simplificado)
-        for (int32 Y = 1; Y < Resolution - 1; ++Y)
-        {
-            for (int32 X = 1; X < Resolution - 1; ++X)
-            {
-                const int32 Idx = GetLinearIndex(X, Y);
-                const uint8 CurrentPlateID = Face.PlateIDData[Idx];
-                
-                // Verificar vecinos
-                int32 Offsets[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
-                bool bAtBoundary = false;
-                float ConvergenceSum = 0.0f;
-                
-                for (int32 i = 0; i < 4; ++i)
-                {
-                    const int32 NeighborIdx = GetLinearIndex(X + Offsets[i][0], Y + Offsets[i][1]);
-                    if (Face.PlateIDData[NeighborIdx] != CurrentPlateID)
-                    {
-                        bAtBoundary = true;
-                        
-                        // Calcular convergencia aproximada basada en velocidades
-                        FVector2f Dir(static_cast<float>(Offsets[i][0]), static_cast<float>(Offsets[i][1]));
-                        Dir.Normalize();
-                        
-                        FVector2f RelVel = Face.VelocityData[Idx] - Face.VelocityData[NeighborIdx];
-                        float Convergence = -FVector2f::DotProduct(RelVel, Dir);
-                        ConvergenceSum += Convergence;
-                    }
-                }
-                
-                if (bAtBoundary)
-                {
-                    // Aplicar cambios de elevación basados en convergencia/divergencia
-                    if (ConvergenceSum > 0.0f) // Convergente
-                    {
-                        float ElevationChange = ConvergenceSum * Params.OrogenyFactor * DeltaTimeScaled;
-                        Face.ElevationData[Idx] = FMath::Min(Face.ElevationData[Idx] + ElevationChange, 12000.0f);
-                    }
-                    else if (ConvergenceSum < 0.0f) // Divergente
-                    {
-                        // En zonas divergentes, crear nueva corteza oceánica
-                        if (Face.CrustTypeData[Idx] == 0) // Ya es oceánica
-                        {
-                            Face.ElevationData[Idx] = Params.OceanicBaseElevation + 1300.0f; // Dorsal
-                            Face.CrustAgeData[Idx] = 0.0f; // Nueva corteza
-                        }
-                    }
-                }
-            }
+            AgeData[i] += DeltaTimeScaled;
         }
     }
 
-    // Relajación difusiva: sin esto, la elevación en celdas de frontera (incrementada
-    // arriba) crece cada paso hasta el tope de 12000m mientras las celdas vecinas no
-    // afectadas se quedan en la base, formando paredes casi verticales de una celda de
-    // ancho. Se mezcla solo una fracción (Params.DiffusionRate) hacia el valor
-    // suavizado localmente en vez de reemplazarlo por completo: aplicado cada paso
-    // durante miles de pasos, un reemplazo completo aplana el planeta entero.
-    if (Params.DiffusionRate > 0.0f)
+    // ============================================================
+    // INTEGRACION POR SUB-PASOS (15-08-2026)
+    //
+    // El paso de tiempo que llega aqui no esta acotado: TectonicsTestActor multiplica el
+    // DeltaTime real por su TimeScale, que el usuario puede subir hasta 1000 con la tecla +.
+    // A 60 fps eso son ~16 Ma en un solo paso.
+    //
+    // Integrar 16 Ma de una vez rompe las dos partes del calculo: el levantamiento daria un
+    // salto de miles de metros de golpe, y la difusion (que es una mezcla hacia el valor
+    // suavizado) se pasaria de 1.0 y en vez de suavizar oscilaria. Que el resultado dependa
+    // de a que framerate o a que TimeScale corras no es aceptable en un simulador.
+    //
+    // Se trocea en sub-pasos de como mucho MaxIntegrationStepMa. Si aun asi hacen falta mas
+    // de MaxSubSteps, se descarta el resto del tiempo en vez de intentar ponerse al dia: es
+    // la misma leccion de la espiral de la muerte de M1 - el tiempo simulado se queda atras,
+    // que es preferible a integrar mal o a bloquear el frame.
+    // ============================================================
+    const float MaxIntegrationStepMa = 0.5f;
+    const int32 MaxSubSteps = 16;
+
+    int32 NumSubSteps = FMath::CeilToInt(DeltaTimeScaled / MaxIntegrationStepMa);
+    NumSubSteps = FMath::Clamp(NumSubSteps, 1, MaxSubSteps);
+    const float SubDt = DeltaTimeScaled / static_cast<float>(NumSubSteps);
+
+    // Radio en metros: las velocidades del raster estan en rad/Ma (se calculan como
+    // omega x direccion_unitaria), asi que multiplicar por el radio las convierte a m/Ma,
+    // que es lo que hace que OrogenyFactor sea un factor de eficiencia adimensional en vez
+    // de una constante magica sin unidades.
+    const float RadiusMetres = Grid ? (Grid->GetRadius() / 100.0f) : 6371000.0f;
+
+    for (int32 SubStep = 0; SubStep < NumSubSteps; ++SubStep)
     {
-        const float Kernel[3][3] = {
-            { 1.0f/16.0f, 2.0f/16.0f, 1.0f/16.0f },
-            { 2.0f/16.0f, 4.0f/16.0f, 2.0f/16.0f },
-            { 1.0f/16.0f, 2.0f/16.0f, 1.0f/16.0f }
-        };
-
-        // Igual que en SmoothElevation: instantanea previa para que el resultado no
-        // dependa del orden de las caras, y vecinos que cruzan costuras.
-        TArray<TArray<float>> Snapshot;
-        Snapshot.SetNum(6);
+        // Procesar cada cara
         for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
         {
-            Snapshot[FaceIdx] = FaceData[FaceIdx].ElevationData;
-        }
+            FTectonicFaceTextureData& Face = FaceData[FaceIdx];
 
-        for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
-        {
-            const ECSCubeFace Face = static_cast<ECSCubeFace>(FaceIdx);
-            TArray<float>& ElevData = FaceData[FaceIdx].ElevationData;
-            TArray<float> TempData;
-            TempData.SetNumUninitialized(ElevData.Num());
-
-            for (int32 Y = 0; Y < Resolution; ++Y)
+            // Detectar y procesar bordes de placa
+            for (int32 Y = 1; Y < Resolution - 1; ++Y)
             {
-                for (int32 X = 0; X < Resolution; ++X)
+                for (int32 X = 1; X < Resolution - 1; ++X)
                 {
-                    float Sum = 0.0f;
-                    for (int32 KY = -1; KY <= 1; ++KY)
+                    const int32 Idx = GetLinearIndex(X, Y);
+                    const uint8 CurrentPlateID = Face.PlateIDData[Idx];
+
+                    int32 Offsets[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+                    bool bAtBoundary = false;
+                    float ConvergenceSum = 0.0f;
+
+                    for (int32 i = 0; i < 4; ++i)
                     {
-                        for (int32 KX = -1; KX <= 1; ++KX)
+                        const int32 NeighborIdx = GetLinearIndex(X + Offsets[i][0], Y + Offsets[i][1]);
+                        if (Face.PlateIDData[NeighborIdx] != CurrentPlateID)
                         {
-                            Sum += SampleNeighborElevation(Snapshot, Face, X, Y, KX, KY) * Kernel[KY + 1][KX + 1];
+                            bAtBoundary = true;
+
+                            FVector2f Dir(static_cast<float>(Offsets[i][0]), static_cast<float>(Offsets[i][1]));
+                            Dir.Normalize();
+
+                            FVector2f RelVel = Face.VelocityData[Idx] - Face.VelocityData[NeighborIdx];
+                            ConvergenceSum += -FVector2f::DotProduct(RelVel, Dir);
                         }
                     }
 
-                    const int32 Idx = GetLinearIndex(X, Y);
-                    TempData[Idx] = FMath::Lerp(ElevData[Idx], Sum, Params.DiffusionRate);
+                    if (!bAtBoundary)
+                    {
+                        continue;
+                    }
+
+                    if (ConvergenceSum > 0.0f)
+                    {
+                        // Convergencia en m/Ma: rad/Ma por el radio del planeta. Con omega
+                        // tipico de 0.005 rad/Ma sobre 6371 km son ~32 km/Ma de acortamiento,
+                        // que es el orden real del Himalaya (~5 cm/ano).
+                        const float ConvergenceMetresPerMa = ConvergenceSum * RadiusMetres;
+
+                        // La orogenia continente-continente es mucho mas eficaz levantando
+                        // que la subduccion: en subduccion la placa oceanica se hunde y solo
+                        // parte del acortamiento se convierte en relieve, mientras que en una
+                        // colision continental no hay a donde ir salvo hacia arriba.
+                        const bool bContinental = (Face.CrustTypeData[Idx] == 1);
+                        const float Efficiency = Params.OrogenyFactor * (bContinental ? 1.0f : 0.25f);
+
+                        const float Uplift = ConvergenceMetresPerMa * Efficiency * SubDt;
+                        Face.ElevationData[Idx] = FMath::Min(Face.ElevationData[Idx] + Uplift, 12000.0f);
+                    }
+                    else if (ConvergenceSum < 0.0f)
+                    {
+                        // Divergencia: dorsal. La corteza recien formada esta caliente y flota
+                        // mas, de ahi que una dorsal quede ~1300 m sobre la llanura abisal.
+                        if (Face.CrustTypeData[Idx] == 0)
+                        {
+                            Face.ElevationData[Idx] = Params.OceanicBaseElevation + 1300.0f;
+                            Face.CrustAgeData[Idx] = 0.0f;
+                        }
+                    }
                 }
             }
+        }
 
-            ElevData = MoveTemp(TempData);
+        // ============================================================
+        // RELAJACION DIFUSIVA (thermal erosion / mass wasting)
+        //
+        // CORREGIDO el 15-08-2026: antes la fraccion de mezcla se aplicaba TAL CUAL en cada
+        // paso, sin multiplicar por el tiempo transcurrido, mientras que el levantamiento SI
+        // se escalaba por dt. Esa asimetria dejaba los dos terminos desacoplados en unos 7
+        // ordenes de magnitud: a 60 fps la difusion borraba ~70% del relieve por Ma mientras
+        // el levantamiento aportaba 5e-4 m/Ma. Por eso no se formaba ninguna cordillera.
+        //
+        // Ahora DiffusionRate es una tasa POR Ma y se integra como tal. Se recorta a 1 porque
+        // una fraccion de mezcla mayor que 1 no suaviza: sobrepasa el valor objetivo y
+        // oscila.
+        // ============================================================
+        if (Params.DiffusionRate > 0.0f)
+        {
+            const float Kernel[3][3] = {
+                { 1.0f/16.0f, 2.0f/16.0f, 1.0f/16.0f },
+                { 2.0f/16.0f, 4.0f/16.0f, 2.0f/16.0f },
+                { 1.0f/16.0f, 2.0f/16.0f, 1.0f/16.0f }
+            };
+
+            const float MixFraction = FMath::Clamp(Params.DiffusionRate * SubDt, 0.0f, 1.0f);
+
+            TArray<TArray<float>> Snapshot;
+            Snapshot.SetNum(6);
+            for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
+            {
+                Snapshot[FaceIdx] = FaceData[FaceIdx].ElevationData;
+            }
+
+            for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
+            {
+                const ECSCubeFace Face = static_cast<ECSCubeFace>(FaceIdx);
+                TArray<float>& ElevData = FaceData[FaceIdx].ElevationData;
+                TArray<float> TempData;
+                TempData.SetNumUninitialized(ElevData.Num());
+
+                for (int32 Y = 0; Y < Resolution; ++Y)
+                {
+                    for (int32 X = 0; X < Resolution; ++X)
+                    {
+                        float Sum = 0.0f;
+                        for (int32 KY = -1; KY <= 1; ++KY)
+                        {
+                            for (int32 KX = -1; KX <= 1; ++KX)
+                            {
+                                Sum += SampleNeighborElevation(Snapshot, Face, X, Y, KX, KY) * Kernel[KY + 1][KX + 1];
+                            }
+                        }
+
+                        const int32 Idx = GetLinearIndex(X, Y);
+                        TempData[Idx] = FMath::Lerp(ElevData[Idx], Sum, MixFraction);
+                    }
+                }
+
+                ElevData = MoveTemp(TempData);
+            }
         }
     }
 

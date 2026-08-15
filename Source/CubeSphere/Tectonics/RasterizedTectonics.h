@@ -54,9 +54,20 @@ struct CUBESPHERE_API FPlateMovementParams
     UPROPERTY(EditAnywhere, BlueprintReadWrite)
     float TimeScale = 1.0f;
     
-    // Factor de orogenia (qué tan rápido se forman montañas)
-    UPROPERTY(EditAnywhere, BlueprintReadWrite)
-    float OrogenyFactor = 0.1f;
+    /**
+     * Eficiencia orogénica: qué fracción del acortamiento horizontal se convierte en
+     * levantamiento vertical. ADIMENSIONAL desde el 15-08-2026 — antes era una constante
+     * sin unidades multiplicando una convergencia en rad/Ma, lo que la dejaba sin
+     * significado físico y desacoplada de la difusión en ~7 órdenes de magnitud.
+     *
+     * Ahora la convergencia se pasa a m/Ma (rad/Ma × radio del planeta) antes de
+     * multiplicar, así que este número se lee directamente: 0.005 = por cada metro que
+     * dos placas se acercan, la frontera sube 5 mm. Con ω típico de 0.005 rad/Ma sobre
+     * 6371 km eso son ~32 km/Ma de acortamiento y ~160 m/Ma de levantamiento, del orden
+     * del Himalaya antes de erosión.
+     */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
+    float OrogenyFactor = 0.005f;
     
     // Factor de spreading (qué tan rápido se crea corteza)
     UPROPERTY(EditAnywhere, BlueprintReadWrite)
@@ -74,9 +85,10 @@ struct CUBESPHERE_API FPlateMovementParams
     UPROPERTY(EditAnywhere, BlueprintReadWrite)
     float OceanicBaseElevation = -3800.0f;
 
-    // Tasa de relajación difusiva (thermal erosion / mass wasting) aplicada cada paso,
-    // como fracción de mezcla hacia el valor suavizado localmente (0 = desactivado,
-    // 1 = reemplazo total cada paso). Sin esto, la elevación en celdas de frontera
+    // Tasa de relajación difusiva (thermal erosion / mass wasting), POR Ma de tiempo
+    // simulado — no por paso. Antes era por paso, lo que hacía que el resultado
+    // dependiera del framerate y dejaba la difusión desacoplada del levantamiento
+    // (ver OrogenyFactor). Sin esto, la elevación en celdas de frontera
     // crece sin control hacia el tope (12000m) mientras las celdas vecinas no-frontera
     // quedan en la base, formando paredes casi verticales de una celda de ancho. Un
     // valor demasiado alto tiene el problema opuesto: aplicado cada paso durante miles
@@ -85,8 +97,8 @@ struct CUBESPHERE_API FPlateMovementParams
     // sumará encima de este, no lo sustituye. Requiere calibrarse por observación
     // (equilibrio entre esta tasa y OrogenyFactor/SpreadingFactor), no hay un valor
     // "correcto" universal.
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "1.0"))
-    float DiffusionRate = 0.02f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
+    float DiffusionRate = 0.05f;
 };
 
 /**

@@ -9,9 +9,10 @@
 | Subsistema | Estado | Motor de cómputo |
 |---|---|---|
 | Cube-Sphere grid + métricas | ✅ Implementado, con tests | CPU |
-| **Movimiento de placas** | ❌ **No implementado** (🔻 ver §5.1) | — |
+| **Movimiento de placas** | ✅ Implementado (advección del campo de IDs, §5.1) | CPU |
 | Generación de placas (Voronoi) | ✅ Implementado | CPU |
-| Relieve por fronteras estáticas | ⚠️ Parcial — genera relieve, no lo mueve | CPU |
+| Orogenia / dorsales / subducción | ✅ Emergentes de la advección | CPU |
+| Isostasia / grosor de corteza | ❌ No implementado (bloquea conservar continente) | — |
 | `BoundaryInteractions` | ⏸️ Desactivado hasta F1 (era inerte: nadie leía su salida) | — |
 | Tectónica — vía GPU | 🗑️ Borrada (15-08-2026, era andamiaje vacío) | — |
 | Renderizado planetario con LOD | ❌ No implementado (`PlanetNaniteMesh` borrado, ver §4) | — |

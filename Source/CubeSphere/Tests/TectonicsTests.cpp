@@ -659,3 +659,93 @@ bool FContinentsPersistTest::RunTest(const FString& Parameters)
 
     return true;
 }
+
+// ------------------------------------------------------------
+// La orogenia tiene que producir cordilleras.
+//
+// Al probar F1 en el editor el usuario reporto deriva de placas correcta pero NINGUNA
+// montana. La causa no era falta de fisica sino una asimetria de unidades: el
+// levantamiento se escalaba por dt y la difusion no, asi que a 60 fps la difusion borraba
+// ~70% del relieve por Ma mientras el levantamiento aportaba 5e-4 m/Ma. Estaban
+// desacoplados unos 7 ordenes de magnitud.
+//
+// Este test fija el equilibrio: tiene que haber relieve alto, y tiene que estar acotado.
+// Las dos mitades importan - solo la primera se satisface subiendo el factor hasta que
+// todo topa a 12000 m, que es el bug de los picos infinitos de M1.5 otra vez.
+// ------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FOrogenyBuildsMountainsTest,
+    "Simu.Tectonics.OrogenyBuildsMountains",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FOrogenyBuildsMountainsTest::RunTest(const FString& Parameters)
+{
+    const int32 Res = 48;
+
+    UCubeSphereGrid* Grid = nullptr;
+    UTectonicPlateSystem* System = nullptr;
+    URasterizedTectonics* Raster = nullptr;
+    if (!TestTrue(TEXT("Fixture montado"), BuildF1Fixture(48, Res, 8, 31337, Grid, System, Raster)))
+    {
+        return false;
+    }
+
+    auto MaxElevation = [Raster, Res]()
+    {
+        float Max = -TNumericLimits<float>::Max();
+        for (int32 F = 0; F < 6; ++F)
+        {
+            const ECSCubeFace Face = static_cast<ECSCubeFace>(F);
+            for (int32 Y = 0; Y < Res; ++Y)
+            {
+                for (int32 X = 0; X < Res; ++X)
+                {
+                    Max = FMath::Max(Max, Raster->GetElevationAt(Face, X, Y));
+                }
+            }
+        }
+        return Max;
+    };
+
+    const float Before = MaxElevation();
+
+    // 200 Ma en pasos de 0.5 Ma. Es la escala en la que se levanta una cordillera de
+    // verdad: el Himalaya lleva ~50 Ma.
+    FPlateMovementParams Params;
+    Params.DeltaTime = 0.5f;
+    Params.TimeScale = 1.0f;
+
+    const int32 Steps = 400;
+    for (int32 i = 0; i < Steps; ++i)
+    {
+        System->Step(Params.DeltaTime);
+        Raster->Step(Params);
+    }
+
+    const float After = MaxElevation();
+    const FTectonicAdvectionStats Stats = Raster->GetAdvectionStats();
+
+    UE_LOG(LogTemp, Log, TEXT("OrogenyBuildsMountains: elevacion maxima %.0f m -> %.0f m tras %.0f Ma (%d advecciones, %d colisiones)"),
+        Before, After, Steps * Params.DeltaTime, Stats.AdvectionCount, Stats.CollisionCells);
+    AddInfo(FString::Printf(TEXT("Elevacion maxima %.0f m -> %.0f m tras %.0f Ma"),
+        Before, After, Steps * Params.DeltaTime));
+
+    if (!TestTrue(TEXT("Hubo colisiones que pudieran levantar relieve"), Stats.CollisionCells > 0))
+    {
+        return false;
+    }
+
+    // Una cordillera de verdad. Por debajo de esto el relieve es solo el ruido inicial.
+    TestTrue(FString::Printf(TEXT("Se forman montanas altas (maxima %.0f m)"), After),
+        After > 4000.0f);
+
+    // Y acotada: si satura en el tope es que volvieron los picos infinitos de M1.5.
+    TestTrue(FString::Printf(TEXT("El relieve no satura en el tope de 12000 m (maxima %.0f m)"), After),
+        After < 11500.0f);
+
+    // El relieve tiene que haber CRECIDO respecto al ruido inicial, o el test pasaria
+    // con un planeta que simplemente empezo accidentado y se quedo igual.
+    TestTrue(FString::Printf(TEXT("El relieve crece por tectonica (%.0f -> %.0f m)"), Before, After),
+        After > Before + 1000.0f);
+
+    return true;
+}

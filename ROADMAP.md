@@ -170,7 +170,22 @@ Esto hace que subducción, dorsales y apertura de océanos sean **emergentes**, 
 - [x] `Simu.Tectonics.PlateFieldEvolves` — las placas cambian de tamaño; falla si el campo vuelve a congelarse
 - [x] `Simu.Tectonics.CrustBudget` — se crea y se destruye corteza, y ninguna supera al doble de la otra
 - [x] `Simu.Tectonics.ContinentsPersist` — los continentes sobreviven; detecta que la regla de subducción esté invertida
-- [ ] Visual: dos continentes que colisionan levantando una cordillera — **pendiente de mirar en el editor**
+- [x] `Simu.Tectonics.OrogenyBuildsMountains` — **8.645 m de elevación máxima tras 200 Ma** (partiendo de 2.217 m de ruido inicial), sin saturar el tope de 12.000 m. Añadido tras probar F1 en el editor: había deriva de placas pero **ninguna montaña**.
+  - Causa: no faltaba física, era una **asimetría de unidades**. El levantamiento se escalaba por `dt` y la difusión **no** — se aplicaba tal cual en cada paso. A 60 fps eso significa que la difusión borraba ~70 % del relieve por Ma mientras el levantamiento aportaba 5·10⁻⁴ m/Ma: desacoplados unos 7 órdenes de magnitud, y el resultado además dependía del framerate.
+  - `DiffusionRate` pasa a ser una tasa **por Ma**, integrada como tal.
+  - `OrogenyFactor` pasa a ser una **eficiencia adimensional**: la convergencia se convierte a m/Ma (rad/Ma × radio del planeta) antes de multiplicar, así que el número se lee directo — 0.005 = por cada metro que dos placas se acercan, la frontera sube 5 mm. Antes era una constante sin unidades multiplicando rad/Ma, sin significado físico posible.
+  - **Integración por sub-pasos** (máx. 0.5 Ma cada uno): el `dt` que llega no está acotado porque el usuario puede subir `TimeScale` a 1000, y a 60 fps eso son ~16 Ma de golpe. Integrar eso de una vez daba saltos de miles de metros y una fracción de mezcla mayor que 1, que en vez de suavizar oscila. Que el resultado dependa del framerate no es aceptable en un simulador.
+- [ ] Visual: confirmar las cordilleras en el editor — **pendiente**
+
+**Contabilidad medida (15-08-2026):**
+
+| Magnitud | Valor |
+|---|---|
+| Elevación máxima tras 200 Ma | 2.217 m → **8.645 m** |
+| Corteza creada / destruida | +59.168 / −56.606 (**4,3 % de desequilibrio**) |
+| Corteza continental tras la simulación | 1.380 → 976 celdas (**71 %**) |
+
+> ⚠️ **Ese 71 % es un problema físico conocido, no un éxito.** En una colisión continente-continente ninguna de las dos subduce: la corteza se **engrosa**. Pero como hoy el estado primario es la elevación y no el grosor, la resolución de colisión no tiene forma de apilar material y destruye la celda perdedora. Perder un 29 % de continente cada 200 Ma implicaría no quedar nada en ~700 Ma, y en la Tierra el área continental es aproximadamente constante desde hace miles de millones de años. **Lo arregla F2**, que convierte el grosor de corteza en el estado primario y deriva la elevación por isostasia — es exactamente el caso de uso que lo justifica.
 
 > **Los cuatro tests se validaron saboteando el código** (desactivando la advección y la rotación) para comprobar que fallan. `ContinentsPersist` **no fallaba**: con el campo congelado el recuento no cambia, el ratio sale 1.0 y todas sus aserciones se cumplen. Se reforzó exigiendo que la advección se haya ejecutado y que haya habido colisiones. Es el segundo test de esta sesión que pasaba sin comprobar nada.
 
