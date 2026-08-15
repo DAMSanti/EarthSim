@@ -388,14 +388,27 @@ void UTectonicPlateSystem::Step(float DeltaTime)
         Plate.Age += DeltaTime;
     }
 
-    // Procesar interacciones de frontera (subducción, orogenia, spreading, vulcanismo)
-    if (BoundaryInteractionSystem)
-    {
-        BoundaryInteractionSystem->ProcessAllBoundaries(DeltaTime);
-    }
+    // DESACTIVADO hasta F1 (ROADMAP.md, 15-08-2026). UBoundaryInteractions calcula
+    // subducción, orogenia, spreading, vulcanismo y hotspots, y vuelca el resultado en
+    // sus ElevationRateMaps... que nadie lee: ApplyElevationChanges() está vacía y
+    // GetElevationRateMap() no tiene ningún consumidor. Mientras tanto recorre 6xRes²
+    // celdas en cada paso, así que es coste puro.
+    //
+    // NO borrar la clase: contiene física real (ángulos de subducción, esfuerzo
+    // acumulado, hotspots) que es justo la que le falta al paso rasterizado, que solo
+    // sabe mirar los 4 vecinos directos. F1 la reconecta rellenando ApplyElevationChanges
+    // y volviendo a activar esta llamada.
+    //
+    // if (BoundaryInteractionSystem)
+    // {
+    //     BoundaryInteractionSystem->ProcessAllBoundaries(DeltaTime);
+    // }
 
-    // Detectar nuevos límites (pueden cambiar con el movimiento)
-    DetectBoundaries();
+    // Igual que arriba: DetectBoundaries() vuelve a recorrer 6xRes² celdas para
+    // recalcular un mapa de fronteras que no puede haber cambiado, porque las placas
+    // todavía no se mueven (ese es justo el objeto de F1). El mapa inicial que calcula
+    // GeneratePlates() sigue siendo válido. Se reactiva en F1, cuando sí cambie.
+    // DetectBoundaries();
 }
 
 FTectonicPlate UTectonicPlateSystem::GetPlate(int32 PlateID) const

@@ -2,6 +2,7 @@
 
 #include "RasterizedTectonics.h"
 #include "TectonicPlateSystem.h"
+#include "SphericalVoronoi.h"
 #include "../CubeSphereGrid.h"
 #include "../CubeFaceMapping.h"
 #include "../Noise/SimplexNoise.h"
@@ -122,7 +123,31 @@ void URasterizedTectonics::InitializeFromPlateSystem()
     }
 
     const TArray<FTectonicPlate>& Plates = PlateSystem->GetPlates();
-    const float Radius = Grid->GetRadius();
+
+    // Se usan los MISMOS centroides que USphericalVoronoi (los de Fibonacci, sobre la
+    // esfera unitaria), no FTectonicPlate::Centroid. Este último lo recalcula
+    // CalculatePlateStatistics como promedio de las celdas de cada placa, así que
+    // difiere del que uso el Voronoi y producía una asignación placa->celda distinta
+    // cerca de las fronteras (ROADMAP.md F0). Con los mismos centroides y el mismo
+    // criterio (más cercano por producto escalar), los dos mapas solo pueden diferir
+    // por la distinta resolución de cada uno, no por el criterio.
+    //
+    // La unificación completa - que este ráster sea la única fuente de verdad del campo
+    // de IDs y que UTectonicPlateSystem lea de aquí - es parte de F1: en cuanto las
+    // placas se muevan, el mapa del Voronoi queda obsoleto al primer paso y pasa a ser
+    // solo la condición inicial.
+    TArray<FVector> Centroids;
+    if (USphericalVoronoi* Voronoi = PlateSystem->GetVoronoi())
+    {
+        Centroids = Voronoi->GetCentroids();
+    }
+    const bool bHasVoronoiCentroids = (Centroids.Num() == Plates.Num());
+    if (!bHasVoronoiCentroids)
+    {
+        UE_LOG(LogRasterizedTectonics, Warning,
+            TEXT("Sin centroides de Voronoi (%d para %d placas); se recurre a FTectonicPlate::Centroid"),
+            Centroids.Num(), Plates.Num());
+    }
 
     UE_LOG(LogRasterizedTectonics, Log, TEXT("Initializing textures from %d plates"), Plates.Num());
 
@@ -140,27 +165,31 @@ void URasterizedTectonics::InitializeFromPlateSystem()
                 // al del Grid, dejando espejados el mapa de placas y el de elevación.
                 const FVector SphereDir = CubeFaceMapping::PixelToDirection(
                     static_cast<ECSCubeFace>(FaceIdx), X, Y, Resolution);
-                const FVector SpherePos = SphereDir * Radius;
 
-                // Buscar placa más cercana
+                // Placa de centroide más cercano. Sobre la esfera unitaria el producto
+                // escalar mayor equivale a la distancia geodésica menor, igual que en
+                // USphericalVoronoi::AssignCellsToPlates.
                 int32 ClosestPlateID = 0;
-                float MinDist = TNumericLimits<float>::Max();
-                bool bIsContinental = false;
-                FVector ClosestEulerPole = FVector::UpVector;
-                float ClosestAngularVelocity = 0.0f;
+                float BestDot = -2.0f;
 
-                for (const FTectonicPlate& Plate : Plates)
+                for (int32 PlateIdx = 0; PlateIdx < Plates.Num(); ++PlateIdx)
                 {
-                    const float Dist = FVector::Dist(SpherePos, Plate.Centroid);
-                    if (Dist < MinDist)
+                    const FVector Centroid = bHasVoronoiCentroids
+                        ? Centroids[PlateIdx]
+                        : Plates[PlateIdx].Centroid.GetSafeNormal();
+
+                    const float Dot = static_cast<float>(FVector::DotProduct(SphereDir, Centroid));
+                    if (Dot > BestDot)
                     {
-                        MinDist = Dist;
-                        ClosestPlateID = Plate.PlateID;
-                        bIsContinental = (Plate.CrustType == ECrustType::Continental);
-                        ClosestEulerPole = Plate.EulerPole;
-                        ClosestAngularVelocity = Plate.AngularVelocity;
+                        BestDot = Dot;
+                        ClosestPlateID = PlateIdx;
                     }
                 }
+
+                const FTectonicPlate& ClosestPlate = Plates[ClosestPlateID];
+                const bool bIsContinental = (ClosestPlate.CrustType == ECrustType::Continental);
+                const FVector ClosestEulerPole = ClosestPlate.EulerPole;
+                const float ClosestAngularVelocity = ClosestPlate.AngularVelocity;
 
                 const int32 LinearIdx = GetLinearIndex(X, Y);
                 Face.PlateIDData[LinearIdx] = static_cast<uint8>(ClosestPlateID);

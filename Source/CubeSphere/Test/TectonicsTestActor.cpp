@@ -3,6 +3,7 @@
 #include "TectonicsTestActor.h"
 #include "../CubeSphereGrid.h"
 #include "../CubeFaceMapping.h"
+#include "../Visualization/PlanetFieldRegistry.h"
 #include "TectonicTypes.h"
 #include "TectonicPlateSystem.h"
 #include "PlateKinematics.h"
@@ -151,6 +152,10 @@ void ATectonicsTestActor::InitializeSystems()
     RasterizedTectonics->Initialize(CubeSphereGrid, PlateSystem, RasterResolution);
     UE_LOG(LogTemp, Log, TEXT("  - RasterizedTectonics inicializado (Resolución: %d)"), RasterResolution);
 
+    // 3.2 Registro de campos de diagnóstico (ROADMAP.md F0.5)
+    FieldRegistry = NewObject<UPlanetFieldRegistry>(this, TEXT("FieldRegistry"));
+    RegisterSimulationFields();
+
     // 3.5 Suavizar elevación para transiciones más orgánicas
     if (ElevationSmoothingIterations > 0)
     {
@@ -204,6 +209,12 @@ void ATectonicsTestActor::ShutdownSystems()
     {
         RasterizedTectonics->ReleaseResources();
         RasterizedTectonics = nullptr;
+    }
+
+    if (FieldRegistry)
+    {
+        FieldRegistry->Reset();
+        FieldRegistry = nullptr;
     }
 
     BoundaryInteractions = nullptr;
@@ -442,6 +453,15 @@ bool ATectonicsTestActor::LoadSimulation(const FString& SlotName)
 
     SimulationTime = Save->SimulationTime;
     SimulationSteps = Save->SimulationSteps;
+
+    // Tras cargar, el estado del ráster es otro: hay que rehacer los espejos en float de
+    // los campos categóricos y recalcular los rangos automáticos, o la leyenda y los
+    // colores seguirían describiendo la partida anterior.
+    RefreshCategoricalFieldCaches();
+    if (FieldRegistry)
+    {
+        FieldRegistry->RefreshRanges();
+    }
 
     RegeneratePlanetMesh();
 
@@ -687,73 +707,30 @@ void ATectonicsTestActor::UpdateMeshColors()
                 int32 PlateID = 0;
                 float Elevation = 0.0f;
 
+                // Declaradas fuera del if: el coloreado por campo de mas abajo las usa
+                ECSCubeFace DominantFace = CubeFace;
+                float TexU = 0.0f;
+                float TexV = 0.0f;
+
                 // Calcular posición esférica para este vértice
                 float U = (static_cast<float>(X) / Resolution) * 2.0f - 1.0f;
                 float V = (static_cast<float>(Y) / Resolution) * 2.0f - 1.0f;
                 
-                FVector CubePos;
-                switch (CubeFace)
-                {
-                    case ECSCubeFace::PositiveX: CubePos = FVector(1.0f, U, V); break;
-                    case ECSCubeFace::NegativeX: CubePos = FVector(-1.0f, -U, V); break;
-                    case ECSCubeFace::PositiveY: CubePos = FVector(-U, 1.0f, V); break;
-                    case ECSCubeFace::NegativeY: CubePos = FVector(U, -1.0f, V); break;
-                    case ECSCubeFace::PositiveZ: CubePos = FVector(U, -V, 1.0f); break;
-                    case ECSCubeFace::NegativeZ: CubePos = FVector(U, V, -1.0f); break;
-                    default: CubePos = FVector(1.0f, U, V); break;
-                }
+                FVector CubePos = CubeFaceMapping::FaceUVToCubePoint(CubeFace, U, V);
                 FVector Normal = CubePos.GetSafeNormal();
 
                 if (RasterizedTectonics && RasterizedTectonics->IsInitialized())
                 {
-                    // Usar cara dominante para garantizar continuidad en bordes
-                    FVector AbsNormal = Normal.GetAbs();
-                    ECSCubeFace DominantFace;
-                    float FaceU, FaceV;
-                    
-                    if (AbsNormal.X >= AbsNormal.Y && AbsNormal.X >= AbsNormal.Z)
-                    {
-                        DominantFace = Normal.X >= 0 ? ECSCubeFace::PositiveX : ECSCubeFace::NegativeX;
-                        float Scale = 1.0f / AbsNormal.X;
-                        if (Normal.X >= 0) {
-                            FaceU = Normal.Y * Scale;
-                            FaceV = Normal.Z * Scale;
-                        } else {
-                            FaceU = -Normal.Y * Scale;
-                            FaceV = Normal.Z * Scale;
-                        }
-                    }
-                    else if (AbsNormal.Y >= AbsNormal.X && AbsNormal.Y >= AbsNormal.Z)
-                    {
-                        DominantFace = Normal.Y >= 0 ? ECSCubeFace::PositiveY : ECSCubeFace::NegativeY;
-                        float Scale = 1.0f / AbsNormal.Y;
-                        if (Normal.Y >= 0) {
-                            FaceU = -Normal.X * Scale;
-                            FaceV = Normal.Z * Scale;
-                        } else {
-                            FaceU = Normal.X * Scale;
-                            FaceV = Normal.Z * Scale;
-                        }
-                    }
-                    else
-                    {
-                        DominantFace = Normal.Z >= 0 ? ECSCubeFace::PositiveZ : ECSCubeFace::NegativeZ;
-                        float Scale = 1.0f / AbsNormal.Z;
-                        if (Normal.Z >= 0) {
-                            FaceU = Normal.X * Scale;
-                            FaceV = -Normal.Y * Scale;
-                        } else {
-                            FaceU = Normal.X * Scale;
-                            FaceV = Normal.Y * Scale;
-                        }
-                    }
-                    
-                    int32 TexX = FMath::Clamp(static_cast<int32>((FaceU + 1.0f) * 0.5f * RasterResolution), 0, RasterResolution - 1);
-                    int32 TexY = FMath::Clamp(static_cast<int32>((FaceV + 1.0f) * 0.5f * RasterResolution), 0, RasterResolution - 1);
+                    // Conversion unificada (CubeFaceMapping.h). Este bloque y el switch
+                    // directo de arriba se quedaron sin migrar en la primera pasada de F0
+                    // porque su texto no coincidia exactamente con el de las otras copias
+                    // - justo la razon por la que el mapeo no debe estar duplicado.
+                    CubeFaceMapping::DirectionToFaceTexUV(Normal, DominantFace, TexU, TexV);
+
+                    const int32 TexX = FMath::Clamp(FMath::FloorToInt(TexU * RasterResolution), 0, RasterResolution - 1);
+                    const int32 TexY = FMath::Clamp(FMath::FloorToInt(TexV * RasterResolution), 0, RasterResolution - 1);
                     PlateID = RasterizedTectonics->GetPlateIDAt(DominantFace, TexX, TexY);
-                    // Usar interpolación bilineal para elevación suave
-                    float TexU = (FaceU + 1.0f) * 0.5f;
-                    float TexV = (FaceV + 1.0f) * 0.5f;
+
                     Elevation = RasterizedTectonics->GetElevationBilinear(DominantFace, TexU, TexV);
                 }
                 else if (PlateSystem)
@@ -770,12 +747,21 @@ void ATectonicsTestActor::UpdateMeshColors()
                     MeshVertices[VertexIndex] = Normal * (Radius + ElevationOffset);
                 }
 
-                FLinearColor Color = GetPlateColor(PlateID);
-
-                // Modular brillo por elevación
-                float ElevationFactor = FMath::GetMappedRangeValueClamped(
-                    FVector2D(-5000.0f, 10000.0f), FVector2D(0.5f, 1.2f), Elevation);
-                Color *= ElevationFactor;
+                // Color desde el campo de diagnóstico activo (ROADMAP.md F0.5). Antes esto
+                // era fijo: color de placa modulado por elevación. Ahora cualquier campo
+                // registrado se pinta aquí sin tocar este código.
+                FLinearColor Color;
+                float FieldValue = 0.0f;
+                if (FieldRegistry && FieldRegistry->GetActiveField() &&
+                    FieldRegistry->SampleActiveBilinear(DominantFace, TexU, TexV, FieldValue))
+                {
+                    Color = FieldRegistry->ColorForValue(FieldValue);
+                }
+                else
+                {
+                    // Sin campo disponible: se cae al coloreado por placa de siempre
+                    Color = GetPlateColor(PlateID);
+                }
 
                 // Resaltar placa seleccionada
                 if (HighlightedPlate >= 0)
@@ -817,6 +803,138 @@ void ATectonicsTestActor::UpdateMeshColors()
             TArray<FProcMeshTangent>()
         );
     }
+}
+
+// ============================================================
+// CAMPOS DE DIAGNOSTICO (ROADMAP.md F0.5)
+// ============================================================
+
+void ATectonicsTestActor::RefreshCategoricalFieldCaches()
+{
+    if (!RasterizedTectonics || !RasterizedTectonics->IsInitialized())
+    {
+        return;
+    }
+
+    for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
+    {
+        const FTectonicFaceTextureData* Face =
+            RasterizedTectonics->GetFaceData(static_cast<ECSCubeFace>(FaceIdx));
+        if (!Face)
+        {
+            continue;
+        }
+
+        PlateIDFieldCache[FaceIdx].SetNumUninitialized(Face->PlateIDData.Num());
+        for (int32 i = 0; i < Face->PlateIDData.Num(); ++i)
+        {
+            PlateIDFieldCache[FaceIdx][i] = static_cast<float>(Face->PlateIDData[i]);
+        }
+
+        CrustTypeFieldCache[FaceIdx].SetNumUninitialized(Face->CrustTypeData.Num());
+        for (int32 i = 0; i < Face->CrustTypeData.Num(); ++i)
+        {
+            CrustTypeFieldCache[FaceIdx][i] = static_cast<float>(Face->CrustTypeData[i]);
+        }
+    }
+}
+
+void ATectonicsTestActor::RegisterSimulationFields()
+{
+    if (!FieldRegistry || !RasterizedTectonics)
+    {
+        return;
+    }
+
+    FieldRegistry->Reset();
+    RefreshCategoricalFieldCaches();
+
+    const int32 Res = RasterizedTectonics->GetTextureResolution();
+    URasterizedTectonics* Raster = RasterizedTectonics;
+
+    // --- Elevación -------------------------------------------------------------
+    // Rango FIJO, no automático, y a propósito: con rango automático la escala se
+    // reajusta sola a medida que crecen las montañas, así que el planeta se ve siempre
+    // igual y es imposible notar que el relieve está creciendo. Con rango fijo, ver que
+    // todo satura a blanco ES la señal de que el levantamiento se está desbocando.
+    // El centro de la paleta Terrain (T=0.5) cae en 0 m, o sea el nivel del mar.
+    {
+        FPlanetScalarField Field;
+        Field.Id = TEXT("Elevation");
+        Field.Label = TEXT("Elevacion");
+        Field.Unit = TEXT("m");
+        Field.Palette = EPlanetFieldPalette::Terrain;
+        Field.Resolution = Res;
+        Field.bAutoRange = false;
+        Field.RangeMin = -10000.0f;
+        Field.RangeMax = 10000.0f;
+        Field.GetFaceData = [Raster](ECSCubeFace Face) -> const TArray<float>*
+        {
+            return Raster->IsInitialized() ? &Raster->GetElevationData(Face) : nullptr;
+        };
+        FieldRegistry->RegisterField(Field);
+    }
+
+    // --- ID de placa -----------------------------------------------------------
+    // El campo que hace visible el bloqueador de F1: hoy es una imagen congelada, y en
+    // cuanto las placas se muevan debe verse la deriva.
+    {
+        FPlanetScalarField Field;
+        Field.Id = TEXT("PlateID");
+        Field.Label = TEXT("ID de placa");
+        Field.Palette = EPlanetFieldPalette::Categorical;
+        Field.Resolution = Res;
+        Field.bAutoRange = false;
+        ATectonicsTestActor* Self = this;
+        Field.GetFaceData = [Self](ECSCubeFace Face) -> const TArray<float>*
+        {
+            const int32 Idx = static_cast<int32>(Face);
+            return (Idx >= 0 && Idx < 6) ? &Self->PlateIDFieldCache[Idx] : nullptr;
+        };
+        FieldRegistry->RegisterField(Field);
+    }
+
+    // --- Edad de la corteza ----------------------------------------------------
+    // En F1 este campo es la prueba de fuego del spreading: deben aparecer bandas
+    // simétricas a ambos lados de las dorsales, como en los mapas reales del fondo
+    // oceánico. Hoy es ruido inicial aleatorio, que ya dice algo: que no hay spreading.
+    {
+        FPlanetScalarField Field;
+        Field.Id = TEXT("CrustAge");
+        Field.Label = TEXT("Edad de corteza");
+        Field.Unit = TEXT("Ma");
+        Field.Palette = EPlanetFieldPalette::Sequential;
+        Field.Resolution = Res;
+        Field.bAutoRange = true;
+        Field.GetFaceData = [Raster](ECSCubeFace Face) -> const TArray<float>*
+        {
+            const FTectonicFaceTextureData* Data = Raster->GetFaceData(Face);
+            return Data ? &Data->CrustAgeData : nullptr;
+        };
+        FieldRegistry->RegisterField(Field);
+    }
+
+    // --- Tipo de corteza -------------------------------------------------------
+    {
+        FPlanetScalarField Field;
+        Field.Id = TEXT("CrustType");
+        Field.Label = TEXT("Tipo de corteza (0=oceanica, 1=continental)");
+        Field.Palette = EPlanetFieldPalette::Categorical;
+        Field.Resolution = Res;
+        Field.bAutoRange = false;
+        ATectonicsTestActor* Self = this;
+        Field.GetFaceData = [Self](ECSCubeFace Face) -> const TArray<float>*
+        {
+            const int32 Idx = static_cast<int32>(Face);
+            return (Idx >= 0 && Idx < 6) ? &Self->CrustTypeFieldCache[Idx] : nullptr;
+        };
+        FieldRegistry->RegisterField(Field);
+    }
+
+    FieldRegistry->RefreshRanges();
+
+    UE_LOG(LogTemp, Log, TEXT("  - %d campos de diagnostico registrados (F/G para conmutar)"),
+        FieldRegistry->GetNumFields());
 }
 
 void ATectonicsTestActor::DrawVelocityDebug()
@@ -894,13 +1012,15 @@ void ATectonicsTestActor::DrawScreenDebugInfo()
         TEXT("Placas: %d | Grid: %d\n")
         TEXT("\n[SPACE] Pausa | [R] Reiniciar\n")
         TEXT("[+/-] Velocidad | [1-8] Placa\n")
-        TEXT("[V] Velocidades | [B] Límites"),
+        TEXT("[V] Velocidades | [B] Límites\n")
+        TEXT("[F/G] Campo: %s"),
         SimulationTime,
         SimulationSteps,
         bSimulationRunning ? TEXT("EJECUTANDO") : TEXT("PAUSADO"),
         TimeScale,
         PlateSystem ? PlateSystem->GetNumPlates() : 0,
-        GridResolution
+        GridResolution,
+        FieldRegistry ? *FieldRegistry->GetLegendText() : TEXT("(sin visor)")
     );
 
     GEngine->AddOnScreenDebugMessage(1, 0.0f, FColor::White, InfoText);
@@ -969,6 +1089,23 @@ void ATectonicsTestActor::HandleInput()
         {
             GEngine->AddOnScreenDebugMessage(-1, 1.5f, FColor::Yellow, 
                 FString::Printf(TEXT("Escala tiempo: %.1fx"), TimeScale));
+        }
+    }
+
+    // F / G - Conmutar campo de diagnostico (ROADMAP.md F0.5)
+    if (FieldRegistry && FieldRegistry->GetNumFields() > 0)
+    {
+        const bool bNext = PC->WasInputKeyJustPressed(EKeys::F);
+        const bool bPrev = PC->WasInputKeyJustPressed(EKeys::G);
+        if (bNext || bPrev)
+        {
+            FieldRegistry->CycleActive(bNext ? 1 : -1);
+            FieldRegistry->RefreshRanges();
+            if (GEngine)
+            {
+                GEngine->AddOnScreenDebugMessage(-1, 2.0f, FColor::Cyan,
+                    FieldRegistry->GetLegendText());
+            }
         }
     }
 

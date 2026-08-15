@@ -12,6 +12,7 @@ class UCubeSphereGrid;
 class UTectonicPlateSystem;
 class UPlateKinematics;
 class UBoundaryInteractions;
+class UPlanetFieldRegistry;
 class URasterizedTectonics;
 class UProceduralMeshComponent;
 class UDirectionalLightComponent;
@@ -217,6 +218,15 @@ public:
     UPROPERTY(BlueprintReadOnly, Category = "Tectonics|Systems")
     URasterizedTectonics* RasterizedTectonics;
 
+    /**
+     * Registro de campos escalares para visualización de diagnóstico (ROADMAP.md F0.5).
+     * Cada sistema de simulación publica aquí sus campos y el visor los pinta sobre la
+     * malla; conmutar con F / G. Es lo que hace comprobable cada fase: sin poder ver un
+     * campo no hay forma de juzgar si el fenómeno simulado es plausible.
+     */
+    UPROPERTY(BlueprintReadOnly, Category = "Tectonics|Systems")
+    UPlanetFieldRegistry* FieldRegistry;
+
     // ============================================================
     // FUNCIONES BLUEPRINT
     // ============================================================
@@ -298,6 +308,26 @@ protected:
 
     /** Obtener color de una placa */
     FLinearColor GetPlateColor(int32 PlateID) const;
+
+    /**
+     * Publica en FieldRegistry los campos que produce la simulación actual.
+     * Al añadir un sistema nuevo (isostasia, clima, erosión...), registrar aquí sus
+     * campos es todo lo que hace falta para poder verlos.
+     */
+    void RegisterSimulationFields();
+
+    /**
+     * Refresca las copias en float de los campos que el ráster guarda como uint8
+     * (ID de placa, tipo de corteza). El visor trabaja en float de forma uniforme, así
+     * que estos dos necesitan un espejo. No cambian entre pasos hasta F1, cuando las
+     * placas empiecen a moverse: entonces habrá que refrescarlos cada vez que cambie el
+     * campo de IDs, no solo al inicializar.
+     */
+    void RefreshCategoricalFieldCaches();
+
+    /** Espejos en float de los campos uint8 del ráster (ver arriba). */
+    TArray<float> PlateIDFieldCache[6];
+    TArray<float> CrustTypeFieldCache[6];
 
     /** Actualizar rotación del sol */
     void UpdateSunOrbit(float DeltaTime);

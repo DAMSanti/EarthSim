@@ -12,14 +12,14 @@
 | **Movimiento de placas** | ❌ **No implementado** (🔻 ver §5.1) | — |
 | Generación de placas (Voronoi) | ✅ Implementado | CPU |
 | Relieve por fronteras estáticas | ⚠️ Parcial — genera relieve, no lo mueve | CPU |
-| `BoundaryInteractions` | ⚠️ Calcula e **inerte**: nadie lee su salida | CPU |
+| `BoundaryInteractions` | ⏸️ Desactivado hasta F1 (era inerte: nadie leía su salida) | — |
 | Tectónica — vía GPU | 🗑️ Borrada (15-08-2026, era andamiaje vacío) | — |
 | Renderizado planetario con LOD | ❌ No implementado (`PlanetNaniteMesh` borrado, ver §4) | — |
 | QuadTree + LOD | ⚠️ Implementado, dormido hasta F6 | CPU |
 | Streaming de chunks | 🗑️ Borrado (0 referencias) | — |
 | Ruido Simplex | ✅ Implementado y en uso (§7) | CPU |
 | Flujo/difusión simple | ⚠️ Test de conservación de masa, **no es erosión** | CPU |
-| Visor de campos de simulación | ❌ No implementado (F0.5 — bloquea la verificación de todo lo demás) | — |
+| Visor de campos de simulación | ⚠️ Núcleo implementado, sin verificar en editor (§11) | CPU |
 | UI de configuración tectónica | ✅ Implementado | — |
 | Guardado/serialización | ✅ Implementado y verificado | — |
 | Control de versiones (git) | ✅ Inicializado | — |
@@ -184,3 +184,19 @@ Ordenados por impacto, tras la auditoría del 15-08-2026:
 7. **Parámetros sin calibrar entre sí**: `DiffusionRate`, `OrogenyFactor`, `SpreadingFactor`, `TimeScale`, `ElevationScale`. Tocar uno obliga a reajustar los demás (§5.3, §5.4).
 8. **Coste `O(Res²)` acumulativo y acoplado al framerate**: con `GridResolution = 128` sobre 6371 km las celdas son de ~100 km — demasiado grueso para relieve realista, y subir resolución escala cuadráticamente. Sin presupuesto de tiempo por paso se repite la espiral de la muerte de M1.
 9. **Renderizado planetario sin resolver** (§4): Nanite por parche resultó inviable (build síncrono bloqueante) y está desactivado. El único camino verificado hoy es el `ProceduralMesh` de `TectonicsTestActor`, sin LOD.
+
+
+## 11. Visor de campos de diagnóstico (F0.5, 15-08-2026)
+
+**Núcleo implementado, sin verificar visualmente en el editor** — `Visualization/PlanetScalarField.h`, `Visualization/PlanetFieldRegistry.h/.cpp`.
+
+Existe porque todo campo que produce la simulación tiene la misma forma: 6 caras × Res² valores. Cambian el significado y las unidades, no la estructura. Un único visor los pinta todos, y añadir un campo nuevo cuesta registrar una lambda, no escribir un visualizador.
+
+- `FPlanetScalarField`: descriptor con Id, etiqueta, unidad, paleta, escala, resolución y rango. **No copia datos**: guarda una `TFunction` que devuelve el array vivo de una cara, así la vista nunca se desincroniza del estado.
+- `UPlanetFieldRegistry`: guarda los campos, mantiene el activo, calcula rangos y traduce valor → color.
+- **Paleta y escala son ortogonales.** La paleta interpreta un valor ya normalizado (`Sequential` viridis, `Diverging` centrada en un cero con significado, `Categorical` sin interpolar, `Terrain` con el nivel del mar en el centro); la escala transforma el valor antes (`Linear`, `Logarithmic`). El log es imprescindible para el caudal acumulado de F4: en lineal, el cauce principal satura y los afluentes son indistinguibles del fondo.
+- Rango automático por **percentiles 2/98**, no mín/máx: un solo outlier aplanaba el mapa entero.
+- Integrado en `ATectonicsTestActor::UpdateMeshColors`; se conmuta con **F / G** y la leyenda aparece en el HUD.
+- Campos registrados hoy: elevación (rango fijo a propósito, para que se note si el relieve se desboca), ID de placa, edad de corteza, tipo de corteza.
+- **Pendiente:** campos vectoriales (flechas) y vista de sección/perfil.
+- Cobertura: `Tests/PlanetFieldTests.cpp`, 6 tests.

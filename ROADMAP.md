@@ -51,19 +51,20 @@ Lo que se ve hoy en pantalla es un **generador de relieve estático**: un mapa d
 
 ---
 
-## F0 — Cimientos: limpiar y unificar 🔴 EN CURSO
+## F0 — Cimientos: limpiar y unificar ✅ COMPLETO (15-08-2026)
 
 **Por qué primero:** hay un bug de mapeo de caras que corrompería en silencio cualquier sistema nuevo que muestree por cara, tres tests en rojo que nadie estaba mirando, y ~150 KB de código muerto que hace ruido en cada búsqueda.
 
 > **Patrón que se repite tres veces en esta fase, y conviene tenerlo presente en las siguientes:** cada bug encontrado aquí era una *tabla escrita a mano* que enumeraba casos de la geometría del cubo — el mapeo cara↔dirección (7 copias), las conexiones de bordes (2 copias), y las pasadas del JFA entre caras. Las tres se sustituyeron por cálculo geométrico directo, que no tiene casos que enumerar y por tanto no puede desincronizarse. Cuando en F4/F5 haga falta vecindad o advección cruzando caras, la respuesta por defecto es la misma: proyectar y reproyectar, no tabular.
 
-- [x] **Unificar el mapeo cara↔dirección 3D en un único helper** — `CubeFaceMapping.h` (15-08-2026). Estaba escrito a mano 7 veces (5 previstas + 2 más encontradas al migrar: la tabla de tangentes de `RasterizedTectonics` y la generación de vértices de malla) y ya se había desincronizado:
+- [x] **Unificar el mapeo cara↔dirección 3D en un único helper** — `CubeFaceMapping.h` (15-08-2026). Estaba escrito a mano **8 veces** (5 previstas, más la tabla de tangentes de `RasterizedTectonics` y dos bloques de `UpdateMeshColors`) y ya se había desincronizado:
   - `UCubeSphereGrid::GetFaceAxes` para `+Z` da `U=(1,0,0) V=(0,1,0)` → dirección `(U, V, 1)`
   - `URasterizedTectonics` case 4 (`+Z`) usa `FVector(U, -V, 1)` → **V invertida**. Lo mismo en `−Z`, invertida al revés.
   - Efecto: el mapa de IDs de placa (Voronoi, sobre el Grid) y el de elevación (Raster) están **espejados en los dos casquetes polares**. Las fronteras dibujadas no coinciden con las montañas allí.
   - Copias eliminadas: 3 en `TectonicsTestActor` (`GetSurfaceRadiusAtDirection`, `CreatePlanetMesh`, `UpdateMeshColors`), 2 en `RasterizedTectonics` (`InitializeFromPlateSystem`, `ApplyFractalNoise`), la tabla de tangentes de `RasterizedTectonics`, y las 2 de generación de vértices de malla. `UCubeSphereGrid::GetFaceAxes` ahora delega en el helper en vez de tener su propia tabla.
   - Efecto secundario que no se había previsto: el convenio antiguo era **levógiro** en las dos caras polares (`AxisU × AxisV == −Normal`), lo que además de espejar los datos invertía el winding de los triángulos generados allí. Al unificar se corrige también eso.
   - Cubierto por 4 tests nuevos en `Tests/CubeFaceMappingTests.cpp`: ida-y-vuelta exacta, dextrogiro en las 6 caras, acuerdo con el `Grid`, y cobertura de la esfera sin huecos.
+  - ⚠️ **La primera pasada dejó 2 copias sin migrar** dentro de `UpdateMeshColors`, porque su texto no era idéntico al de las otras (una no llevaba comentarios `// Face N`, la otra tenía líneas intermedias distintas). Eso dejó las dos caras polares inconsistentes entre `CreatePlanetMesh` (ya convertida) y `UpdateMeshColors` (no) — una regresión introducida al arreglar el bug original. Detectada y corregida al integrar el visor de F0.5. Es la mejor ilustración posible de por qué el mapeo no debía estar duplicado: ni siquiera una migración deliberada, buscándolas a propósito, las encontró todas a la primera.
 
 - [ ] 🔴 **Arreglar los 3 tests que ya estaban en rojo** (descubierto el 15-08-2026 al ejecutar la suite; verificado que fallan también en `HEAD` sin ninguno de los cambios de F0). Que M3 y M4 se cerraran como "✅ completo" con la suite roja indica que **nunca se llegó a ejecutar**, solo a compilar:
   - [x] `Simu.Tectonics.BoundaryInteractionsSanity` y `Simu.Tectonics.ElevationStaysBounded` — **arreglados (15-08-2026)**. Ambos abortaban en la primera aserción porque `GeneratePlates()` devolvía `false`: el Jump Flooding dejaba entre el 11 % y el 19 % de las celdas sin asignar. Causa raíz: **las pasadas de salto del JFA no cruzaban entre caras del cubo** (admitido en un comentario del propio código); la propagación entre caras avanzaba una sola celda por pasada y solo sobre las filas de borde, así que cualquier cara del cubo sin ningún centroide dentro no llegaba a rellenarse en las log2(Res)+2 pasadas disponibles. Con ~12 placas repartidas por Fibonacci sobre 6 caras, que alguna cara quede sin centroide es lo normal.
@@ -74,7 +75,8 @@ Lo que se ve hoy en pantalla es un **generador de relieve estático**: un mapa d
     Aprovechando, se sustituyó también la implementación: `GetNeighborCell` tenía una tabla de 24 entradas (cara, borde) → (cara vecina, rotación) más un switch de 16 ramas. Ahora resuelve el cruce por **geometría pura** — se sale del cuadrado UV sin recortar, se reproyecta la dirección, y la rotación relativa entre caras sale sola. Sin tabla que mantener.
     ⚠️ **Pendiente relacionado:** M3 "portó esa tabla" al QuadTree (`CubeSphereQuadTree.cpp:596`), así que existe una **segunda copia** con los mismos errores potenciales. No se ha tocado porque el QuadTree es candidato a borrarse en el punto siguiente; si se decide conservarlo, hay que migrarlo a `GetNeighborCell`.
 
-- [ ] **Una sola asignación placa→celda.** Siguen siendo dos y pueden discrepar cerca de las fronteras: `USphericalVoronoi` usa los centroides de Fibonacci originales, mientras que `RasterizedTectonics::InitializeFromPlateSystem` repite la búsqueda usando `FTectonicPlate::Centroid`, que `CalculatePlateStatistics` recalcula después como promedio de celdas. Desde el cambio a fuerza bruta ambas usan el mismo criterio (centroide más cercano), así que unificarlas es ya solo cuestión de que el ráster lea el mapa del Voronoi en vez de rehacer el cálculo.
+- [x] **Criterio de asignación placa→celda unificado** (15-08-2026). `RasterizedTectonics::InitializeFromPlateSystem` usaba `FTectonicPlate::Centroid`, que `CalculatePlateStatistics` recalcula como promedio de celdas, mientras el Voronoi usaba los centroides de Fibonacci: dos mapas distintos cerca de las fronteras. Ahora el ráster lee los centroides del Voronoi y aplica el mismo criterio (producto escalar mayor), así que solo pueden diferir por resolución, no por criterio.
+  - **Pendiente para F1**, deliberadamente: que el ráster sea la *única* fuente de verdad y que `UTectonicPlateSystem` lea de él. Hacerlo ahora sería a medias — en cuanto las placas se muevan, el mapa del Voronoi queda obsoleto al primer paso y pasa a ser solo la condición inicial, que es su papel correcto.
 - [x] **Borrar código muerto** (15-08-2026; está en git si hace falta recuperarlo). 18 archivos, ~150 KB:
   - `Streaming/ChunkStreamingManager` y `CubeSphereVisualizerComponent` — 0 referencias externas
   - `PlateSimulationGPU` + `PlateMovementShader` + `PlateMovement.usf` + `TectonicRaster.usf` — todos los `Dispatch*` eran `// TODO` vacíos. Si algún día se va a GPU, será contra estructuras de datos que todavía no existen; no hay nada aquí que reutilizar
@@ -83,7 +85,7 @@ Lo que se ve hoy en pantalla es un **generador de relieve estático**: un mapa d
   - `PlanetApproachPawn` actualizado: ya no busca `ATectonicPlanetActor`
   - **Conservados a propósito**, contra la recomendación inicial: `QuadTree/` y `LOD/`. Al revisar su API resultó ser lógica espacial pura (split/collapse, error geométrico, bounds, vecinos, LOD por distancia) sin ninguna dependencia de Nanite — es exactamente la mitad-CPU del esquema de F6, y reescribir un quadtree esférico desde cero no es una tarde. También sobrevive `PlanetMaterialGenerator`, único ejemplo funcionando de creación de materiales por código, que F0.5 probablemente reutilice
 - [x] **Actor único: `TectonicsTestActor`** (15-08-2026). Era el único que simulaba relieve y lo dibujaba. Conviene renombrarlo en algún momento: ya no es un actor de test, es *el* actor del planeta.
-- [ ] **Desactivar la llamada a `BoundaryInteractions::ProcessAllBoundaries`** hasta F1, donde por fin tendrá consumidor. Hoy es coste puro. **No borrar el archivo**: contiene física real (ángulos de subducción, esfuerzo acumulado, hotspots) que se conecta en F1.
+- [x] **Desactivada la llamada a `BoundaryInteractions::ProcessAllBoundaries`** hasta F1 (15-08-2026), donde por fin tendrá consumidor. **No se borra el archivo**: contiene física real (ángulos de subducción, esfuerzo acumulado, hotspots) que se conecta en F1. Desactivada también `DetectBoundaries()` en el paso: recalculaba 6×Res² celdas un mapa que no puede haber cambiado, porque las placas todavía no se mueven. Ambas se reactivan en F1.
 
 **Hecho cuando:** existe un único helper de mapeo de caras con test de ida-y-vuelta ✅, **la suite `Simu.*` pasa entera en verde** ✅ (11/11 el 15-08-2026), y `grep` de las clases borradas no devuelve nada.
 
@@ -96,18 +98,24 @@ Lo que se ve hoy en pantalla es un **generador de relieve estático**: un mapa d
 
 ---
 
-## F0.5 — Visor de campos: la herramienta que hace comprobable todo lo demás 🔴
+## F0.5 — Visor de campos: la herramienta que hace comprobable todo lo demás 🟡 NÚCLEO HECHO (15-08-2026)
 
 **Por qué existe esta fase:** sin ella, cada fase siguiente tendría que improvisar su propia visualización, y acabaríamos con cinco maneras distintas de pintar el globo (el mismo patrón de duplicación que causó los tres bugs de F0). Con ella, cada fase nueva sale a pantalla escribiendo un puñado de líneas.
 
 La idea: **cualquier campo escalar de la simulación** —elevación, edad de corteza, precipitación, caudal acumulado, espesor de sedimento— es lo mismo: 6 caras × Res² valores. Un único visor los pinta todos.
 
-- [ ] Tipo común de campo escalar (6 caras × Res², con nombre, unidad y rango) y un registro donde cada sistema publica los suyos
-- [ ] Componente visor que mapea el campo activo a color de vértice sobre la malla de `TectonicsTestActor`. Generaliza el `UpdateMeshColors` que ya existe, que hoy solo sabe pintar elevación
-- [ ] Rampas de color por tipo de dato: **secuencial** (elevación, temperatura), **divergente** (anomalías respecto a un cero con significado: isostasia, balance hídrico), **categórica** (ID de placa, tipo de frontera), y **logarítmica** (caudal acumulado — sin log, un río se pierde entre la cuenca)
-- [ ] Conmutar campo con una tecla, y leyenda en pantalla con nombre, unidad y mín/máx del rango en uso
+- [x] `FPlanetScalarField` (6 caras × Res², con nombre, unidad, paleta, escala y rango) y `UPlanetFieldRegistry` donde cada sistema publica los suyos. Los datos **no se copian**: el campo guarda una lambda que devuelve el array vivo, así la vista siempre refleja el estado actual sin sincronización explícita
+- [x] Coloreado de la malla de `TectonicsTestActor` desde el campo activo. Generaliza el `UpdateMeshColors` que antes solo sabía pintar color de placa modulado por elevación
+- [x] **Paleta y escala separadas**, corrigiendo el diseño que figuraba antes aquí. En el planteamiento original "logarítmica" era una rampa más, y es un error de categoría: el logaritmo es una **escala** (transforma el valor) y la paleta es un **mapa de color** (interpreta el valor ya normalizado). Son ortogonales — cualquier paleta puede pintarse en log:
+  - Paletas: `Sequential` (viridis), `Diverging` (azul-blanco-rojo, centrada en un cero con significado), `Categorical` (20 colores discretos, sin interpolar), `Terrain` (azules bajo el nivel del mar, verde-marrón-blanco encima)
+  - Escalas: `Linear`, `Logarithmic`
+- [x] Conmutar con **F / G**, y leyenda en el HUD con nombre, escala, rango en uso y unidad
+- [x] Rango automático por **percentiles 2/98** en vez de mín/máx crudos: un único píxel extremo comprimía todo el resto del rango y dejaba el mapa plano
+- [x] Registrados los 4 campos que hoy existen: elevación (Terrain, rango **fijo** a propósito — con rango automático la escala se reajusta sola y es imposible notar que el relieve crece), ID de placa, edad de corteza, tipo de corteza
+- [x] 6 tests en `Tests/PlanetFieldTests.cpp`: escala lineal y saturación, escala log y monotonía, rango automático frente a outliers, simetría de la paleta divergente, no-interpolación de campos categóricos, y gestión del registro
 - [ ] Campos vectoriales (velocidad de placa, viento, dirección de drenaje) como flechas de debug sobre el globo
 - [ ] Vista de sección/perfil: elevación a lo largo de un gran círculo. Es la forma más rápida de ver si una cordillera tiene un perfil plausible o es una pared de un píxel
+- [ ] ⚠️ **Sin verificar en el editor.** Compila y los tests unitarios pasan, pero nadie ha mirado todavía el planeta con el visor puesto — que es justo lo que esta fase existe para permitir. Primera comprobación pendiente: pulsar F y ver que los 4 campos se pintan con sentido
 
 **Hecho cuando:** se puede recorrer con una tecla los campos que hoy ya existen (ID de placa, elevación, edad de corteza, tipo de corteza) con leyenda correcta, y añadir un campo nuevo cuesta registrarlo, no escribir un visualizador.
 
