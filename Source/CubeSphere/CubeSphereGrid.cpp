@@ -9,7 +9,8 @@ UCubeSphereGrid::UCubeSphereGrid()
     : Resolution(CubeSphereConstants::DefaultResolution)
     , PlanetRadius(CubeSphereConstants::DefaultPlanetRadius)
 {
-    InitializeEdgeConnections();
+    // La tabla de conexiones de bordes que se construia aqui se eliminó el 15-08-2026:
+    // GetNeighborCell calcula el cruce entre caras por geometria (ver su comentario).
 }
 
 void UCubeSphereGrid::Initialize(int32 InResolution, float InPlanetRadius)
@@ -26,54 +27,6 @@ void UCubeSphereGrid::Initialize(int32 InResolution, float InPlanetRadius)
 // ============================================================
 // Esta es la parte más crítica: define cómo se conectan las 6 caras
 // del cubo en sus bordes para permitir navegación continua.
-
-void UCubeSphereGrid::InitializeEdgeConnections()
-{
-    // Nomenclatura:
-    // - Cada cara tiene 4 bordes: Up (+V), Down (-V), Left (-U), Right (+U)
-    // - Al cruzar un borde, entramos a otra cara con posible rotación
-    
-    // PositiveX (+X) - Cara derecha
-    EdgeConnections[static_cast<int32>(ECSCubeFace::PositiveX)][static_cast<int32>(ENeighborDirection::Up)]    = FFaceEdgeConnection(ECSCubeFace::PositiveZ, 1);
-    EdgeConnections[static_cast<int32>(ECSCubeFace::PositiveX)][static_cast<int32>(ENeighborDirection::Down)]  = FFaceEdgeConnection(ECSCubeFace::NegativeZ, 3);
-    EdgeConnections[static_cast<int32>(ECSCubeFace::PositiveX)][static_cast<int32>(ENeighborDirection::Left)]  = FFaceEdgeConnection(ECSCubeFace::PositiveY, 0);
-    EdgeConnections[static_cast<int32>(ECSCubeFace::PositiveX)][static_cast<int32>(ENeighborDirection::Right)] = FFaceEdgeConnection(ECSCubeFace::NegativeY, 0);
-
-    // NegativeX (-X) - Cara izquierda
-    EdgeConnections[static_cast<int32>(ECSCubeFace::NegativeX)][static_cast<int32>(ENeighborDirection::Up)]    = FFaceEdgeConnection(ECSCubeFace::PositiveZ, 3);
-    EdgeConnections[static_cast<int32>(ECSCubeFace::NegativeX)][static_cast<int32>(ENeighborDirection::Down)]  = FFaceEdgeConnection(ECSCubeFace::NegativeZ, 1);
-    EdgeConnections[static_cast<int32>(ECSCubeFace::NegativeX)][static_cast<int32>(ENeighborDirection::Left)]  = FFaceEdgeConnection(ECSCubeFace::NegativeY, 0);
-    EdgeConnections[static_cast<int32>(ECSCubeFace::NegativeX)][static_cast<int32>(ENeighborDirection::Right)] = FFaceEdgeConnection(ECSCubeFace::PositiveY, 0);
-
-    // PositiveY (+Y) - Cara frontal
-    EdgeConnections[static_cast<int32>(ECSCubeFace::PositiveY)][static_cast<int32>(ENeighborDirection::Up)]    = FFaceEdgeConnection(ECSCubeFace::PositiveZ, 0);
-    EdgeConnections[static_cast<int32>(ECSCubeFace::PositiveY)][static_cast<int32>(ENeighborDirection::Down)]  = FFaceEdgeConnection(ECSCubeFace::NegativeZ, 0);
-    EdgeConnections[static_cast<int32>(ECSCubeFace::PositiveY)][static_cast<int32>(ENeighborDirection::Left)]  = FFaceEdgeConnection(ECSCubeFace::NegativeX, 0);
-    EdgeConnections[static_cast<int32>(ECSCubeFace::PositiveY)][static_cast<int32>(ENeighborDirection::Right)] = FFaceEdgeConnection(ECSCubeFace::PositiveX, 0);
-
-    // NegativeY (-Y) - Cara trasera
-    EdgeConnections[static_cast<int32>(ECSCubeFace::NegativeY)][static_cast<int32>(ENeighborDirection::Up)]    = FFaceEdgeConnection(ECSCubeFace::PositiveZ, 2);
-    EdgeConnections[static_cast<int32>(ECSCubeFace::NegativeY)][static_cast<int32>(ENeighborDirection::Down)]  = FFaceEdgeConnection(ECSCubeFace::NegativeZ, 2);
-    EdgeConnections[static_cast<int32>(ECSCubeFace::NegativeY)][static_cast<int32>(ENeighborDirection::Left)]  = FFaceEdgeConnection(ECSCubeFace::PositiveX, 0);
-    EdgeConnections[static_cast<int32>(ECSCubeFace::NegativeY)][static_cast<int32>(ENeighborDirection::Right)] = FFaceEdgeConnection(ECSCubeFace::NegativeX, 0);
-
-    // PositiveZ (+Z) - Polo Norte
-    EdgeConnections[static_cast<int32>(ECSCubeFace::PositiveZ)][static_cast<int32>(ENeighborDirection::Up)]    = FFaceEdgeConnection(ECSCubeFace::NegativeY, 2);
-    EdgeConnections[static_cast<int32>(ECSCubeFace::PositiveZ)][static_cast<int32>(ENeighborDirection::Down)]  = FFaceEdgeConnection(ECSCubeFace::PositiveY, 0);
-    EdgeConnections[static_cast<int32>(ECSCubeFace::PositiveZ)][static_cast<int32>(ENeighborDirection::Left)]  = FFaceEdgeConnection(ECSCubeFace::NegativeX, 1);
-    EdgeConnections[static_cast<int32>(ECSCubeFace::PositiveZ)][static_cast<int32>(ENeighborDirection::Right)] = FFaceEdgeConnection(ECSCubeFace::PositiveX, 3);
-
-    // NegativeZ (-Z) - Polo Sur
-    EdgeConnections[static_cast<int32>(ECSCubeFace::NegativeZ)][static_cast<int32>(ENeighborDirection::Up)]    = FFaceEdgeConnection(ECSCubeFace::PositiveY, 0);
-    EdgeConnections[static_cast<int32>(ECSCubeFace::NegativeZ)][static_cast<int32>(ENeighborDirection::Down)]  = FFaceEdgeConnection(ECSCubeFace::NegativeY, 2);
-    EdgeConnections[static_cast<int32>(ECSCubeFace::NegativeZ)][static_cast<int32>(ENeighborDirection::Left)]  = FFaceEdgeConnection(ECSCubeFace::NegativeX, 3);
-    EdgeConnections[static_cast<int32>(ECSCubeFace::NegativeZ)][static_cast<int32>(ENeighborDirection::Right)] = FFaceEdgeConnection(ECSCubeFace::PositiveX, 1);
-}
-
-FFaceEdgeConnection UCubeSphereGrid::GetEdgeConnection(ECSCubeFace Face, ENeighborDirection Direction) const
-{
-    return EdgeConnections[static_cast<int32>(Face)][static_cast<int32>(Direction)];
-}
 
 // ============================================================
 // PROYECCIÓN Y NORMALIZACIÓN
@@ -231,180 +184,23 @@ FGeographicCoordinates UCubeSphereGrid::CellToGeographic(const FCubeSphereCell& 
 
 FCubeSphereCell UCubeSphereGrid::GetNeighbor(const FCubeSphereCell& Cell, ENeighborDirection Direction) const
 {
-    int32 NewU = Cell.U;
-    int32 NewV = Cell.V;
-    ECSCubeFace NewFace = Cell.Face;
-    
-    // Calcular nueva posición
+    int32 DX = 0, DY = 0;
     switch (Direction)
     {
-        case ENeighborDirection::Up:
-            NewV = Cell.V + 1;
-            break;
-        case ENeighborDirection::Down:
-            NewV = Cell.V - 1;
-            break;
-        case ENeighborDirection::Left:
-            NewU = Cell.U - 1;
-            break;
-        case ENeighborDirection::Right:
-            NewU = Cell.U + 1;
-            break;
+        case ENeighborDirection::Up:    DY =  1; break;
+        case ENeighborDirection::Down:  DY = -1; break;
+        case ENeighborDirection::Left:  DX = -1; break;
+        case ENeighborDirection::Right: DX =  1; break;
     }
-    
-    // Verificar si cruzamos un borde
-    bool bCrossedBorder = false;
-    ENeighborDirection CrossDirection = Direction;
-    
-    if (NewU < 0)
+
+    ECSCubeFace OutFace;
+    int32 OutX, OutY;
+    if (GetNeighborCell(Cell.Face, Cell.U, Cell.V, DX, DY, OutFace, OutX, OutY))
     {
-        bCrossedBorder = true;
-        CrossDirection = ENeighborDirection::Left;
-        NewU = 0;
+        return FCubeSphereCell(OutFace, OutX, OutY);
     }
-    else if (NewU >= Resolution)
-    {
-        bCrossedBorder = true;
-        CrossDirection = ENeighborDirection::Right;
-        NewU = Resolution - 1;
-    }
-    else if (NewV < 0)
-    {
-        bCrossedBorder = true;
-        CrossDirection = ENeighborDirection::Down;
-        NewV = 0;
-    }
-    else if (NewV >= Resolution)
-    {
-        bCrossedBorder = true;
-        CrossDirection = ENeighborDirection::Up;
-        NewV = Resolution - 1;
-    }
-    
-    if (bCrossedBorder)
-    {
-        // Obtener información de conexión
-        FFaceEdgeConnection Connection = GetEdgeConnection(Cell.Face, CrossDirection);
-        NewFace = Connection.NeighborFace;
-        
-        // Coordenada a lo largo del borde (la que se mantiene)
-        int32 EdgeCoord = 0;
-        switch (CrossDirection)
-        {
-            case ENeighborDirection::Up:
-            case ENeighborDirection::Down:
-                EdgeCoord = Cell.U;
-                break;
-            case ENeighborDirection::Left:
-            case ENeighborDirection::Right:
-                EdgeCoord = Cell.V;
-                break;
-        }
-        
-        // Aplicar rotación de la conexión
-        int32 RotatedU = 0, RotatedV = 0;
-        int32 MaxIdx = Resolution - 1;
-        
-        switch (Connection.RotationSteps)
-        {
-            case 0: // Sin rotación
-                if (CrossDirection == ENeighborDirection::Up)
-                {
-                    RotatedU = EdgeCoord;
-                    RotatedV = 0;
-                }
-                else if (CrossDirection == ENeighborDirection::Down)
-                {
-                    RotatedU = EdgeCoord;
-                    RotatedV = MaxIdx;
-                }
-                else if (CrossDirection == ENeighborDirection::Left)
-                {
-                    RotatedU = MaxIdx;
-                    RotatedV = EdgeCoord;
-                }
-                else // Right
-                {
-                    RotatedU = 0;
-                    RotatedV = EdgeCoord;
-                }
-                break;
-                
-            case 1: // 90° horario
-                if (CrossDirection == ENeighborDirection::Up)
-                {
-                    RotatedU = 0;
-                    RotatedV = MaxIdx - EdgeCoord;
-                }
-                else if (CrossDirection == ENeighborDirection::Down)
-                {
-                    RotatedU = MaxIdx;
-                    RotatedV = MaxIdx - EdgeCoord;
-                }
-                else if (CrossDirection == ENeighborDirection::Left)
-                {
-                    RotatedU = EdgeCoord;
-                    RotatedV = 0;
-                }
-                else // Right
-                {
-                    RotatedU = MaxIdx - EdgeCoord;
-                    RotatedV = MaxIdx;
-                }
-                break;
-                
-            case 2: // 180°
-                if (CrossDirection == ENeighborDirection::Up)
-                {
-                    RotatedU = MaxIdx - EdgeCoord;
-                    RotatedV = MaxIdx;
-                }
-                else if (CrossDirection == ENeighborDirection::Down)
-                {
-                    RotatedU = MaxIdx - EdgeCoord;
-                    RotatedV = 0;
-                }
-                else if (CrossDirection == ENeighborDirection::Left)
-                {
-                    RotatedU = 0;
-                    RotatedV = MaxIdx - EdgeCoord;
-                }
-                else // Right
-                {
-                    RotatedU = MaxIdx;
-                    RotatedV = MaxIdx - EdgeCoord;
-                }
-                break;
-                
-            case 3: // 270° horario (90° antihorario)
-                if (CrossDirection == ENeighborDirection::Up)
-                {
-                    RotatedU = MaxIdx;
-                    RotatedV = EdgeCoord;
-                }
-                else if (CrossDirection == ENeighborDirection::Down)
-                {
-                    RotatedU = 0;
-                    RotatedV = EdgeCoord;
-                }
-                else if (CrossDirection == ENeighborDirection::Left)
-                {
-                    RotatedU = MaxIdx - EdgeCoord;
-                    RotatedV = MaxIdx;
-                }
-                else // Right
-                {
-                    RotatedU = EdgeCoord;
-                    RotatedV = 0;
-                }
-                break;
-        }
-        
-        NewU = RotatedU;
-        NewV = RotatedV;
-    }
-    
-    return FCubeSphereCell(NewFace, NewU, NewV);
+
+    return Cell;
 }
 
 TArray<FCubeSphereCell> UCubeSphereGrid::GetAllNeighbors(const FCubeSphereCell& Cell) const
@@ -552,14 +348,45 @@ ECSCubeFace UCubeSphereGrid::CartesianToFaceUV(const FVector& Point, FVector2D& 
     return Face;
 }
 
+// ============================================================
+// VECINDAD ENTRE CELDAS, INCLUIDO EL CRUCE ENTRE CARAS
+//
+// POR QUE ESTO YA NO USA LA TABLA DE CONEXIONES DE BORDES (15-08-2026):
+//
+// Habia aqui una tabla de 24 entradas (cara, borde) -> (cara vecina, pasos de rotacion)
+// mas un switch de 16 ramas que aplicaba la rotacion a mano. Es justo la clase de codigo
+// que nadie puede verificar leyendolo, y en efecto estaba mal: el test
+// Simu.CubeSphere.AdjacencyContinuity llevaba tiempo en rojo. Peor: M3 "porto la tabla"
+// al QuadTree (CubeSphereQuadTree.cpp:596), creando una segunda copia con los mismos
+// errores - el mismo patron que ya habia pasado con el mapeo de caras (CubeFaceMapping.h).
+//
+// La sustituye pura geometria, que no tiene casos que enumerar:
+//   1. Se toma el centro de la celda destino en coordenadas UV [-1,1] de la cara origen,
+//      SIN recortarlo al rango valido. Si el vecino cae fuera de la cara, U o V se salen.
+//   2. FaceUVToCubePoint sigue devolviendo un punto correcto en el plano de esa cara
+//      aunque U,V esten fuera de [-1,1]: es un punto del plano, fuera del cuadrado. Su
+//      direccion desde el centro del planeta es exacta de todos modos.
+//   3. DirectionToFaceUV reproyecta esa direccion y devuelve la cara que de verdad la
+//      contiene, con sus U,V correctos. La rotacion relativa entre caras sale sola.
+//
+// Exacto para |DX|,|DY| <= 1 (un paso, incluidas diagonales). Con saltos mayores que
+// crucen mas de una cara el resultado dejaria de tener sentido, pero no hay ningun caller
+// que lo haga.
+//
+// LO QUE ESTE CODIGO NO GARANTIZA, y no es un bug: en un cubo, cruzar un borde hacia
+// arriba y luego "hacia abajo" NO devuelve a la celda de partida cuando las dos caras
+// estan rotadas entre si (el +V de una cara puede ser el +U de la vecina). Eso es la
+// geometria del cubo, no un defecto. La propiedad que si se cumple, y que es la que
+// necesitan los algoritmos de vecindad (drenaje en F4), es la reciprocidad: si B es
+// vecina de A, A esta entre las vecinas de B. Ver Tests/CubeSphereGridTests.cpp.
+// ============================================================
 bool UCubeSphereGrid::GetNeighborCell(ECSCubeFace Face, int32 X, int32 Y, int32 DX, int32 DY,
                                        ECSCubeFace& OutFace, int32& OutX, int32& OutY) const
 {
-    // Calcular nueva posición
-    int32 NewX = X + DX;
-    int32 NewY = Y + DY;
-    
-    // Si está dentro de la misma cara, devolver directamente
+    const int32 NewX = X + DX;
+    const int32 NewY = Y + DY;
+
+    // Caso trivial: el vecino sigue dentro de la misma cara
     if (NewX >= 0 && NewX < Resolution && NewY >= 0 && NewY < Resolution)
     {
         OutFace = Face;
@@ -567,164 +394,28 @@ bool UCubeSphereGrid::GetNeighborCell(ECSCubeFace Face, int32 X, int32 Y, int32 
         OutY = NewY;
         return true;
     }
-    
-    // Necesitamos cruzar a otra cara
-    // Determinar la dirección del cruce
-    ENeighborDirection CrossDir;
-    
-    if (NewY >= Resolution)
+
+    if (Resolution <= 0)
     {
-        CrossDir = ENeighborDirection::Up;
+        return false;
     }
-    else if (NewY < 0)
+
+    // Centro de la celda destino en UV [-1,1] de la cara origen, deliberadamente sin
+    // recortar: es lo que permite que el paso 2 detecte el cruce.
+    const float U = (static_cast<float>(NewX) + 0.5f) / static_cast<float>(Resolution) * 2.0f - 1.0f;
+    const float V = (static_cast<float>(NewY) + 0.5f) / static_cast<float>(Resolution) * 2.0f - 1.0f;
+
+    const FVector Dir = CubeFaceMapping::FaceUVToCubePoint(Face, U, V).GetSafeNormal();
+    if (Dir.IsNearlyZero())
     {
-        CrossDir = ENeighborDirection::Down;
+        return false;
     }
-    else if (NewX < 0)
-    {
-        CrossDir = ENeighborDirection::Left;
-    }
-    else // NewX >= Resolution
-    {
-        CrossDir = ENeighborDirection::Right;
-    }
-    
-    // Obtener la conexión de borde
-    FFaceEdgeConnection Connection = GetEdgeConnection(Face, CrossDir);
-    OutFace = Connection.NeighborFace;
-    
-    // La posición dentro de la cara depende de la rotación
-    // Primero, normalizar la posición a [0, Resolution-1] en la dirección del borde
-    int32 EdgePos;
-    switch (CrossDir)
-    {
-        case ENeighborDirection::Up:
-            EdgePos = NewX;
-            break;
-        case ENeighborDirection::Down:
-            EdgePos = NewX;
-            break;
-        case ENeighborDirection::Left:
-            EdgePos = NewY;
-            break;
-        case ENeighborDirection::Right:
-            EdgePos = NewY;
-            break;
-        default:
-            EdgePos = 0;
-    }
-    
-    // Aplicar rotación según la conexión
-    // RotationSteps indica cuántas rotaciones de 90° en sentido horario
-    int32 RotatedPos;
-    
-    switch (Connection.RotationSteps)
-    {
-        case 0: // Sin rotación
-            RotatedPos = EdgePos;
-            if (CrossDir == ENeighborDirection::Up)
-            {
-                OutX = EdgePos;
-                OutY = 0;
-            }
-            else if (CrossDir == ENeighborDirection::Down)
-            {
-                OutX = EdgePos;
-                OutY = Resolution - 1;
-            }
-            else if (CrossDir == ENeighborDirection::Left)
-            {
-                OutX = Resolution - 1;
-                OutY = EdgePos;
-            }
-            else // Right
-            {
-                OutX = 0;
-                OutY = EdgePos;
-            }
-            break;
-            
-        case 1: // 90° CW
-            RotatedPos = Resolution - 1 - EdgePos;
-            if (CrossDir == ENeighborDirection::Up)
-            {
-                OutX = Resolution - 1;
-                OutY = EdgePos;
-            }
-            else if (CrossDir == ENeighborDirection::Down)
-            {
-                OutX = 0;
-                OutY = Resolution - 1 - EdgePos;
-            }
-            else if (CrossDir == ENeighborDirection::Left)
-            {
-                OutX = EdgePos;
-                OutY = Resolution - 1;
-            }
-            else
-            {
-                OutX = Resolution - 1 - EdgePos;
-                OutY = 0;
-            }
-            break;
-            
-        case 2: // 180°
-            RotatedPos = Resolution - 1 - EdgePos;
-            if (CrossDir == ENeighborDirection::Up)
-            {
-                OutX = Resolution - 1 - EdgePos;
-                OutY = Resolution - 1;
-            }
-            else if (CrossDir == ENeighborDirection::Down)
-            {
-                OutX = Resolution - 1 - EdgePos;
-                OutY = 0;
-            }
-            else if (CrossDir == ENeighborDirection::Left)
-            {
-                OutX = 0;
-                OutY = Resolution - 1 - EdgePos;
-            }
-            else
-            {
-                OutX = Resolution - 1;
-                OutY = Resolution - 1 - EdgePos;
-            }
-            break;
-            
-        case 3: // 270° CW = 90° CCW
-            RotatedPos = EdgePos;
-            if (CrossDir == ENeighborDirection::Up)
-            {
-                OutX = 0;
-                OutY = Resolution - 1 - EdgePos;
-            }
-            else if (CrossDir == ENeighborDirection::Down)
-            {
-                OutX = Resolution - 1;
-                OutY = EdgePos;
-            }
-            else if (CrossDir == ENeighborDirection::Left)
-            {
-                OutX = Resolution - 1 - EdgePos;
-                OutY = 0;
-            }
-            else
-            {
-                OutX = EdgePos;
-                OutY = Resolution - 1;
-            }
-            break;
-            
-        default:
-            OutX = 0;
-            OutY = 0;
-            break;
-    }
-    
-    // Validar resultado
-    OutX = FMath::Clamp(OutX, 0, Resolution - 1);
-    OutY = FMath::Clamp(OutY, 0, Resolution - 1);
-    
+
+    float NeighborU, NeighborV;
+    CubeFaceMapping::DirectionToFaceUV(Dir, OutFace, NeighborU, NeighborV);
+
+    OutX = FMath::Clamp(FMath::FloorToInt((NeighborU + 1.0f) * 0.5f * Resolution), 0, Resolution - 1);
+    OutY = FMath::Clamp(FMath::FloorToInt((NeighborV + 1.0f) * 0.5f * Resolution), 0, Resolution - 1);
+
     return true;
 }

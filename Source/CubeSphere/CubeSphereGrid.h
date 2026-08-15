@@ -170,14 +170,6 @@ public:
     UFUNCTION(BlueprintCallable, Category = "CubeSphere|Adjacency")
     bool IsBorderCell(const FCubeSphereCell& Cell) const;
 
-    /**
-     * Obtiene la información de conexión de bordes para una cara
-     * @param Face - Cara del cubo
-     * @param Direction - Dirección del borde
-     * @return Información de conexión con la cara vecina
-     */
-    FFaceEdgeConnection GetEdgeConnection(ECSCubeFace Face, ENeighborDirection Direction) const;
-
     // ============================================================
     // CORRECCIÓN MÉTRICA
     // ============================================================
@@ -294,11 +286,10 @@ protected:
     float PlanetRadius;
 
 private:
-    // Tabla de conexiones de bordes entre caras (precalculada)
-    TStaticArray<TStaticArray<FFaceEdgeConnection, 4>, 6> EdgeConnections;
-
-    // Inicializa la tabla de conexiones de bordes
-    void InitializeEdgeConnections();
+    // NOTA (15-08-2026): aqui vivian EdgeConnections (tabla de 24 entradas cara/borde ->
+    // cara vecina + rotacion) e InitializeEdgeConnections. Eliminadas: GetNeighborCell
+    // resuelve el cruce entre caras por geometria y no necesita tabla. Ver su comentario
+    // en el .cpp para el porque.
 
     // Convierte coordenadas UV y cara a punto en el cubo [-1, 1]
     FVector FaceUVToCubePoint(ECSCubeFace Face, const FVector2D& UV) const;

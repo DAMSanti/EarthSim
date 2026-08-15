@@ -181,7 +181,29 @@ bool FCubeSphereGridBasicTest::RunTest(const FString& Parameters)
 // ============================================================
 // TEST DE CONTINUIDAD DE ADYACENCIA
 // ============================================================
-// Verifica que la navegación por toda la esfera sea continua
+// POR QUE ESTE TEST SE REESCRIBIO POR COMPLETO (15-08-2026):
+//
+// La version anterior afirmaba que ir "arriba" desde una celda de borde y luego "abajo"
+// desde la vecina debia devolver a la celda de partida. Llevaba tiempo fallando con 124
+// errores de 192 comprobaciones, y se estaba tratando como un bug de UCubeSphereGrid.
+//
+// El problema es que esa propiedad ES FALSA en un cubo, y ninguna implementacion correcta
+// puede satisfacerla. Al cruzar de la cara +X hacia arriba se entra en +Z, pero se entra
+// por el borde +U de +Z, no por su borde -V: el eje +V de +X es el eje +U de +Z. Desde
+// alli, "abajo" en el marco local de +Z no lleva de vuelta a +X, lleva hacia -Y. Solo las
+// adyacencias sin rotacion relativa (las de la cara +Y con los polos) cumplian el
+// ida-y-vuelta, y son exactamente las que pasaban: 64 de 192, mas 4 casos rotados que
+// caian por poco dentro de la tolerancia de 0.2. De ahi los 124 fallos.
+//
+// Lo que si es cierto, y es ademas la propiedad que necesitan los algoritmos que recorren
+// vecindad (el drenaje de F4 tiene que enrutar rios cruzando bordes de cara), es la
+// RECIPROCIDAD: si B es vecina de A en alguna direccion, entonces A es vecina de B en
+// alguna direccion. Eso vale para las 24 adyacencias, con rotacion o sin ella.
+//
+// Se comprueban tres invariantes, todas verdaderas en un cubo:
+//   1. Reciprocidad de la relacion de vecindad.
+//   2. Proximidad: una celda vecina esta a ~1 celda de distancia, nunca al otro lado.
+//   3. Distincion: el vecino nunca es la propia celda (salvo que la navegacion falle).
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCubeSphereAdjacencyContinuityTest, 
     "Simu.CubeSphere.AdjacencyContinuity", 
@@ -189,56 +211,81 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCubeSphereAdjacencyContinuityTest,
 
 bool FCubeSphereAdjacencyContinuityTest::RunTest(const FString& Parameters)
 {
+    const int32 Resolution = 16;
     UCubeSphereGrid* Grid = NewObject<UCubeSphereGrid>();
-    Grid->Initialize(16, 1000.0f);  // Resolución baja para test rápido
-    
-    int32 ErrorCount = 0;
-    
-    // Para cada celda de borde, verificar que su vecino tenga un vecino que vuelva a ella
-    for (int32 FaceIdx = 0; FaceIdx < 6; FaceIdx++)
+    Grid->Initialize(Resolution, 1000.0f);
+
+    const ENeighborDirection Directions[4] = {
+        ENeighborDirection::Up, ENeighborDirection::Down,
+        ENeighborDirection::Left, ENeighborDirection::Right
+    };
+
+    // Una celda mide ~(pi/2)/Resolution radianes de lado. Como cuerda sobre la esfera
+    // unitaria eso es ~0.098 con Resolution=16. Se admite hasta 2.5 celdas para absorber
+    // la distorsion gnomonica cerca de las esquinas del cubo, donde las celdas se estiran.
+    const float CellArc = (PI * 0.5f) / Resolution;
+    const float MaxNeighborDistance = CellArc * 2.5f;
+
+    int32 ReciprocityErrors = 0;
+    int32 ProximityErrors = 0;
+    int32 SelfNeighborErrors = 0;
+    int32 Checks = 0;
+
+    for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
     {
-        ECSCubeFace Face = static_cast<ECSCubeFace>(FaceIdx);
-        
-        // Probar bordes de esta cara
-        for (int32 i = 0; i < 16; i++)
+        const ECSCubeFace Face = static_cast<ECSCubeFace>(FaceIdx);
+
+        for (int32 V = 0; V < Resolution; ++V)
         {
-            // Borde superior (V = 15)
+            for (int32 U = 0; U < Resolution; ++U)
             {
-                FCubeSphereCell Cell(Face, i, 15);
-                FCubeSphereCell Neighbor = Grid->GetNeighbor(Cell, ENeighborDirection::Up);
-                FCubeSphereCell BackNeighbor = Grid->GetNeighbor(Neighbor, ENeighborDirection::Down);
-                
-                // BackNeighbor debería ser Cell o estar muy cerca espacialmente
-                FVector OriginalPos = Grid->CellToPoint(Cell).GetSafeNormal();
-                FVector BackPos = Grid->CellToPoint(BackNeighbor).GetSafeNormal();
-                float Distance = FVector::Distance(OriginalPos, BackPos);
-                
-                if (Distance > 0.2f)  // Tolerancia para celdas adyacentes
+                const FCubeSphereCell Cell(Face, U, V);
+                const FVector CellPos = Grid->CellToPoint(Cell).GetSafeNormal();
+
+                for (int32 DirIdx = 0; DirIdx < 4; ++DirIdx)
                 {
-                    ErrorCount++;
-                }
-            }
-            
-            // Borde inferior (V = 0)
-            {
-                FCubeSphereCell Cell(Face, i, 0);
-                FCubeSphereCell Neighbor = Grid->GetNeighbor(Cell, ENeighborDirection::Down);
-                FCubeSphereCell BackNeighbor = Grid->GetNeighbor(Neighbor, ENeighborDirection::Up);
-                
-                FVector OriginalPos = Grid->CellToPoint(Cell).GetSafeNormal();
-                FVector BackPos = Grid->CellToPoint(BackNeighbor).GetSafeNormal();
-                float Distance = FVector::Distance(OriginalPos, BackPos);
-                
-                if (Distance > 0.2f)
-                {
-                    ErrorCount++;
+                    const FCubeSphereCell Neighbor = Grid->GetNeighbor(Cell, Directions[DirIdx]);
+                    ++Checks;
+
+                    // 3. El vecino no puede ser la propia celda
+                    if (Neighbor.Face == Cell.Face && Neighbor.U == Cell.U && Neighbor.V == Cell.V)
+                    {
+                        ++SelfNeighborErrors;
+                        continue;
+                    }
+
+                    // 2. Proximidad geometrica
+                    const FVector NeighborPos = Grid->CellToPoint(Neighbor).GetSafeNormal();
+                    if (FVector::Distance(CellPos, NeighborPos) > MaxNeighborDistance)
+                    {
+                        ++ProximityErrors;
+                    }
+
+                    // 1. Reciprocidad: la celda original debe estar entre las 4 vecinas
+                    //    de su vecina, en alguna direccion (no necesariamente la opuesta)
+                    bool bReciprocal = false;
+                    for (int32 BackIdx = 0; BackIdx < 4 && !bReciprocal; ++BackIdx)
+                    {
+                        const FCubeSphereCell Back = Grid->GetNeighbor(Neighbor, Directions[BackIdx]);
+                        bReciprocal = (Back.Face == Cell.Face && Back.U == Cell.U && Back.V == Cell.V);
+                    }
+
+                    if (!bReciprocal)
+                    {
+                        ++ReciprocityErrors;
+                    }
                 }
             }
         }
     }
-    
-    TestEqual(TEXT("No adjacency continuity errors"), ErrorCount, 0);
-    
+
+    AddInfo(FString::Printf(TEXT("%d comprobaciones de vecindad sobre %d celdas"),
+        Checks, 6 * Resolution * Resolution));
+
+    TestEqual(TEXT("El vecino nunca es la propia celda"), SelfNeighborErrors, 0);
+    TestEqual(TEXT("Todo vecino esta a ~1 celda de distancia"), ProximityErrors, 0);
+    TestEqual(TEXT("La relacion de vecindad es reciproca"), ReciprocityErrors, 0);
+
     return true;
 }
 
