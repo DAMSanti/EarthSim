@@ -472,6 +472,17 @@ float URasterizedTectonics::GetLandFraction() const
     return (Total > 0) ? (static_cast<float>(Land) / static_cast<float>(Total)) : 0.0f;
 }
 
+namespace
+{
+    // Media movil exponencial. El coste por paso varia mucho (la adveccion no entra en
+    // todos), y un valor instantaneo en pantalla seria ilegible.
+    void AccumulateMs(float& Slot, double StartSeconds)
+    {
+        const float Ms = static_cast<float>((FPlatformTime::Seconds() - StartSeconds) * 1000.0);
+        Slot = FMath::Lerp(Slot, Ms, 0.15f);
+    }
+}
+
 float URasterizedTectonics::GetPixelAngularSize() const
 {
     // Una cara abarca 90 grados repartidos en Resolution pixeles. Es una aproximacion:
@@ -526,6 +537,8 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
     {
         return;
     }
+
+    const double AdvectionStart = FPlatformTime::Seconds();
 
     const TArray<FTectonicPlate>& Plates = PlateSystem->GetPlates();
     const int32 NumPlates = Plates.Num();
@@ -712,9 +725,33 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
                     }
                     else
                     {
-                        // Hueco aislado: artefacto del remuestreo, no fisica. Se conserva
-                        // lo que ya habia en esta celda. Crear oceano aqui es lo que
-                        // disolvia los continentes desde dentro.
+                        // Hueco aislado: artefacto del remuestreo, no fisica.
+                        //
+                        // TRILEMA DOCUMENTADO (16-08-2026). Ninguna de las tres salidas es
+                        // buena, porque la celda no deberia existir. Medido en
+                        // Simu.Tectonics.LongRunStability, 1000 Ma, partiendo de 24,6% de
+                        // tierra emergida:
+                        //
+                        //   a) crear oceano       -> los continentes se disuelven desde
+                        //                            dentro. Tierra al 8,9%.
+                        //   b) rellenar del vecindario -> como los huecos salen sobre todo
+                        //                            en margenes continentales, el vecino
+                        //                            suele ser oceano. Tierra al 11,3%
+                        //                            (12,1% prefiriendo la misma placa).
+                        //   c) conservar el estado -> tierra estable en 25,1%, pero las
+                        //                            celdas se congelan: mantienen corteza
+                        //                            vieja mientras su entorno se renueva,
+                        //                            y se ven como cordones elevados que
+                        //                            no envejecen ni se reciclan.
+                        //
+                        // Se elige (c): un artefacto visual localizado es preferible a
+                        // perder la mitad de los continentes. Pero es una eleccion entre
+                        // males, no una solucion.
+                        //
+                        // La solucion de verdad es que estos huecos NO EXISTAN, y eso pide
+                        // reescribir la adveccion en coordenadas materiales en vez de
+                        // remuestrear el campo en cada paso. Ver el apartado de defectos
+                        // abiertos en ROADMAP.md.
                         Face.PlateIDData[Idx]        = PreviousOwner;
                         Face.CrustTypeData[Idx]      = Prev[FaceIdx].CrustTypeData[Idx];
                         Face.CrustAgeData[Idx]       = Prev[FaceIdx].CrustAgeData[Idx];
@@ -861,6 +898,7 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
     // recorrido, y se arrastran tambien tipo, edad y grosor: dejar el ID corregido pero
     // los datos del vecino equivocado seria peor que no tocar nada.
     {
+        const double DespeckleStart = FPlatformTime::Seconds();
         const TArray<FTectonicFaceTextureData> Speckled = FaceData;
 
         ParallelFor(6, [&](int32 FaceIdx)
@@ -933,6 +971,8 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
                 }
             }
         });
+
+        AccumulateMs(StepTimings.DespeckleMs, DespeckleStart);
     }
 
     for (const FFaceCounters& C : Counters)
@@ -944,6 +984,8 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
     }
     AdvectionStats.AdvectionCount++;
     AdvectionStats.AdvectedTime += DeltaTime;
+
+    AccumulateMs(StepTimings.AdvectionMs, AdvectionStart);
 }
 
 void URasterizedTectonics::Step(const FPlateMovementParams& Params)
@@ -1061,6 +1103,7 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
     {
         // Procesar cada cara. ParallelFor por cara: cada hilo solo escribe en la suya,
         // asi que no hay carrera.
+        const double BoundaryStart = FPlatformTime::Seconds();
         ParallelFor(6, [&](int32 FaceIdx)
         {
             FTectonicFaceTextureData& Face = FaceData[FaceIdx];
@@ -1139,6 +1182,9 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
                 }
             }
         });
+        AccumulateMs(StepTimings.BoundaryMs, BoundaryStart);
+
+        const double DiffusionStart = FPlatformTime::Seconds();
 
         // ============================================================
         // RELAJACION DIFUSIVA (thermal erosion / mass wasting)
@@ -1227,15 +1273,19 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
                 });
             }
         }
+
+        AccumulateMs(StepTimings.DiffusionMs, DiffusionStart);
     }
 
     // La elevacion es DERIVADA desde F2: se reconstruye desde grosor, edad y tipo tras
     // cada paso. Nada la modifica directamente.
+    const double IsostasyStart = FPlatformTime::Seconds();
     RebuildElevationFromIsostasy(Params.Isostasy);
 
     // Y el nivel del mar responde: si las dorsales son jovenes la cuenca oceanica es menos
     // honda y el agua desplazada inunda los continentes.
     UpdateSeaLevel();
+    AccumulateMs(StepTimings.IsostasyMs, IsostasyStart);
 
     TotalSimulationTime += DeltaTimeScaled;
     StepCount++;

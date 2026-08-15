@@ -230,6 +230,29 @@ Causa real: en una colisión la continental gana y la celda de destino pasa a se
 
 Acota la gravedad: la **fracción de tierra emergida sí es estable** (24,6 % → 24,6 % en 1000 Ma), así que el exceso es plataforma sumergida, no continentes desbordando el planeta.
 
+### 🔴 Cordones de corteza congelada — trilema sin salida buena
+
+Detectado por el usuario en pantalla: líneas elevadas que atraviesan el océano nuevo y **no envejecen ni se reciclan nunca**, uniendo continentes.
+
+Son celdas que la advección deja sin resolver: huecos de remuestreo que no son rift. Y no hay ninguna salida buena, porque **esas celdas no deberían existir**. Medido en `Simu.Tectonics.LongRunStability` (1000 Ma, partiendo de 24,6 % de tierra emergida):
+
+| Qué hacer con el hueco | Tierra emergida | Problema |
+|---|---|---|
+| Crear océano | **8,9 %** | Los continentes se disuelven desde dentro |
+| Rellenar del vecindario | **11,3 %** | Los huecos salen en márgenes continentales, donde el vecino suele ser océano |
+| Rellenar prefiriendo la misma placa | **12,1 %** | Apenas mejora: el vecindario vivo sigue siendo océano |
+| **Conservar el estado** ✅ | **25,1 %** | Se congelan: mantienen corteza vieja mientras el entorno se renueva → los cordones |
+
+Elegido conservar: un artefacto visual localizado es preferible a perder la mitad de los continentes. Pero es **una elección entre males, no una solución**.
+
+### ⚠️ La métrica del escalonado es insuficiente
+
+`Frontera: ×2,02` mejoró respecto a ×3,15, pero las capturas siguen mostrando placas con forma de bloque rectangular. Un borde escalonado en bloques grandes es **más corto** que uno en peine fino, así que la métrica puede mejorar mientras el resultado sigue siendo igual de artificial. Hay que sustituirla por algo que mida *rectitud antinatural*, no solo longitud.
+
+### Un test que no comprobaba nada, otra vez
+
+`LongRunStability` acotaba la tierra emergida **solo por arriba**, así que dejó pasar un desplome del 24,6 % al 11,3 % sin decir una palabra. Ya está con cota por los dos lados. Es el tercer caso en dos sesiones: **un límite de un solo lado en una magnitud que puede irse en ambos no es un test, es media comprobación.**
+
 ### 🟢 Lo que sí es legítimo diferir
 
 - **Detalle sub-celda del relieve** → F4 lo aporta de verdad: la erosión hidráulica esculpe a escala menor que la celda tectónica.

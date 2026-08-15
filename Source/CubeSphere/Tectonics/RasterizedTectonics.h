@@ -225,6 +225,40 @@ struct CUBESPHERE_API FFractalNoiseParams
 };
 
 /**
+ * Coste por fase del paso de simulación, en milisegundos.
+ *
+ * Existe porque tras el primer intento de optimizar por intuición el coste SUBIÓ (81,9 a
+ * 102,8 ms). Sin desglose no hay forma de saber si el tiempo se va en la advección, en el
+ * barrido de fronteras, en la difusión o en la isostasia, y cada una se arregla de forma
+ * distinta. Medir antes de tocar.
+ */
+USTRUCT(BlueprintType)
+struct CUBESPHERE_API FTectonicStepTimings
+{
+    GENERATED_BODY()
+
+    /** Advección del campo de placas. No corre en todos los pasos. */
+    UPROPERTY(BlueprintReadOnly)
+    float AdvectionMs = 0.0f;
+
+    /** Limpieza de motas, dentro de la advección. */
+    UPROPERTY(BlueprintReadOnly)
+    float DespeckleMs = 0.0f;
+
+    /** Barrido de fronteras: detección de convergencia y engrosamiento. */
+    UPROPERTY(BlueprintReadOnly)
+    float BoundaryMs = 0.0f;
+
+    /** Relajación difusiva del grosor de corteza. */
+    UPROPERTY(BlueprintReadOnly)
+    float DiffusionMs = 0.0f;
+
+    /** Elevación derivada por isostasia más resolución del nivel del mar. */
+    UPROPERTY(BlueprintReadOnly)
+    float IsostasyMs = 0.0f;
+};
+
+/**
  * Contabilidad de la advección de placas (ROADMAP.md F1).
  * Sirve para verificar conservación de corteza: lo creado en dorsales debe compensar
  * aproximadamente lo destruido en subducción, o el planeta gana/pierde superficie.
@@ -339,6 +373,10 @@ public:
 
     UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics")
     FTectonicAdvectionStats GetAdvectionStats() const { return AdvectionStats; }
+
+    /** Desglose de coste del último paso, por fase. */
+    UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics")
+    FTectonicStepTimings GetStepTimings() const { return StepTimings; }
 
     /**
      * Elevación de equilibrio isostático de una columna de corteza (m).
@@ -531,6 +569,9 @@ protected:
     int32 StepCount = 0;
 
     FTectonicAdvectionStats AdvectionStats;
+
+    /** Coste por fase, con media móvil para que sea legible en pantalla. */
+    FTectonicStepTimings StepTimings;
 
     /** Nivel del mar (m). Se resuelve por bisección para conservar volumen de océano. */
     float SeaLevel = 0.0f;

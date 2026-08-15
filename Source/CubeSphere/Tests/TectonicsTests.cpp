@@ -929,8 +929,14 @@ bool FLongRunStabilityTest::RunTest(const FString& Parameters)
 
     // Y la fraccion de tierra emergida tiene que seguir siendo la de un planeta, no la de
     // un continente global.
-    TestTrue(FString::Printf(TEXT("La tierra emergida sigue siendo plausible (%.1f%%)"), LandAfter * 100.0f),
+    // Cota por los DOS lados, y esto es una correccion: la version anterior solo acotaba
+    // por arriba, asi que dejo pasar un desplome del 24,6% al 11,3% sin decir nada. Un
+    // limite de un solo lado en una magnitud que puede irse en ambos no es un test, es
+    // media comprobacion.
+    TestTrue(FString::Printf(TEXT("La tierra emergida no se desborda (%.1f%%)"), LandAfter * 100.0f),
         LandAfter < 0.60f);
+    TestTrue(FString::Printf(TEXT("La tierra emergida no colapsa (%.1f%% desde %.1f%%)"),
+        LandAfter * 100.0f, LandBefore * 100.0f), LandAfter > LandBefore * 0.6f);
 
     // EL PEINE. Esta cota NO es un objetivo cumplido: documenta un defecto medido.
     //

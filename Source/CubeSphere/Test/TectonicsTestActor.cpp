@@ -1087,6 +1087,7 @@ void ATectonicsTestActor::DrawScreenDebugInfo()
         TEXT("[V] Velocidades | [B] Límites\n")
         TEXT("Corteza: +%d creada / -%d destruida (%d advecciones)\n")
         TEXT("Coste: sim %.1f ms @%.0f Hz | malla %.1f ms @%.0f Hz\n")
+        TEXT("  adv %.1f (motas %.1f) front %.1f dif %.1f iso %.1f ms\n")
         TEXT("[F/G] Campo | [U] %s\n")
         TEXT("%s"),
         SimulationTime,
@@ -1102,6 +1103,11 @@ void ATectonicsTestActor::DrawScreenDebugInfo()
         SimulationStepsPerSecond,
         AvgMeshUpdateMs,
         MeshUpdateHz,
+        RasterizedTectonics ? RasterizedTectonics->GetStepTimings().AdvectionMs : 0.0f,
+        RasterizedTectonics ? RasterizedTectonics->GetStepTimings().DespeckleMs : 0.0f,
+        RasterizedTectonics ? RasterizedTectonics->GetStepTimings().BoundaryMs : 0.0f,
+        RasterizedTectonics ? RasterizedTectonics->GetStepTimings().DiffusionMs : 0.0f,
+        RasterizedTectonics ? RasterizedTectonics->GetStepTimings().IsostasyMs : 0.0f,
         bUnlitFieldView ? TEXT("unlit") : TEXT("iluminado"),
         FieldRegistry ? *FieldRegistry->GetLegendText() : TEXT("(sin visor)")
     );
