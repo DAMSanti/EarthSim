@@ -299,6 +299,23 @@ struct CUBESPHERE_API FTectonicAdvectionStats
     UPROPERTY(BlueprintReadOnly)
     int32 CollisionCells = 0;
 
+    /**
+     * Celdas recuperadas por la búsqueda con tolerancia de media celda: pertenecían a una
+     * placa pero el redondeo al centro de celda más cercano las dejaba fuera de su región.
+     * No son física, son error de búsqueda.
+     */
+    UPROPERTY(BlueprintReadOnly)
+    int32 CellsRecovered = 0;
+
+    /**
+     * Celdas que ni la búsqueda estricta ni la tolerante consiguieron resolver y que
+     * tampoco son rift. Deberían ser prácticamente cero: cada una es una celda que se
+     * queda con su contenido anterior mientras su entorno se renueva, y en cuanto una
+     * misma celda falla repetidamente se convierte en un cordón de corteza congelada.
+     */
+    UPROPERTY(BlueprintReadOnly)
+    int32 CellsUnresolved = 0;
+
     /** Cuántas veces se ha ejecutado la advección desde el inicio. */
     UPROPERTY(BlueprintReadOnly)
     int32 AdvectionCount = 0;

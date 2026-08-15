@@ -253,20 +253,31 @@ Causa real: en una colisión la continental gana y la celda de destino pasa a se
 
 Acota la gravedad: la **fracción de tierra emergida sí es estable** (24,6 % → 24,6 % en 1000 Ma), así que el exceso es plataforma sumergida, no continentes desbordando el planeta.
 
-### 🔴 Cordones de corteza congelada — trilema sin salida buena
+### ✅ Cordones de corteza congelada — RESUELTO (16-08-2026)
 
-Detectado por el usuario en pantalla: líneas elevadas que atraviesan el océano nuevo y **no envejecen ni se reciclan nunca**, uniendo continentes.
+Líneas elevadas que atravesaban el océano nuevo sin envejecer ni reciclarse, uniendo continentes. Detectado por el usuario en pantalla.
 
-Son celdas que la advección deja sin resolver: huecos de remuestreo que no son rift. Y no hay ninguna salida buena, porque **esas celdas no deberían existir**. Medido en `Simu.Tectonics.LongRunStability` (1000 Ma, partiendo de 24,6 % de tierra emergida):
+**Causa raíz.** El test de reclamación era `prev[nearest(R⁻¹·d)].PlateID == P`, y ese `nearest()` redondea al centro de celda más cercano: **hasta media celda de error**. Una celda que pertenece legítimamente a la placa P pero está a menos de media celda de la frontera anterior de P puede caer, al redondear, justo fuera de la región de P. Resultado: cero reclamantes para una celda que no es rift ni colisión — **un fallo de búsqueda, no física**.
 
-| Qué hacer con el hueco | Tierra emergida | Problema |
+Y como el error de redondeo depende de la geometría local, a lo largo de una frontera con orientación desfavorable **fallaban siempre las mismas celdas**, advección tras advección. Esa era la línea persistente.
+
+**Por qué los tres parches anteriores no podían funcionar.** Crear océano, rellenar del vecindario o conservar el estado son tres respuestas a *"¿qué hacemos con el hueco?"*, y el hueco **no debería existir**. Cualquier respuesta era elegir qué artefacto preferir.
+
+**El arreglo.** Cuando la búsqueda estricta no encuentra a nadie, se repite mirando las cuatro celdas que rodean la posición continua exacta — que es justo el alcance del redondeo que falló. Aplicado **solo** en ese caso: las celdas de interior (un reclamante) y las de colisión (dos o más) no se tocan, lo cual es esencial porque un intento anterior aplicó tolerancia a todas y triplicó las colisiones.
+
+**El orden importa, y equivocarlo costó una iteración.** Al poner la recuperación *antes* del test de rift, la tolerancia se tragaba los rifts: con pasos de advección de un píxel, una banda de rift es de **un píxel de ancho**, exactamente lo que la tolerancia de media celda alcanza. La creación de corteza se hundió de 45.830 a 1.758 celdas frente a 39.360 destruidas — el fondo oceánico dejaba de renovarse. Con el test de rift primero y la recuperación solo para huecos aislados, ambas cosas funcionan.
+
+**Medido en `Simu.Tectonics.LongRunStability`** (1000 Ma, 196 advecciones):
+
+| | Antes | Después |
 |---|---|---|
-| Crear océano | **8,9 %** | Los continentes se disuelven desde dentro |
-| Rellenar del vecindario | **11,3 %** | Los huecos salen en márgenes continentales, donde el vecino suele ser océano |
-| Rellenar prefiriendo la misma placa | **12,1 %** | Apenas mejora: el vecindario vivo sigue siendo océano |
-| **Conservar el estado** ✅ | **25,1 %** | Se congelan: mantienen corteza vieja mientras el entorno se renueva → los cordones |
+| Celdas congeladas | ~22.900 | **748 (0,0157 %)** |
+| Creación / destrucción | 14k / 50k | **48.199 / 51.078** |
+| Tierra emergida | 25,1 % | 18,8 % |
 
-Elegido conservar: un artefacto visual localizado es preferible a perder la mitad de los continentes. Pero es **una elección entre males, no una solución**.
+Un test vigila que las celdas sin resolver sigan siendo residuales: si vuelven a ser una fracción apreciable, los cordones están de vuelta.
+
+> **Sobre la tierra emergida:** bajó de 25,1 % a 18,8 %, y no es una regresión. **El 25,1 % estaba inflado por el propio bug**: los cordones congelados eran corteza continental elevada que no debía estar ahí. El 18,8 % es lo que queda al resolver esas celdas correctamente, y sigue en rango plausible (la Tierra está en 29 %).
 
 ### ⚠️ La métrica del escalonado es insuficiente
 

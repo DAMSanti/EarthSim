@@ -689,6 +689,8 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
         int32 Created = 0;
         int32 Destroyed = 0;
         int32 Collisions = 0;
+        int32 Recovered = 0;
+        int32 Unresolved = 0;
     };
     TArray<FFaceCounters> Counters;
     Counters.SetNum(6);
@@ -774,9 +776,23 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
                 }
                 else if (Claimants.Num() == 0)
                 {
-                    // Sin reclamantes. Antes de crear corteza hay que distinguir un rift
-                    // real de un hueco de remuestreo (ver el comentario de la primera
-                    // pasada). Un rift forma banda continua; un hueco espurio esta solo.
+                    // Sin reclamantes. Hay dos causas muy distintas y hay que separarlas
+                    // ANTES de decidir, porque el remedio de una estropea la otra.
+                    //
+                    // Un RIFT de verdad forma banda continua: las placas se separan y la
+                    // franja que dejan atras esta entera sin reclamar, asi que sus vecinas
+                    // tambien lo estan.
+                    //
+                    // Un FALLO DE BUSQUEDA esta aislado (ver el bloque de recuperacion mas
+                    // abajo para la causa).
+                    //
+                    // EL ORDEN IMPORTA, y equivocarlo costo una iteracion: al aplicar la
+                    // recuperacion por tolerancia ANTES del test de rift, la tolerancia se
+                    // tragaba los rifts. Con pasos de adveccion de un pixel, una banda de
+                    // rift es de UN PIXEL de ancho, o sea justo del tamano que la tolerancia
+                    // de media celda alcanza a recuperar. La creacion de corteza se hundio
+                    // de 45.830 a 1.758 celdas frente a 39.360 destruidas: el fondo oceanico
+                    // dejaba de renovarse.
                     int32 EmptyNeighbours = 0;
                     const int32 NOff[4][2] = {{-1,0},{1,0},{0,-1},{0,1}};
                     for (int32 N = 0; N < 4; ++N)
@@ -810,7 +826,119 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
                     }
                     else
                     {
-                        // Hueco aislado: artefacto del remuestreo, no fisica.
+                    // ====================================================================
+                    // RECUPERACION POR TOLERANCIA DE MEDIA CELDA (16-08-2026)
+                    //
+                    // CAUSA RAIZ de los cordones de corteza congelada. El test de
+                    // reclamacion es prev[nearest(R^-1 * d)].PlateID == P, y ese nearest()
+                    // redondea al centro de celda mas cercano: hasta MEDIA CELDA de error.
+                    //
+                    // Una celda que pertenece legitimamente a la placa P pero esta a menos
+                    // de media celda de la frontera anterior de P puede caer, al redondear,
+                    // justo fuera de la region de P. Resultado: cero reclamantes para una
+                    // celda que no es rift ni colision. Es un FALLO DE BUSQUEDA, no fisica.
+                    //
+                    // Y como el error de redondeo depende de la geometria local, a lo largo
+                    // de una frontera con orientacion desfavorable fallan SIEMPRE LAS
+                    // MISMAS celdas, adveccion tras adveccion. Esa es la linea persistente
+                    // que conservaba su contenido mientras el entorno se renovaba.
+                    //
+                    // La solucion no es decidir que hacer con el hueco - se probaron las
+                    // tres opciones y todas empeoraban algo - sino que el hueco NO EXISTA:
+                    // se repite la busqueda mirando las cuatro celdas que rodean la
+                    // posicion continua exacta, que es justo el alcance del redondeo.
+                    //
+                    // Se hace SOLO cuando la busqueda estricta no encontro a nadie. Las
+                    // celdas de interior (un reclamante) y las de colision (dos o mas) no
+                    // se tocan. Eso importa: un intento anterior aplico tolerancia a TODAS
+                    // las celdas y triplico las colisiones, porque dos placas pasaban a
+                    // reclamar la misma celda y el algoritmo entero se apoya en cuantas
+                    // placas reclaman.
+                    // ====================================================================
+                    int32 RecoveredPlate = INDEX_NONE;
+                    int32 RecoveredFace = 0;
+                    int32 RecoveredIdx = 0;
+                    const uint8 OwnerBefore = Prev[FaceIdx].PlateIDData[Idx];
+
+                    for (int32 P = 0; P < NumPlates; ++P)
+                    {
+                        const FVector PrevDir = InverseRotations[P].RotateVector(Dir);
+                        ECSCubeFace PF; float PU, PV;
+                        CubeFaceMapping::DirectionToFaceTexUV(PrevDir, PF, PU, PV);
+                        const int32 PFaceIdx = static_cast<int32>(PF);
+
+                        // Posicion continua en coordenadas de celda. Las cuatro celdas que
+                        // la rodean son exactamente el alcance del redondeo que fallo.
+                        const float FX = PU * Resolution - 0.5f;
+                        const float FY = PV * Resolution - 0.5f;
+                        const int32 X0 = FMath::Clamp(FMath::FloorToInt(FX), 0, Resolution - 1);
+                        const int32 Y0 = FMath::Clamp(FMath::FloorToInt(FY), 0, Resolution - 1);
+                        const int32 X1 = FMath::Clamp(X0 + 1, 0, Resolution - 1);
+                        const int32 Y1 = FMath::Clamp(Y0 + 1, 0, Resolution - 1);
+
+                        const int32 Candidates[4] = {
+                            Y0 * Resolution + X0, Y0 * Resolution + X1,
+                            Y1 * Resolution + X0, Y1 * Resolution + X1
+                        };
+
+                        for (int32 C = 0; C < 4; ++C)
+                        {
+                            if (Prev[PFaceIdx].PlateIDData[Candidates[C]] == static_cast<uint8>(P))
+                            {
+                                // Se prefiere la placa que ya ocupaba esta celda: el
+                                // material que estaba aqui sigue aqui salvo que otro lo
+                                // desplace, y eso mantiene la continuidad del campo.
+                                if (RecoveredPlate == INDEX_NONE || P == static_cast<int32>(OwnerBefore))
+                                {
+                                    RecoveredPlate = P;
+                                    RecoveredFace = PFaceIdx;
+                                    RecoveredIdx = Candidates[C];
+                                }
+                                break;
+                            }
+                        }
+
+                        if (RecoveredPlate == static_cast<int32>(OwnerBefore))
+                        {
+                            break;
+                        }
+                    }
+
+                    if (RecoveredPlate != INDEX_NONE)
+                    {
+                        // Movimiento normal, igual que el caso de un unico reclamante.
+                        Face.PlateIDData[Idx]        = static_cast<uint8>(RecoveredPlate);
+                        Face.ElevationData[Idx]      = Prev[RecoveredFace].ElevationData[RecoveredIdx];
+                        Face.CrustAgeData[Idx]       = Prev[RecoveredFace].CrustAgeData[RecoveredIdx];
+                        Face.CrustTypeData[Idx]      = Prev[RecoveredFace].CrustTypeData[RecoveredIdx];
+                        Face.CrustThicknessData[Idx] = Prev[RecoveredFace].CrustThicknessData[RecoveredIdx];
+                        ++Count.Moved;
+                        ++Count.Recovered;
+
+                        // Se recalcula la velocidad igual que en el resto de ramas.
+                        const int32 RecOwner = static_cast<int32>(Face.PlateIDData[Idx]);
+                        if (Plates.IsValidIndex(RecOwner))
+                        {
+                            const FVector AngularVel =
+                                Plates[RecOwner].EulerPole.GetSafeNormal() * Plates[RecOwner].AngularVelocity;
+                            const FVector Velocity3D = FVector::CrossProduct(AngularVel, Dir);
+                            FVector TU, TV, FN;
+                            CubeFaceMapping::GetFaceAxes(static_cast<ECSCubeFace>(FaceIdx), TU, TV, FN);
+                            Face.VelocityData[Idx] = FVector2f(
+                                static_cast<float>(FVector::DotProduct(Velocity3D, TU)),
+                                static_cast<float>(FVector::DotProduct(Velocity3D, TV)));
+                        }
+                        continue;
+                    }
+
+                        // Ni reclamante estricto, ni rift, ni recuperable con tolerancia.
+                        // Es el residuo que ninguna de las tres vias resuelve.
+                        //
+                        // Se conserva el estado anterior, que es lo menos danino: crear
+                        // oceano disolvia los continentes desde dentro y rellenar del
+                        // vecindario los sesgaba hacia el oceano (ver ROADMAP.md). Pero
+                        // conservar CONGELA la celda, asi que esto solo es aceptable
+                        // mientras sea residual - lo vigila Simu.Tectonics.LongRunStability.
                         //
                         // TRILEMA DOCUMENTADO (16-08-2026). Ninguna de las tres salidas es
                         // buena, porque la celda no deberia existir. Medido en
@@ -843,6 +971,7 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
                         Face.CrustThicknessData[Idx] = Prev[FaceIdx].CrustThicknessData[Idx];
                         Face.ElevationData[Idx]      = Prev[FaceIdx].ElevationData[Idx];
                         ++Count.Moved;
+                        ++Count.Unresolved;
                     }
                 }
                 else
@@ -1066,6 +1195,8 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
         AdvectionStats.CellsCreated   += C.Created;
         AdvectionStats.CellsDestroyed += C.Destroyed;
         AdvectionStats.CollisionCells += C.Collisions;
+        AdvectionStats.CellsRecovered += C.Recovered;
+        AdvectionStats.CellsUnresolved += C.Unresolved;
     }
     AdvectionStats.AdvectionCount++;
     AdvectionStats.AdvectedTime += DeltaTime;

@@ -915,6 +915,31 @@ bool FLongRunStabilityTest::RunTest(const FString& Parameters)
     UE_LOG(LogTemp, Log, TEXT("  Frontera: %d -> %d celdas (x%.2f) - metrica del escalonado"),
         BoundaryBefore, BoundaryAfter, BoundaryRatio);
 
+    // CELDAS CONGELADAS. Es la medida directa del bug de los cordones que atravesaban el
+    // oceano sin envejecer: celdas que la adveccion no consigue resolver y que se quedan
+    // con su contenido anterior mientras su entorno se renueva. Cuando la misma celda
+    // falla repetidamente, la linea se vuelve permanente y visible.
+    //
+    // La causa era el redondeo al centro de celda mas cercano en el test de reclamacion,
+    // que dejaba fuera de su propia placa a celdas que estaban a menos de media celda de
+    // la frontera anterior. La recuperacion con tolerancia de media celda las devuelve a
+    // su dueno, y este contador lo cuantifica.
+    const int32 TotalUpdates = Stats.CellsMoved + Stats.CellsCreated;
+    const float UnresolvedFraction = (TotalUpdates > 0)
+        ? static_cast<float>(Stats.CellsUnresolved) / TotalUpdates : 0.0f;
+    const float RecoveredFraction = (TotalUpdates > 0)
+        ? static_cast<float>(Stats.CellsRecovered) / TotalUpdates : 0.0f;
+
+    UE_LOG(LogTemp, Log, TEXT("  Busqueda: %d recuperadas por tolerancia (%.2f%%), %d sin resolver (%.4f%%)"),
+        Stats.CellsRecovered, RecoveredFraction * 100.0f,
+        Stats.CellsUnresolved, UnresolvedFraction * 100.0f);
+
+    // Las celdas sin resolver son las que producen cordones congelados. Tienen que ser
+    // residuales: si vuelven a ser una fraccion apreciable, los cordones estan de vuelta.
+    TestTrue(FString::Printf(TEXT("Casi ninguna celda se queda congelada (%d de %d, %.4f%%)"),
+        Stats.CellsUnresolved, TotalUpdates, UnresolvedFraction * 100.0f),
+        UnresolvedFraction < 0.001f);
+
     if (!TestTrue(TEXT("Hubo muchas advecciones (el regimen que reproduce el problema)"),
         Stats.AdvectionCount > 100))
     {
