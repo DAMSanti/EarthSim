@@ -548,6 +548,53 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
     // no, segun el orden de recorrido.
     const TArray<FTectonicFaceTextureData> Prev = FaceData;
 
+    // PRIMERA PASADA: solo se cuenta cuantas placas reclaman cada celda.
+    //
+    // Hace falta porque una celda sin reclamantes puede ser dos cosas muy distintas:
+    //   - un RIFT de verdad: las placas se separan y aflora manto. Forma una banda
+    //     continua, asi que sus vecinas tambien estan sin reclamar.
+    //   - un HUECO DE REMUESTREO: la adveccion usa vecino mas cercano (obligatorio, un
+    //     ID de placa no se puede interpolar), y al rotar el campo algunos pixeles origen
+    //     acaban reclamados dos veces y otros ninguna. Son huecos AISLADOS.
+    //
+    // Tratar los dos igual es lo que degeneraba la simulacion a largo plazo: cada hueco
+    // espurio dentro de un continente lo convertia en oceano, y esa conversion es
+    // irreversible. Medido en Simu.Tectonics.LongRunStability: la tierra emergida caia
+    // del 24,6% al 8,9% en 1000 Ma, con los continentes disolviendose desde dentro.
+    TArray<TArray<uint8>> ClaimCounts;
+    ClaimCounts.SetNum(6);
+    for (int32 F = 0; F < 6; ++F)
+    {
+        ClaimCounts[F].SetNumZeroed(Resolution * Resolution);
+    }
+
+    ParallelFor(6, [&](int32 FaceIdx)
+    {
+        for (int32 Y = 0; Y < Resolution; ++Y)
+        {
+            for (int32 X = 0; X < Resolution; ++X)
+            {
+                const FVector Dir = CubeFaceMapping::PixelToDirection(
+                    static_cast<ECSCubeFace>(FaceIdx), X, Y, Resolution);
+
+                int32 Count = 0;
+                for (int32 P = 0; P < NumPlates; ++P)
+                {
+                    const FVector PrevDir = InverseRotations[P].RotateVector(Dir);
+                    ECSCubeFace PF; float PU, PV;
+                    CubeFaceMapping::DirectionToFaceTexUV(PrevDir, PF, PU, PV);
+                    const int32 PX = FMath::Clamp(FMath::FloorToInt(PU * Resolution), 0, Resolution - 1);
+                    const int32 PY = FMath::Clamp(FMath::FloorToInt(PV * Resolution), 0, Resolution - 1);
+                    if (Prev[static_cast<int32>(PF)].PlateIDData[PY * Resolution + PX] == static_cast<uint8>(P))
+                    {
+                        ++Count;
+                    }
+                }
+                ClaimCounts[FaceIdx][Y * Resolution + X] = static_cast<uint8>(FMath::Min(Count, 255));
+            }
+        }
+    });
+
     struct FFaceCounters
     {
         int32 Moved = 0;
@@ -620,20 +667,52 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
                 }
                 else if (Claimants.Num() == 0)
                 {
-                    // RIFT. Nadie ocupaba este punto: dos placas se han separado y aqui
-                    // aflora manto. Corteza oceanica nueva, edad 0, y elevacion de dorsal
-                    // (una dorsal esta ~1300 m por encima de la llanura abisal porque la
-                    // corteza recien formada esta caliente y flota mas).
-                    //
-                    // Se asigna a la placa que estaba aqui antes: la corteza nueva se
-                    // suelda al borde de la placa que se aleja, que es lo que ocurre.
+                    // Sin reclamantes. Antes de crear corteza hay que distinguir un rift
+                    // real de un hueco de remuestreo (ver el comentario de la primera
+                    // pasada). Un rift forma banda continua; un hueco espurio esta solo.
+                    int32 EmptyNeighbours = 0;
+                    const int32 NOff[4][2] = {{-1,0},{1,0},{0,-1},{0,1}};
+                    for (int32 N = 0; N < 4; ++N)
+                    {
+                        ECSCubeFace NF; int32 NX, NY;
+                        if (GetNeighborPixel(static_cast<ECSCubeFace>(FaceIdx), X, Y, NOff[N][0], NOff[N][1], NF, NX, NY))
+                        {
+                            if (ClaimCounts[static_cast<int32>(NF)][NY * Resolution + NX] == 0)
+                            {
+                                ++EmptyNeighbours;
+                            }
+                        }
+                    }
+
                     const uint8 PreviousOwner = Prev[FaceIdx].PlateIDData[Idx];
-                    Face.PlateIDData[Idx]   = (PreviousOwner < NumPlates) ? PreviousOwner : 0;
-                    Face.CrustTypeData[Idx] = 0;
-                    Face.CrustAgeData[Idx]  = 0.0f;
-                    Face.CrustThicknessData[Idx] = FIsostasyParams().OceanicThickness;
-                    Face.ElevationData[Idx] = -FIsostasyParams().RidgeDepth;
-                    ++Count.Created;
+
+                    if (EmptyNeighbours >= 2)
+                    {
+                        // RIFT DE VERDAD: dos placas se separan y aflora manto. Corteza
+                        // oceanica nueva con edad 0; su altura la pone el hundimiento
+                        // termico, que a edad 0 da la profundidad de dorsal.
+                        //
+                        // Se suelda a la placa que estaba aqui antes: la corteza nueva se
+                        // acreciona al borde de la placa que se aleja.
+                        Face.PlateIDData[Idx]   = (PreviousOwner < NumPlates) ? PreviousOwner : 0;
+                        Face.CrustTypeData[Idx] = 0;
+                        Face.CrustAgeData[Idx]  = 0.0f;
+                        Face.CrustThicknessData[Idx] = FIsostasyParams().OceanicThickness;
+                        Face.ElevationData[Idx] = -FIsostasyParams().RidgeDepth;
+                        ++Count.Created;
+                    }
+                    else
+                    {
+                        // Hueco aislado: artefacto del remuestreo, no fisica. Se conserva
+                        // lo que ya habia en esta celda. Crear oceano aqui es lo que
+                        // disolvia los continentes desde dentro.
+                        Face.PlateIDData[Idx]        = PreviousOwner;
+                        Face.CrustTypeData[Idx]      = Prev[FaceIdx].CrustTypeData[Idx];
+                        Face.CrustAgeData[Idx]       = Prev[FaceIdx].CrustAgeData[Idx];
+                        Face.CrustThicknessData[Idx] = Prev[FaceIdx].CrustThicknessData[Idx];
+                        Face.ElevationData[Idx]      = Prev[FaceIdx].ElevationData[Idx];
+                        ++Count.Moved;
+                    }
                 }
                 else
                 {
@@ -805,9 +884,28 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
         const float PixelAngle = GetPixelAngularSize();
         if (MaxAngularSpeed > KINDA_SMALL_NUMBER && PixelAngle > 0.0f)
         {
-            if (MaxAngularSpeed * PendingAdvectionTime >= PixelAngle)
+            // Tiempo que tarda la placa mas rapida en recorrer un pixel. La adveccion
+            // solo es valida en desplazamientos de ese orden: mas lejos, el vecino mas
+            // cercano deja de aproximar el transporte y empieza a mezclar material de
+            // sitios sin relacion. Con dt grande (TimeScale alto, o un test que pase
+            // 50 Ma de golpe) el desplazamiento puede ser de decenas de pixeles.
+            //
+            // Se trocea igual que la integracion: varias advecciones de un pixel en vez
+            // de una de veinte. El limite de iteraciones evita bloquear el frame; el
+            // tiempo sobrante se descarta, misma decision que en el resto del paso.
+            const float MaxAdvectionDt = PixelAngle / MaxAngularSpeed;
+            const int32 MaxAdvectionsPerStep = 8;
+
+            int32 Done = 0;
+            while (PendingAdvectionTime >= MaxAdvectionDt && Done < MaxAdvectionsPerStep)
             {
-                AdvectPlateField(PendingAdvectionTime);
+                AdvectPlateField(MaxAdvectionDt);
+                PendingAdvectionTime -= MaxAdvectionDt;
+                ++Done;
+            }
+
+            if (Done >= MaxAdvectionsPerStep)
+            {
                 PendingAdvectionTime = 0.0f;
             }
         }
