@@ -2,6 +2,7 @@
 
 #include "TectonicPlateSystem.h"
 #include "BoundaryInteractions.h"
+#include "PlateKinematics.h"
 #include "../CubeSphereGrid.h"
 #include "../CubeSphereMetrics.h"
 
@@ -382,9 +383,19 @@ void UTectonicPlateSystem::Step(float DeltaTime)
     // Actualizar tiempo de simulación
     TotalSimulationTime += DeltaTime;
 
-    // Incrementar edad de las placas
+    // MOVER LAS PLACAS (ROADMAP.md F1). Hasta el 15-08-2026 esto solo envejecia las
+    // placas: UPlateKinematics::CalculatePlateRotation existia, estaba testeada, y no la
+    // llamaba nadie fuera de los tests. El campo de IDs lo advecta URasterizedTectonics;
+    // aqui se lleva el estado de la placa como cuerpo rigido.
+    //
+    // El polo de Euler se mantiene fijo: se toma como referencia el manto, no la placa.
+    // Es una simplificacion (en la Tierra los polos migran), pero mantenerlo fijo hace
+    // que el movimiento sea predecible y verificable analiticamente, que es lo que
+    // necesitan los tests de esta fase.
     for (FTectonicPlate& Plate : Plates)
     {
+        const FQuat Rotation = UPlateKinematics::CalculatePlateRotation(Plate, DeltaTime);
+        Plate.Centroid = Rotation.RotateVector(Plate.Centroid);
         Plate.Age += DeltaTime;
     }
 

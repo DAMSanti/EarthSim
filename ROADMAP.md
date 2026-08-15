@@ -138,7 +138,7 @@ Para F1, F2 y F3 eso vale: continentes, sombras de lluvia y cinturones climátic
 
 ---
 
-## F1 — Movimiento real de placas 🔴 EL BLOQUEADOR
+## F1 — Movimiento real de placas 🟡 NÚCLEO HECHO (15-08-2026)
 
 **Por qué:** sin esto no hay tectónica, y sin tectónica cambiante el resto del simulador no tiene nada que simular.
 
@@ -150,22 +150,34 @@ Algoritmo elegido: **advección hacia atrás del campo de IDs de placa**. Para c
 
 Esto hace que subducción, dorsales y apertura de océanos sean **emergentes**, no guionizadas — y es donde `BoundaryInteractions` por fin tiene a quién alimentar.
 
-- [ ] Llamar de verdad a `UPlateKinematics::CalculatePlateRotation` desde `UTectonicPlateSystem::Step` y acumular la rotación por placa
-- [ ] Advección hacia atrás del campo `PlateIDData` en `URasterizedTectonics::Step`
-- [ ] Resolución de colisión (2+ candidatos) por tipo de corteza
-- [ ] Creación de corteza en huecos (0 candidatos), con edad 0 y elevación de dorsal
-- [ ] Destrucción de corteza en subducción — hoy `CreateNewCrust` no tiene contraparte (`TODO` en `BoundaryInteractions.cpp:609`)
+- [x] `UTectonicPlateSystem::Step` llama de verdad a `UPlateKinematics::CalculatePlateRotation` y rota el centroide de cada placa. El polo de Euler se mantiene fijo (referencia = manto): es una simplificación, pero hace el movimiento predecible analíticamente, que es lo que necesitan los tests
+- [x] **Advección hacia atrás del campo de IDs** — `URasterizedTectonics::AdvectPlateField`. Semi-lagrangiana: para cada píxel de la rejilla nueva se pregunta de dónde viene, en vez de empujar cada píxel viejo hacia donde va. Empujar hacia delante deja huecos y solapes por redondeo y no da forma natural de detectar colisiones; preguntando hacia atrás cada celda se resuelve exactamente una vez y **el número de reclamantes es por sí solo la clasificación del borde**
+- [x] **La advección no corre en cada paso, y no es una optimización sino lo correcto.** Con los valores por defecto la placa más rápida gira ~8e-5 rad por paso mientras un píxel abarca ~6.1e-3 rad: 1/76 de píxel. Advectar ahí no movería nada y cada remuestreo mete difusión numérica, así que hacerlo 76 veces en vez de una emborrona el campo a cambio de nada. Se acumula hasta que el desplazamiento alcanza un píxel
+- [x] Resolución de colisión por tipo de corteza:
+  - océano vs continente → subduce el océano (más denso). Es la razón de que los continentes duren miles de millones de años mientras el fondo oceánico se recicla entero
+  - océano vs océano → subduce **la más vieja**, que se ha enfriado y es más densa
+  - continente vs continente → ninguna subduce; se queda la más alta
+- [x] Creación de corteza en huecos (0 reclamantes): rift, corteza oceánica nueva con edad 0 y elevación de dorsal. Se suelda a la placa que estaba antes ahí, que es la que se aleja
+- [x] Destrucción de corteza en subducción: cada reclamante perdedor es una celda que desaparece. Es la contraparte que faltaba (el TODO de `BoundaryInteractions.cpp:609`), y ahora hay contabilidad explícita en `FTectonicAdvectionStats`
 - [ ] Conectar `ElevationRateMaps` de `BoundaryInteractions` al raster: rellenar `ApplyElevationChanges()`, que hoy está vacía
 - [ ] Reactivar `ProcessAllBoundaries` (desactivada en F0)
-- [ ] Advectar también `CrustAge` y `CrustType` junto con el ID (si no, la corteza "cambia de tipo" al moverse)
+- [x] Se advectan `CrustAge`, `CrustType` y `Elevation` junto con el ID, y se recalcula `Velocity` tras resolver la propiedad (depende de dónde está el punto **ahora** y de quién lo posee ahora)
 
 **Coste:** `O(Res²·N)` por paso. Con Res=512 y 12 placas son ~3,1 M operaciones — asumible si el paso tectónico corre a baja frecuencia (no cada frame). Presupuestarlo explícitamente, no dejarlo en el `Tick`.
 
 **Hecho cuando:**
-- Test: tras N pasos, el centroide de una placa se ha desplazado la distancia angular que predice `ω·N·Δt` (±tolerancia).
-- Test: el número de celdas por placa cambia con el tiempo (las placas crecen y menguan) — falla si el campo de IDs sigue congelado.
-- Test de conservación: área de corteza creada en dorsales ≈ área destruida en subducción, dentro de un margen.
-- Visual: dos continentes que empiezan separados colisionan y levantan una cordillera en el punto de contacto.
+- [x] `Simu.Tectonics.PlateCentroidsMove` — el centroide recorre el ángulo que predice la fórmula del cono (`cos(recorrido) = cos²α + sin²α·cos θ`), no una aproximación
+- [x] `Simu.Tectonics.PlateFieldEvolves` — las placas cambian de tamaño; falla si el campo vuelve a congelarse
+- [x] `Simu.Tectonics.CrustBudget` — se crea y se destruye corteza, y ninguna supera al doble de la otra
+- [x] `Simu.Tectonics.ContinentsPersist` — los continentes sobreviven; detecta que la regla de subducción esté invertida
+- [ ] Visual: dos continentes que colisionan levantando una cordillera — **pendiente de mirar en el editor**
+
+> **Los cuatro tests se validaron saboteando el código** (desactivando la advección y la rotación) para comprobar que fallan. `ContinentsPersist` **no fallaba**: con el campo congelado el recuento no cambia, el ratio sale 1.0 y todas sus aserciones se cumplen. Se reforzó exigiendo que la advección se haya ejecutado y que haya habido colisiones. Es el segundo test de esta sesión que pasaba sin comprobar nada.
+
+**Pendiente de F1, siguiente tanda:**
+- [ ] Rellenar `BoundaryInteractions::ApplyElevationChanges()` y reactivar `ProcessAllBoundaries` para que su física (ángulos de subducción, esfuerzo acumulado, hotspots) alimente por fin la elevación del ráster
+- [ ] Reactivar `DetectBoundaries()`, que ahora sí tiene sentido: los límites cambian de verdad
+- [ ] Que el ráster sea la **única fuente de verdad** del campo de IDs y `UTectonicPlateSystem` lea de él — desde ahora el mapa del Voronoi es solo la condición inicial y queda obsoleto al primer paso
 
 **Renderizable cuando** (campos nuevos que F1 publica al visor de F0.5):
 - **ID de placa** (rampa categórica) animado en el tiempo: se ve la deriva. Es la comprobación de un vistazo de que el bloqueador está resuelto

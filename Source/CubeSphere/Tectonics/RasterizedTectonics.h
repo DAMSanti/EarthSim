@@ -127,6 +127,41 @@ struct CUBESPHERE_API FFractalNoiseParams
 };
 
 /**
+ * Contabilidad de la advección de placas (ROADMAP.md F1).
+ * Sirve para verificar conservación de corteza: lo creado en dorsales debe compensar
+ * aproximadamente lo destruido en subducción, o el planeta gana/pierde superficie.
+ */
+USTRUCT(BlueprintType)
+struct CUBESPHERE_API FTectonicAdvectionStats
+{
+    GENERATED_BODY()
+
+    /** Celdas que cambiaron de placa dueña sin conflicto. */
+    UPROPERTY(BlueprintReadOnly)
+    int32 CellsMoved = 0;
+
+    /** Celdas sin ningún reclamante: hueco entre placas que se separan (rift). */
+    UPROPERTY(BlueprintReadOnly)
+    int32 CellsCreated = 0;
+
+    /** Celdas perdidas por placas que quedaron por debajo en una colisión (subducción). */
+    UPROPERTY(BlueprintReadOnly)
+    int32 CellsDestroyed = 0;
+
+    /** Celdas con dos o más reclamantes. */
+    UPROPERTY(BlueprintReadOnly)
+    int32 CollisionCells = 0;
+
+    /** Cuántas veces se ha ejecutado la advección desde el inicio. */
+    UPROPERTY(BlueprintReadOnly)
+    int32 AdvectionCount = 0;
+
+    /** Tiempo simulado total realmente advectado. */
+    UPROPERTY(BlueprintReadOnly)
+    float AdvectedTime = 0.0f;
+};
+
+/**
  * URasterizedTectonics
  *  
  * Sistema de tectónica de placas basado en texturas GPU.
@@ -184,6 +219,36 @@ public:
      */
     UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics")
     void Step(const FPlateMovementParams& Params);
+
+    /**
+     * Mueve las placas: advección hacia atrás del campo de IDs (ROADMAP.md F1).
+     *
+     * Para cada píxel de dirección d se rota d hacia atrás por la rotación de CADA placa
+     * y se pregunta quién poseía ese punto antes:
+     *   - 1 reclamante  -> la placa simplemente se movió; se arrastran elevación, edad y
+     *     tipo de corteza desde el píxel de origen.
+     *   - 0 reclamantes -> hueco entre placas que se separan: rift, corteza oceánica
+     *     nueva con edad 0 y elevación de dorsal.
+     *   - 2 o más       -> colisión: gana una y las demás subducen (ver .cpp).
+     *
+     * Así subducción, dorsales y apertura de océanos son EMERGENTES, no guionizadas.
+     *
+     * Normalmente no hace falta llamarla a mano: Step() la invoca sola cuando se ha
+     * acumulado suficiente tiempo (ver bAdvectionPending en el .cpp).
+     */
+    UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics")
+    void AdvectPlateField(float DeltaTime);
+
+    UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics")
+    FTectonicAdvectionStats GetAdvectionStats() const { return AdvectionStats; }
+
+    /** Edad de la corteza (Ma) de una celda. */
+    UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics")
+    float GetCrustAgeAt(ECSCubeFace Face, int32 X, int32 Y) const;
+
+    /** Tipo de corteza: 0 = oceánica, 1 = continental. */
+    UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics")
+    int32 GetCrustTypeAt(ECSCubeFace Face, int32 X, int32 Y) const;
 
     /**
      * DECISIÓN (ROADMAP.md M2, 11-08-2026): SyncFromGPU/SyncToGPU y las texturas GPU
@@ -325,7 +390,23 @@ protected:
     float TotalSimulationTime = 0.0f;
     int32 StepCount = 0;
 
+    FTectonicAdvectionStats AdvectionStats;
+
+    /**
+     * Tiempo simulado acumulado desde la última advección.
+     *
+     * La advección NO se ejecuta en cada paso, y no es una optimización sino lo correcto:
+     * con los valores por defecto, la placa más rápida gira ~8e-5 rad por paso mientras
+     * un píxel abarca ~6.1e-3 rad, o sea 1/76 de píxel. Advectar ahí no mueve nada y solo
+     * introduce error de remuestreo. Se acumula hasta que el desplazamiento máximo
+     * alcanza un píxel y entonces se advecta de una vez, con el dt acumulado.
+     */
+    float PendingAdvectionTime = 0.0f;
+
 private:
+    /** Ángulo que abarca un píxel del ráster, en radianes (aprox., centro de cara). */
+    float GetPixelAngularSize() const;
+
     // Métodos internos
     void CreateGPUResources();
     void ReleaseGPUResources();

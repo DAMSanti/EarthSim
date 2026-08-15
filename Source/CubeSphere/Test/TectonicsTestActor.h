@@ -336,6 +336,13 @@ protected:
      */
     void RefreshCategoricalFieldCaches();
 
+    /**
+     * Ultimo AdvectionCount visto. Desde F1 el campo de IDs cambia cuando las placas se
+     * mueven, asi que los espejos en float hay que rehacerlos: si no, el visor mostraria
+     * un mapa de placas congelado, que es justo la comprobacion principal de F1.
+     */
+    int32 LastSeenAdvectionCount = -1;
+
     /** Espejos en float de los campos uint8 del ráster (ver arriba). */
     TArray<float> PlateIDFieldCache[6];
     TArray<float> CrustTypeFieldCache[6];

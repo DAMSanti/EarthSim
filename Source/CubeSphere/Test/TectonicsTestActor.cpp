@@ -292,6 +292,17 @@ void ATectonicsTestActor::StepSimulation(float DeltaTime)
         Params.SubductionRate = 0.02f;
 
         RasterizedTectonics->Step(Params);
+
+        // Desde F1 el campo de IDs cambia cuando hay adveccion, asi que los espejos en
+        // float del visor hay que rehacerlos o mostraria un mapa de placas congelado -
+        // justo la comprobacion principal de esta fase. Se compara el contador en vez de
+        // refrescar cada paso porque la adveccion ocurre cada ~76 pasos, no en todos.
+        const int32 AdvectionCount = RasterizedTectonics->GetAdvectionStats().AdvectionCount;
+        if (AdvectionCount != LastSeenAdvectionCount)
+        {
+            LastSeenAdvectionCount = AdvectionCount;
+            RefreshCategoricalFieldCaches();
+        }
     }
 
     SimulationTime += DeltaTime;
@@ -1030,6 +1041,7 @@ void ATectonicsTestActor::DrawScreenDebugInfo()
         TEXT("\n[SPACE] Pausa | [R] Reiniciar\n")
         TEXT("[+/-] Velocidad | [1-8] Placa\n")
         TEXT("[V] Velocidades | [B] Límites\n")
+        TEXT("Corteza: +%d creada / -%d destruida (%d advecciones)\n")
         TEXT("[F/G] Campo | [U] %s\n")
         TEXT("%s"),
         SimulationTime,
@@ -1038,6 +1050,9 @@ void ATectonicsTestActor::DrawScreenDebugInfo()
         TimeScale,
         PlateSystem ? PlateSystem->GetNumPlates() : 0,
         GridResolution,
+        RasterizedTectonics ? RasterizedTectonics->GetAdvectionStats().CellsCreated : 0,
+        RasterizedTectonics ? RasterizedTectonics->GetAdvectionStats().CellsDestroyed : 0,
+        RasterizedTectonics ? RasterizedTectonics->GetAdvectionStats().AdvectionCount : 0,
         bUnlitFieldView ? TEXT("unlit") : TEXT("iluminado"),
         FieldRegistry ? *FieldRegistry->GetLegendText() : TEXT("(sin visor)")
     );

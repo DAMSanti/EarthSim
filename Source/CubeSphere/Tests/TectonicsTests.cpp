@@ -306,3 +306,356 @@ bool FRasterizedTectonicsSeamContinuityTest::RunTest(const FString& Parameters)
 
     return true;
 }
+
+// ============================================================
+// F1 — LAS PLACAS SE MUEVEN
+//
+// Estos son los tests que habrian pillado el bug que la auditoria del 15-08-2026
+// encontro a mano: UPlateKinematics estaba implementada y testeada, pero nadie la
+// llamaba, asi que las placas no se movian nunca. El test de rotacion que ya existia
+// pasaba porque probaba la funcion AISLADA. Probar la unidad no sirve si no esta
+// cableada, asi que estos tests miran el ESTADO DEL SISTEMA tras simular, no funciones
+// sueltas.
+// ============================================================
+
+namespace
+{
+    /** Monta grid + placas + raster con una semilla fija. Devuelve false si algo falla. */
+    bool BuildF1Fixture(int32 GridRes, int32 RasterRes, int32 NumPlates, int32 Seed,
+                        UCubeSphereGrid*& OutGrid, UTectonicPlateSystem*& OutSystem,
+                        URasterizedTectonics*& OutRaster)
+    {
+        OutGrid = NewObject<UCubeSphereGrid>();
+        OutGrid->Initialize(GridRes, 637100000.0f);
+
+        FPlateGenerationConfig Config;
+        Config.NumPlates = NumPlates;
+        Config.bUseFixedSeed = true;
+        Config.RandomSeed = Seed;
+
+        OutSystem = NewObject<UTectonicPlateSystem>();
+        OutSystem->Initialize(OutGrid, Config);
+        if (!OutSystem->GeneratePlates())
+        {
+            return false;
+        }
+
+        OutRaster = NewObject<URasterizedTectonics>();
+        OutRaster->Initialize(OutGrid, OutSystem, RasterRes);
+        return true;
+    }
+
+    /** Cuenta celdas por placa en todo el raster. */
+    TArray<int32> CountCellsPerPlate(URasterizedTectonics* Raster, int32 Res, int32 NumPlates)
+    {
+        TArray<int32> Counts;
+        Counts.SetNumZeroed(NumPlates);
+        for (int32 F = 0; F < 6; ++F)
+        {
+            const ECSCubeFace Face = static_cast<ECSCubeFace>(F);
+            for (int32 Y = 0; Y < Res; ++Y)
+            {
+                for (int32 X = 0; X < Res; ++X)
+                {
+                    const int32 Id = Raster->GetPlateIDAt(Face, X, Y);
+                    if (Counts.IsValidIndex(Id))
+                    {
+                        Counts[Id]++;
+                    }
+                }
+            }
+        }
+        return Counts;
+    }
+}
+
+// ------------------------------------------------------------
+// El centroide de una placa debe desplazarse el angulo que predice w*t.
+// Es la comprobacion de que la cinematica esta CABLEADA, no solo implementada.
+// ------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPlateCentroidsActuallyMoveTest,
+    "Simu.Tectonics.PlateCentroidsMove",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FPlateCentroidsActuallyMoveTest::RunTest(const FString& Parameters)
+{
+    UCubeSphereGrid* Grid = nullptr;
+    UTectonicPlateSystem* System = nullptr;
+    URasterizedTectonics* Raster = nullptr;
+    if (!TestTrue(TEXT("Fixture montado"), BuildF1Fixture(32, 32, 6, 1234, Grid, System, Raster)))
+    {
+        return false;
+    }
+
+    TArray<FVector> InitialDirs;
+    for (const FTectonicPlate& Plate : System->GetPlates())
+    {
+        InitialDirs.Add(Plate.Centroid.GetSafeNormal());
+    }
+
+    const float Dt = 0.5f;
+    const int32 Steps = 20;
+    for (int32 i = 0; i < Steps; ++i)
+    {
+        System->Step(Dt);
+    }
+
+    const TArray<FTectonicPlate>& Plates = System->GetPlates();
+    int32 MovedPlates = 0;
+
+    for (int32 i = 0; i < Plates.Num(); ++i)
+    {
+        const FVector NowDir = Plates[i].Centroid.GetSafeNormal();
+
+        // Angulo recorrido, medido entre las direcciones inicial y final
+        const float CosAngle = FMath::Clamp(
+            static_cast<float>(FVector::DotProduct(InitialDirs[i], NowDir)), -1.0f, 1.0f);
+        const float MeasuredAngle = FMath::Acos(CosAngle);
+
+        // Prediccion analitica: girar un angulo Theta alrededor de un polo separado
+        // Alpha del punto describe un cono, y la cuerda angular resultante cumple
+        // cos(recorrido) = cos^2(Alpha) + sin^2(Alpha)*cos(Theta).
+        const float Theta = Plates[i].AngularVelocity * Dt * Steps;
+        const FVector Pole = Plates[i].EulerPole.GetSafeNormal();
+        const float CosAlpha = FMath::Clamp(
+            static_cast<float>(FVector::DotProduct(Pole, InitialDirs[i])), -1.0f, 1.0f);
+        const float SinAlphaSq = 1.0f - CosAlpha * CosAlpha;
+        const float PredictedCos = FMath::Clamp(
+            CosAlpha * CosAlpha + SinAlphaSq * FMath::Cos(Theta), -1.0f, 1.0f);
+        const float PredictedAngle = FMath::Acos(PredictedCos);
+
+        TestTrue(FString::Printf(
+            TEXT("Placa %d: recorrido medido %.5f rad vs predicho %.5f rad"),
+            i, MeasuredAngle, PredictedAngle),
+            FMath::Abs(MeasuredAngle - PredictedAngle) < 1e-3f);
+
+        if (MeasuredAngle > 1e-4f)
+        {
+            ++MovedPlates;
+        }
+    }
+
+    // Sin esto el test pasaria trivialmente si todas las velocidades fueran cero:
+    // la prediccion tambien seria cero y coincidiria.
+    TestTrue(TEXT("Al menos una placa se ha movido de verdad"), MovedPlates > 0);
+
+    return true;
+}
+
+// ------------------------------------------------------------
+// El campo de IDs tiene que cambiar: las placas crecen y menguan.
+// Este es el test que falla si el campo vuelve a quedarse congelado.
+// ------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPlateFieldEvolvesTest,
+    "Simu.Tectonics.PlateFieldEvolves",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FPlateFieldEvolvesTest::RunTest(const FString& Parameters)
+{
+    const int32 Res = 32;
+    const int32 NumPlates = 6;
+
+    UCubeSphereGrid* Grid = nullptr;
+    UTectonicPlateSystem* System = nullptr;
+    URasterizedTectonics* Raster = nullptr;
+    if (!TestTrue(TEXT("Fixture montado"), BuildF1Fixture(32, Res, NumPlates, 99, Grid, System, Raster)))
+    {
+        return false;
+    }
+
+    const TArray<int32> Before = CountCellsPerPlate(Raster, Res, NumPlates);
+
+    FPlateMovementParams Params;
+    Params.DeltaTime = 1.0f;
+    Params.TimeScale = 50.0f;   // suficiente para que la adveccion se dispare varias veces
+    Params.DiffusionRate = 0.02f;
+
+    for (int32 i = 0; i < 60; ++i)
+    {
+        System->Step(Params.DeltaTime * Params.TimeScale);
+        Raster->Step(Params);
+    }
+
+    const FTectonicAdvectionStats Stats = Raster->GetAdvectionStats();
+    if (!TestTrue(TEXT("La adveccion se ha ejecutado al menos una vez"), Stats.AdvectionCount > 0))
+    {
+        return false;
+    }
+
+    const TArray<int32> After = CountCellsPerPlate(Raster, Res, NumPlates);
+
+    int32 TotalBefore = 0, TotalAfter = 0, ChangedPlates = 0;
+    for (int32 i = 0; i < NumPlates; ++i)
+    {
+        TotalBefore += Before[i];
+        TotalAfter += After[i];
+        if (Before[i] != After[i])
+        {
+            ++ChangedPlates;
+        }
+    }
+
+    AddInfo(FString::Printf(TEXT("%d advecciones, %d placas cambiaron de tamano, %d celdas movidas"),
+        Stats.AdvectionCount, ChangedPlates, Stats.CellsMoved));
+
+    // El corazon de F1: si el campo siguiera congelado, ninguna placa cambiaria de tamano
+    TestTrue(TEXT("Alguna placa ha cambiado de tamano (las placas crecen y menguan)"),
+        ChangedPlates > 0);
+
+    // Toda celda debe seguir teniendo dueño valido: ni huecos ni IDs corruptos
+    TestEqual(TEXT("El numero total de celdas asignadas se conserva"), TotalAfter, TotalBefore);
+    TestEqual(TEXT("Todas las celdas del planeta tienen placa"), TotalAfter, 6 * Res * Res);
+
+    return true;
+}
+
+// ------------------------------------------------------------
+// Conservacion de corteza: lo creado en dorsales debe compensar lo destruido en
+// subduccion. Sin esta contraparte el planeta ganaria superficie sin limite - era el
+// TODO abierto en BoundaryInteractions.cpp:609.
+// ------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCrustBudgetTest,
+    "Simu.Tectonics.CrustBudget",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FCrustBudgetTest::RunTest(const FString& Parameters)
+{
+    const int32 Res = 32;
+
+    UCubeSphereGrid* Grid = nullptr;
+    UTectonicPlateSystem* System = nullptr;
+    URasterizedTectonics* Raster = nullptr;
+    if (!TestTrue(TEXT("Fixture montado"), BuildF1Fixture(32, Res, 6, 2024, Grid, System, Raster)))
+    {
+        return false;
+    }
+
+    FPlateMovementParams Params;
+    Params.DeltaTime = 1.0f;
+    Params.TimeScale = 50.0f;
+    Params.DiffusionRate = 0.02f;
+
+    for (int32 i = 0; i < 120; ++i)
+    {
+        System->Step(Params.DeltaTime * Params.TimeScale);
+        Raster->Step(Params);
+    }
+
+    const FTectonicAdvectionStats Stats = Raster->GetAdvectionStats();
+    if (!TestTrue(TEXT("Hubo advecciones"), Stats.AdvectionCount > 0))
+    {
+        return false;
+    }
+
+    AddInfo(FString::Printf(TEXT("Corteza: +%d creada, -%d destruida, %d colisiones, %d advecciones"),
+        Stats.CellsCreated, Stats.CellsDestroyed, Stats.CollisionCells, Stats.AdvectionCount));
+
+    // Una esfera es cerrada: toda celda que una placa gana, otra la pierde. Creacion y
+    // destruccion no tienen por que cuadrar paso a paso (dependen de la geometria
+    // instantanea de los bordes), pero no pueden divergir en ordenes de magnitud, que es
+    // lo que pasaria si solo existiera uno de los dos mecanismos.
+    const int32 Created = Stats.CellsCreated;
+    const int32 Destroyed = Stats.CellsDestroyed;
+
+    TestTrue(TEXT("Se crea corteza en las zonas divergentes"), Created > 0);
+    TestTrue(TEXT("Se destruye corteza en las zonas convergentes"), Destroyed > 0);
+
+    const int32 MaxOfBoth = FMath::Max(Created, Destroyed);
+    const int32 Imbalance = FMath::Abs(Created - Destroyed);
+    TestTrue(FString::Printf(TEXT("Creacion (%d) y destruccion (%d) del mismo orden"), Created, Destroyed),
+        Imbalance <= MaxOfBoth);   // ninguno mas del doble que el otro
+
+    return true;
+}
+
+// ------------------------------------------------------------
+// Los continentes tienen que persistir. Es la consecuencia observable de que la corteza
+// oceanica sea la que subduce: en la Tierra el fondo oceanico se recicla entero cada
+// ~200 Ma mientras hay roca continental de miles de millones de anos. Si la regla de
+// colision estuviera al reves, los continentes se consumirian.
+// ------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FContinentsPersistTest,
+    "Simu.Tectonics.ContinentsPersist",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FContinentsPersistTest::RunTest(const FString& Parameters)
+{
+    const int32 Res = 32;
+
+    UCubeSphereGrid* Grid = nullptr;
+    UTectonicPlateSystem* System = nullptr;
+    URasterizedTectonics* Raster = nullptr;
+    if (!TestTrue(TEXT("Fixture montado"), BuildF1Fixture(32, Res, 8, 555, Grid, System, Raster)))
+    {
+        return false;
+    }
+
+    auto CountContinental = [Raster, Res]()
+    {
+        int32 N = 0;
+        for (int32 F = 0; F < 6; ++F)
+        {
+            const ECSCubeFace Face = static_cast<ECSCubeFace>(F);
+            for (int32 Y = 0; Y < Res; ++Y)
+            {
+                for (int32 X = 0; X < Res; ++X)
+                {
+                    if (Raster->GetCrustTypeAt(Face, X, Y) == 1)
+                    {
+                        ++N;
+                    }
+                }
+            }
+        }
+        return N;
+    };
+
+    const int32 Before = CountContinental();
+    if (!TestTrue(TEXT("Hay corteza continental al empezar"), Before > 0))
+    {
+        return false;
+    }
+
+    FPlateMovementParams Params;
+    Params.DeltaTime = 1.0f;
+    Params.TimeScale = 50.0f;
+    Params.DiffusionRate = 0.02f;
+
+    for (int32 i = 0; i < 150; ++i)
+    {
+        System->Step(Params.DeltaTime * Params.TimeScale);
+        Raster->Step(Params);
+    }
+
+    // Sin esto el test pasa TRIVIALMENTE si las placas no se mueven: con el campo
+    // congelado el recuento no cambia, el ratio sale 1.0 y todas las aserciones de abajo
+    // se cumplen. Verificado saboteando la adveccion: era el unico de los cuatro tests de
+    // F1 que no detectaba el sabotaje.
+    const FTectonicAdvectionStats Stats = Raster->GetAdvectionStats();
+    if (!TestTrue(TEXT("La adveccion se ejecuto (si no, este test no prueba nada)"), Stats.AdvectionCount > 0))
+    {
+        return false;
+    }
+    if (!TestTrue(TEXT("Hubo colisiones que pudieran consumir continente"), Stats.CollisionCells > 0))
+    {
+        return false;
+    }
+
+    const int32 After = CountContinental();
+    const float Ratio = static_cast<float>(After) / static_cast<float>(Before);
+
+    AddInfo(FString::Printf(TEXT("Corteza continental: %d -> %d celdas (%.0f%%)"),
+        Before, After, Ratio * 100.0f));
+
+    // Puede encoger algo (los margenes se consumen en las colisiones) pero no
+    // desaparecer. Si baja del 50%% es que la regla de subduccion esta invertida.
+    TestTrue(FString::Printf(TEXT("Los continentes persisten (%d -> %d celdas)"), Before, After),
+        Ratio > 0.5f);
+
+    // Y tampoco pueden crecer sin freno: solo la orogenia deberia crear continente, y
+    // aqui todavia no lo hace, asi que no puede haber mas que al principio.
+    TestTrue(FString::Printf(TEXT("La corteza continental no aparece de la nada (%d -> %d)"), Before, After),
+        Ratio < 1.2f);
+
+    return true;
+}

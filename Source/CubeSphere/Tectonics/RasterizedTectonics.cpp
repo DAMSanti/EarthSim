@@ -3,6 +3,7 @@
 #include "RasterizedTectonics.h"
 #include "TectonicPlateSystem.h"
 #include "SphericalVoronoi.h"
+#include "PlateKinematics.h"
 #include "../CubeSphereGrid.h"
 #include "../CubeFaceMapping.h"
 #include "../Noise/SimplexNoise.h"
@@ -309,6 +310,260 @@ void URasterizedTectonics::ApplyFractalNoise(const FFractalNoiseParams& Params)
     UE_LOG(LogRasterizedTectonics, Log, TEXT("Fractal noise applied"));
 }
 
+float URasterizedTectonics::GetPixelAngularSize() const
+{
+    // Una cara abarca 90 grados repartidos en Resolution pixeles. Es una aproximacion:
+    // cerca de las esquinas del cubo los pixeles cubren mas angulo por la distorsion
+    // gnomonica, pero para decidir "ya toca advectar" sobra con el valor del centro.
+    return (Resolution > 0) ? (PI * 0.5f / static_cast<float>(Resolution)) : 0.0f;
+}
+
+float URasterizedTectonics::GetCrustAgeAt(ECSCubeFace Face, int32 X, int32 Y) const
+{
+    const int32 FaceIdx = static_cast<int32>(Face);
+    if (!bIsInitialized || FaceIdx < 0 || FaceIdx >= 6 || !IsValidCoord(X, Y))
+    {
+        return 0.0f;
+    }
+    return FaceData[FaceIdx].CrustAgeData[GetLinearIndex(X, Y)];
+}
+
+int32 URasterizedTectonics::GetCrustTypeAt(ECSCubeFace Face, int32 X, int32 Y) const
+{
+    const int32 FaceIdx = static_cast<int32>(Face);
+    if (!bIsInitialized || FaceIdx < 0 || FaceIdx >= 6 || !IsValidCoord(X, Y))
+    {
+        return 0;
+    }
+    return static_cast<int32>(FaceData[FaceIdx].CrustTypeData[GetLinearIndex(X, Y)]);
+}
+
+// ============================================================
+// ADVECCION DE PLACAS (ROADMAP.md F1)
+//
+// Este es el metodo que hace que las placas se muevan de verdad. Hasta el 15-08-2026 el
+// campo de IDs no se tocaba nunca: el sistema era un generador de relieve estatico, con
+// crestas creciendo siempre en las mismas lineas.
+//
+// El algoritmo es adveccion HACIA ATRAS (semi-lagrangiana). Para cada pixel de la rejilla
+// nueva se pregunta de donde viene, en vez de empujar cada pixel viejo hacia donde va.
+// La diferencia importa: empujar hacia delante deja huecos y solapes por redondeo, y no
+// da ninguna forma natural de detectar colisiones. Preguntando hacia atras, cada celda de
+// destino se resuelve exactamente una vez, y el NUMERO DE RECLAMANTES es por si solo la
+// clasificacion del borde:
+//
+//   1 reclamante  -> movimiento normal
+//   0 reclamantes -> las placas se separan: rift, corteza nueva
+//   2 o mas       -> convergen: subduccion u orogenia
+//
+// No hay que detectar "esto es una dorsal" en ningun sitio: sale del conteo.
+// ============================================================
+void URasterizedTectonics::AdvectPlateField(float DeltaTime)
+{
+    if (!bIsInitialized || !PlateSystem)
+    {
+        return;
+    }
+
+    const TArray<FTectonicPlate>& Plates = PlateSystem->GetPlates();
+    const int32 NumPlates = Plates.Num();
+    if (NumPlates == 0)
+    {
+        return;
+    }
+
+    // Rotacion INVERSA de cada placa: lleva un punto de "ahora" al lugar que ocupaba
+    // hace DeltaTime.
+    TArray<FQuat> InverseRotations;
+    InverseRotations.Reserve(NumPlates);
+    for (const FTectonicPlate& Plate : Plates)
+    {
+        InverseRotations.Add(UPlateKinematics::CalculatePlateRotation(Plate, DeltaTime).Inverse());
+    }
+
+    // Copia del estado anterior. Imprescindible: la adveccion lee el pasado mientras
+    // escribe el presente, y sin copia unas celdas verian datos ya sobrescritos y otras
+    // no, segun el orden de recorrido.
+    const TArray<FTectonicFaceTextureData> Prev = FaceData;
+
+    struct FFaceCounters
+    {
+        int32 Moved = 0;
+        int32 Created = 0;
+        int32 Destroyed = 0;
+        int32 Collisions = 0;
+    };
+    TArray<FFaceCounters> Counters;
+    Counters.SetNum(6);
+
+    ParallelFor(6, [&](int32 FaceIdx)
+    {
+        FTectonicFaceTextureData& Face = FaceData[FaceIdx];
+        FFaceCounters& Count = Counters[FaceIdx];
+
+        TArray<int32> Claimants;
+        TArray<int32> SourceFace;
+        TArray<int32> SourceIdx;
+        Claimants.Reserve(NumPlates);
+        SourceFace.Reserve(NumPlates);
+        SourceIdx.Reserve(NumPlates);
+
+        for (int32 Y = 0; Y < Resolution; ++Y)
+        {
+            for (int32 X = 0; X < Resolution; ++X)
+            {
+                const int32 Idx = Y * Resolution + X;
+                const FVector Dir = CubeFaceMapping::PixelToDirection(
+                    static_cast<ECSCubeFace>(FaceIdx), X, Y, Resolution);
+
+                Claimants.Reset();
+                SourceFace.Reset();
+                SourceIdx.Reset();
+
+                for (int32 P = 0; P < NumPlates; ++P)
+                {
+                    const FVector PrevDir = InverseRotations[P].RotateVector(Dir);
+
+                    ECSCubeFace PF;
+                    float PU, PV;
+                    CubeFaceMapping::DirectionToFaceTexUV(PrevDir, PF, PU, PV);
+
+                    const int32 PFaceIdx = static_cast<int32>(PF);
+                    const int32 PX = FMath::Clamp(FMath::FloorToInt(PU * Resolution), 0, Resolution - 1);
+                    const int32 PY = FMath::Clamp(FMath::FloorToInt(PV * Resolution), 0, Resolution - 1);
+                    const int32 PIdx = PY * Resolution + PX;
+
+                    if (Prev[PFaceIdx].PlateIDData[PIdx] == static_cast<uint8>(P))
+                    {
+                        Claimants.Add(P);
+                        SourceFace.Add(PFaceIdx);
+                        SourceIdx.Add(PIdx);
+                    }
+                }
+
+                if (Claimants.Num() == 1)
+                {
+                    // Movimiento limpio: se arrastra todo el estado desde el origen. Si no
+                    // se arrastrara el tipo de corteza, un continente cambiaria de tipo al
+                    // desplazarse y se disolveria en el oceano.
+                    const int32 SF = SourceFace[0];
+                    const int32 SI = SourceIdx[0];
+
+                    Face.PlateIDData[Idx]   = static_cast<uint8>(Claimants[0]);
+                    Face.ElevationData[Idx] = Prev[SF].ElevationData[SI];
+                    Face.CrustAgeData[Idx]  = Prev[SF].CrustAgeData[SI];
+                    Face.CrustTypeData[Idx] = Prev[SF].CrustTypeData[SI];
+                    ++Count.Moved;
+                }
+                else if (Claimants.Num() == 0)
+                {
+                    // RIFT. Nadie ocupaba este punto: dos placas se han separado y aqui
+                    // aflora manto. Corteza oceanica nueva, edad 0, y elevacion de dorsal
+                    // (una dorsal esta ~1300 m por encima de la llanura abisal porque la
+                    // corteza recien formada esta caliente y flota mas).
+                    //
+                    // Se asigna a la placa que estaba aqui antes: la corteza nueva se
+                    // suelda al borde de la placa que se aleja, que es lo que ocurre.
+                    const uint8 PreviousOwner = Prev[FaceIdx].PlateIDData[Idx];
+                    Face.PlateIDData[Idx]   = (PreviousOwner < NumPlates) ? PreviousOwner : 0;
+                    Face.CrustTypeData[Idx] = 0;
+                    Face.CrustAgeData[Idx]  = 0.0f;
+                    Face.ElevationData[Idx] = -2500.0f;
+                    ++Count.Created;
+                }
+                else
+                {
+                    // COLISION. Gana una placa y el resto subducen.
+                    ++Count.Collisions;
+
+                    int32 Winner = 0;
+                    for (int32 C = 1; C < Claimants.Num(); ++C)
+                    {
+                        const int32 WF = SourceFace[Winner], WI = SourceIdx[Winner];
+                        const int32 CF = SourceFace[C],      CI = SourceIdx[C];
+
+                        const bool bWinnerContinental = (Prev[WF].CrustTypeData[WI] == 1);
+                        const bool bChallengerContinental = (Prev[CF].CrustTypeData[CI] == 1);
+
+                        if (bChallengerContinental != bWinnerContinental)
+                        {
+                            // Continental sobre oceanica: la oceanica es mas densa y
+                            // subduce. Por eso los continentes persisten miles de millones
+                            // de anos mientras el fondo oceanico se recicla entero.
+                            if (bChallengerContinental)
+                            {
+                                Winner = C;
+                            }
+                        }
+                        else if (!bWinnerContinental)
+                        {
+                            // Oceanica contra oceanica: subduce la MAS VIEJA, que se ha
+                            // enfriado y es mas densa. Gana la mas joven.
+                            if (Prev[CF].CrustAgeData[CI] < Prev[WF].CrustAgeData[WI])
+                            {
+                                Winner = C;
+                            }
+                        }
+                        else
+                        {
+                            // Continental contra continental: ninguna subduce, las dos
+                            // flotan. Se queda la mas alta, aproximacion barata a que el
+                            // material se apila. El relieve de la colision en si lo
+                            // produce el termino de frontera de Step().
+                            if (Prev[CF].ElevationData[CI] > Prev[WF].ElevationData[WI])
+                            {
+                                Winner = C;
+                            }
+                        }
+                    }
+
+                    const int32 WF = SourceFace[Winner];
+                    const int32 WI = SourceIdx[Winner];
+
+                    Face.PlateIDData[Idx]   = static_cast<uint8>(Claimants[Winner]);
+                    Face.ElevationData[Idx] = Prev[WF].ElevationData[WI];
+                    Face.CrustAgeData[Idx]  = Prev[WF].CrustAgeData[WI];
+                    Face.CrustTypeData[Idx] = Prev[WF].CrustTypeData[WI];
+
+                    // Cada perdedor es una celda de corteza que desaparece: es la
+                    // contraparte de la creacion en dorsales que faltaba (el TODO de
+                    // BoundaryInteractions.cpp:609).
+                    Count.Destroyed += Claimants.Num() - 1;
+                }
+
+                // La velocidad depende de donde esta el punto AHORA y de quien lo posee
+                // ahora, asi que se recalcula tras resolver la propiedad. Si se dejara la
+                // del paso anterior, la deteccion de convergencia de Step() estaria usando
+                // la velocidad de una placa que ya no esta aqui.
+                const int32 OwnerId = static_cast<int32>(Face.PlateIDData[Idx]);
+                if (Plates.IsValidIndex(OwnerId))
+                {
+                    const FVector AngularVel =
+                        Plates[OwnerId].EulerPole.GetSafeNormal() * Plates[OwnerId].AngularVelocity;
+                    const FVector Velocity3D = FVector::CrossProduct(AngularVel, Dir);
+
+                    FVector TangentU, TangentV, FaceNormal;
+                    CubeFaceMapping::GetFaceAxes(static_cast<ECSCubeFace>(FaceIdx), TangentU, TangentV, FaceNormal);
+
+                    Face.VelocityData[Idx] = FVector2f(
+                        static_cast<float>(FVector::DotProduct(Velocity3D, TangentU)),
+                        static_cast<float>(FVector::DotProduct(Velocity3D, TangentV)));
+                }
+            }
+        }
+    });
+
+    for (const FFaceCounters& C : Counters)
+    {
+        AdvectionStats.CellsMoved     += C.Moved;
+        AdvectionStats.CellsCreated   += C.Created;
+        AdvectionStats.CellsDestroyed += C.Destroyed;
+        AdvectionStats.CollisionCells += C.Collisions;
+    }
+    AdvectionStats.AdvectionCount++;
+    AdvectionStats.AdvectedTime += DeltaTime;
+}
+
 void URasterizedTectonics::Step(const FPlateMovementParams& Params)
 {
     if (!bIsInitialized)
@@ -321,6 +576,39 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
     // TODO: Implementar versión GPU con compute shaders
     
     const float DeltaTimeScaled = Params.DeltaTime * Params.TimeScale;
+
+    // ============================================================
+    // MOVIMIENTO DE PLACAS (ROADMAP.md F1)
+    //
+    // No se advecta en cada paso, y no es una optimizacion sino lo correcto. Con los
+    // valores por defecto la placa mas rapida gira ~8e-5 rad por paso, mientras que un
+    // pixel abarca ~6.1e-3 rad a Resolution=256: seria 1/76 de pixel. Advectar ahi no
+    // movería nada y cada remuestreo introduce difusion numerica, asi que hacerlo 76
+    // veces en vez de una emborrona el campo de placas a cambio de nada.
+    //
+    // Se acumula tiempo hasta que la placa mas rapida recorreria un pixel, y entonces se
+    // advecta de una vez con el dt acumulado.
+    // ============================================================
+    PendingAdvectionTime += DeltaTimeScaled;
+
+    if (PlateSystem)
+    {
+        float MaxAngularSpeed = 0.0f;
+        for (const FTectonicPlate& Plate : PlateSystem->GetPlates())
+        {
+            MaxAngularSpeed = FMath::Max(MaxAngularSpeed, FMath::Abs(Plate.AngularVelocity));
+        }
+
+        const float PixelAngle = GetPixelAngularSize();
+        if (MaxAngularSpeed > KINDA_SMALL_NUMBER && PixelAngle > 0.0f)
+        {
+            if (MaxAngularSpeed * PendingAdvectionTime >= PixelAngle)
+            {
+                AdvectPlateField(PendingAdvectionTime);
+                PendingAdvectionTime = 0.0f;
+            }
+        }
+    }
 
     // Procesar cada cara
     for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
