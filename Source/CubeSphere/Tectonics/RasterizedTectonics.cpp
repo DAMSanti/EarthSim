@@ -1595,11 +1595,14 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
         // ParallelFor de abajo; se suma a AdvectionStats.ConvergentBoundaryCells despues.
         TArray<int32> ConvergentCounts;
         ConvergentCounts.Init(0, 6);
+        TArray<int32> TransformCounts;
+        TransformCounts.Init(0, 6);
 
         ParallelFor(6, [&](int32 FaceIdx)
         {
             FTectonicFaceTextureData& Face = FaceData[FaceIdx];
             int32 LocalConvergentCount = 0;
+            int32 LocalTransformCount = 0;
 
             // Detectar y procesar bordes de placa
             for (int32 Y = 1; Y < Resolution - 1; ++Y)
@@ -1609,22 +1612,80 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
                     const int32 Idx = GetLinearIndex(X, Y);
                     const uint8 CurrentPlateID = Face.PlateIDData[Idx];
 
+                    // Offsets de los 4 vecinos directos: se reutiliza mas abajo, sin
+                    // cambios, para decidir si una celda oceanica convergente TOCA
+                    // continente (acrecion de arco). No interviene en la clasificacion.
                     int32 Offsets[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
-                    bool bAtBoundary = false;
-                    float ConvergenceSum = 0.0f;
 
-                    for (int32 i = 0; i < 4; ++i)
+                    // ============================================================
+                    // R2.13 (16-08-2026): NORMAL DE FRONTERA POR SOBEL, no por eje de
+                    // rejilla.
+                    //
+                    // Dos intentos anteriores proyectaban la velocidad relativa sobre uno
+                    // de los 4 ejes de la rejilla -la direccion al vecino distinto. Es
+                    // valido solo si la frontera corre paralela a un eje; con placas de
+                    // forma organica la mayoria no lo hace, y el sesgo era sistematico:
+                    // ConvergentBoundaryCells caia un 62% y mas de dos tercios de las
+                    // celdas de frontera salian "transformante" sin que el deslizamiento
+                    // dominara de verdad.
+                    //
+                    // Aqui se calcula la normal real con el gradiente de Sobel de la
+                    // mascara binaria "es esta celda de MI placa" sobre el vecindario 3x3
+                    // -la tecnica estandar de deteccion de bordes en imagen, que no
+                    // depende de como caiga la frontera sobre los ejes. (Gx,Gy) apunta
+                    // hacia el interior de mi placa; la normal saliente hacia la otra
+                    // placa es -normalize(Gx,Gy).
+                    // ============================================================
+                    static const int32 Off8[8][2] = {
+                        {-1,-1}, {0,-1}, {1,-1},
+                        {-1, 0},         {1, 0},
+                        {-1, 1}, {0, 1}, {1, 1}
+                    };
+                    static const float SobelX[8] = { -1.0f, 0.0f, 1.0f, -2.0f, 2.0f, -1.0f, 0.0f, 1.0f };
+                    static const float SobelY[8] = { -1.0f, -2.0f, -1.0f, 0.0f, 0.0f, 1.0f, 2.0f, 1.0f };
+
+                    float Gx = 0.0f;
+                    float Gy = 0.0f;
+                    bool bAtBoundary = false;
+
+                    // Voto por placa vecina distinta: cual domina esta frontera, para
+                    // saber con quien se compara la velocidad. Como mucho 8 vecinos, como
+                    // mucho 8 placas distintas entre ellos.
+                    uint8 VoteID[8];
+                    int32 VoteCount[8];
+                    FVector2f VoteVelSum[8];
+                    int32 NumVotes = 0;
+
+                    for (int32 k = 0; k < 8; ++k)
                     {
-                        const int32 NeighborIdx = GetLinearIndex(X + Offsets[i][0], Y + Offsets[i][1]);
-                        if (Face.PlateIDData[NeighborIdx] != CurrentPlateID)
+                        const int32 NIdx = GetLinearIndex(X + Off8[k][0], Y + Off8[k][1]);
+                        const uint8 NPlate = Face.PlateIDData[NIdx];
+                        const float M = (NPlate == CurrentPlateID) ? 1.0f : 0.0f;
+                        Gx += SobelX[k] * M;
+                        Gy += SobelY[k] * M;
+
+                        if (NPlate != CurrentPlateID)
                         {
                             bAtBoundary = true;
 
-                            FVector2f Dir(static_cast<float>(Offsets[i][0]), static_cast<float>(Offsets[i][1]));
-                            Dir.Normalize();
-
-                            FVector2f RelVel = Face.VelocityData[Idx] - Face.VelocityData[NeighborIdx];
-                            ConvergenceSum += -FVector2f::DotProduct(RelVel, Dir);
+                            int32 VoteIdx = INDEX_NONE;
+                            for (int32 v = 0; v < NumVotes; ++v)
+                            {
+                                if (VoteID[v] == NPlate)
+                                {
+                                    VoteIdx = v;
+                                    break;
+                                }
+                            }
+                            if (VoteIdx == INDEX_NONE)
+                            {
+                                VoteIdx = NumVotes++;
+                                VoteID[VoteIdx] = NPlate;
+                                VoteCount[VoteIdx] = 0;
+                                VoteVelSum[VoteIdx] = FVector2f(0.0f, 0.0f);
+                            }
+                            ++VoteCount[VoteIdx];
+                            VoteVelSum[VoteIdx] += Face.VelocityData[NIdx];
                         }
                     }
 
@@ -1633,7 +1694,48 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
                         continue;
                     }
 
-                    if (ConvergenceSum > 0.0f)
+                    const float GradMagSq = Gx * Gx + Gy * Gy;
+                    if (GradMagSq < KINDA_SMALL_NUMBER)
+                    {
+                        // Mota simetrica sin normal definida (Gx=Gy=0): no se inventa una
+                        // normal de un vector nulo, se salta la clasificacion este paso.
+                        continue;
+                    }
+
+                    const float InvGradMag = FMath::InvSqrt(GradMagSq);
+                    const FVector2f Normal(-Gx * InvGradMag, -Gy * InvGradMag);
+                    const FVector2f Perp(-Normal.Y, Normal.X);
+
+                    // La placa que mas vecinos distintos aporta es con quien se compara.
+                    int32 BestVote = 0;
+                    for (int32 v = 1; v < NumVotes; ++v)
+                    {
+                        if (VoteCount[v] > VoteCount[BestVote])
+                        {
+                            BestVote = v;
+                        }
+                    }
+                    const FVector2f OtherVel = VoteVelSum[BestVote] / static_cast<float>(VoteCount[BestVote]);
+                    const FVector2f RelVel = Face.VelocityData[Idx] - OtherVel;
+
+                    const float ConvergenceSum = -FVector2f::DotProduct(RelVel, Normal);
+                    const float TangentialSum = FMath::Abs(FVector2f::DotProduct(RelVel, Perp));
+
+                    // R2.13: si el deslizamiento tangencial domina sobre el acercamiento o
+                    // separacion radial, esto es una falla TRANSFORMANTE: friccion y
+                    // sismicidad, pero ni crea ni destruye corteza. Se comprueba antes que
+                    // las ramas de convergencia/divergencia para que una transformante no
+                    // se cuele como orogenia o rift solo por tener un resto radial pequeno.
+                    const bool bTransformDominant = TangentialSum > FMath::Abs(ConvergenceSum);
+
+                    if (bTransformDominant)
+                    {
+                        ++LocalTransformCount;
+                        // Sin consumidor todavia (friccion/sismicidad, R7.x vulcanismo):
+                        // se cuenta y se deja la celda tal cual, ni engrosa ni adelgaza.
+                        // Ver ROADMAP.md F1G.
+                    }
+                    else if (ConvergenceSum > 0.0f)
                     {
                         ++LocalConvergentCount;
 
@@ -1697,11 +1799,30 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
                             // madurez, y el area continental crecia un 220% en 7500 Ma
                             // independientemente de la tasa - bajarla a la mitad no cambiaba
                             // nada. El limite no era el ritmo sino la superficie afectada.
+                            //
+                            // ARREGLO (16-08-2026): "toca continente" comprobaba solo el
+                            // TIPO del vecino, no de que PLACA es. Eso deja pasar un frente
+                            // que se propaga solo: una celda oceanica que acrecciona pasa a
+                            // tipo continental, y al paso siguiente SU PROPIO vecino
+                            // oceanico -de la MISMA placa subducente- ya "toca continente"
+                            // sin haber llegado nunca al margen con la placa cabalgante. Es
+                            // exactamente la superficie afectada de la que avisaba el
+                            // comentario de arriba, midiendola con la normal de Sobel: al
+                            // clasificar la convergencia bien, mas celdas entraban en esta
+                            // rama de forma consistente y el frente alcanzo el 74,3% del
+                            // planeta en el fixture de prueba.
+                            //
+                            // El arco de verdad se forma en el contacto con la placa
+                            // CABALGANTE -otra placa-, no con corteza continental cercana
+                            // de la propia placa subducente. Exigir que el vecino
+                            // continental pertenezca a OTRA placa ancla la acrecion al
+                            // margen real y no dentro de la placa que ya converti.
                             bool bTouchesContinent = false;
                             for (int32 A = 0; A < 4 && !bTouchesContinent; ++A)
                             {
                                 const int32 AdjIdx = GetLinearIndex(X + Offsets[A][0], Y + Offsets[A][1]);
-                                bTouchesContinent = (Face.CrustTypeData[AdjIdx] == 1);
+                                bTouchesContinent = (Face.CrustTypeData[AdjIdx] == 1)
+                                    && (Face.PlateIDData[AdjIdx] != CurrentPlateID);
                             }
 
                             if (!bTouchesContinent)
@@ -1735,10 +1856,12 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
             }
 
             ConvergentCounts[FaceIdx] = LocalConvergentCount;
+            TransformCounts[FaceIdx] = LocalTransformCount;
         });
 
         for (int32 F = 0; F < 6; ++F)
         {
+            AdvectionStats.TransformBoundaryCells += TransformCounts[F];
             AdvectionStats.ConvergentBoundaryCells += ConvergentCounts[F];
         }
         AccumulateMs(StepTimings.BoundaryMs, BoundaryStart);

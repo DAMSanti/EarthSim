@@ -350,6 +350,19 @@ struct CUBESPHERE_API FTectonicAdvectionStats
     int32 ConvergentBoundaryCells = 0;
 
     /**
+     * R2.13 (16-08-2026): celdas de frontera donde la velocidad relativa es sobre todo
+     * TANGENCIAL en vez de radial -deslizamiento, no acercamiento ni separacion. Es la
+     * tercera categoria junto a ConvergentBoundaryCells (radial negativo) y el rift
+     * (radial positivo): una transformante no crea ni destruye corteza. Clasificada
+     * contra la normal real de la frontera (gradiente de Sobel de la mascara de placa
+     * propia), no contra un eje de la rejilla -un primer intento con la direccion al
+     * vecino como normal sesgaba sistematicamente hacia "transformante" en cualquier
+     * frontera no alineada con los ejes.
+     */
+    UPROPERTY(BlueprintReadOnly)
+    int32 TransformBoundaryCells = 0;
+
+    /**
      * Celdas recuperadas por la bÃºsqueda con tolerancia de media celda: pertenecÃ­an a una
      * placa pero el redondeo al centro de celda mÃ¡s cercano las dejaba fuera de su regiÃ³n.
      * No son fÃ­sica, son error de bÃºsqueda.

@@ -778,10 +778,10 @@ bool FOrogenyBuildsMountainsTest::RunTest(const FString& Parameters)
     const float After = MaxElevation();
     const FTectonicAdvectionStats Stats = Raster->GetAdvectionStats();
 
-    UE_LOG(LogTemp, Log, TEXT("OrogenyBuildsMountains: elevacion maxima %.0f m -> %.0f m tras %.0f Ma (%d advecciones, senal1=%d colisiones, senal2=%d convergentes)"),
-        Before, After, Steps * Params.DeltaTime, Stats.AdvectionCount, Stats.CollisionCells, Stats.ConvergentBoundaryCells);
-    AddInfo(FString::Printf(TEXT("Elevacion maxima %.0f m -> %.0f m tras %.0f Ma (senal1=%d, senal2=%d)"),
-        Before, After, Steps * Params.DeltaTime, Stats.CollisionCells, Stats.ConvergentBoundaryCells));
+    UE_LOG(LogTemp, Log, TEXT("OrogenyBuildsMountains: elevacion maxima %.0f m -> %.0f m tras %.0f Ma (%d advecciones, senal1=%d colisiones, senal2=%d convergentes, senal3=%d transformantes)"),
+        Before, After, Steps * Params.DeltaTime, Stats.AdvectionCount, Stats.CollisionCells, Stats.ConvergentBoundaryCells, Stats.TransformBoundaryCells);
+    AddInfo(FString::Printf(TEXT("Elevacion maxima %.0f m -> %.0f m tras %.0f Ma (senal1=%d, senal2=%d, senal3=%d)"),
+        Before, After, Steps * Params.DeltaTime, Stats.CollisionCells, Stats.ConvergentBoundaryCells, Stats.TransformBoundaryCells));
 
     if (!TestTrue(TEXT("Hubo colisiones que pudieran levantar relieve"), Stats.CollisionCells > 0))
     {
