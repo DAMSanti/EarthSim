@@ -778,6 +778,8 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
         int32 Collisions = 0;
         int32 Recovered = 0;
         int32 Unresolved = 0;
+        int32 MaterialReads = 0;
+        int32 MaterialFallbacks = 0;
     };
     TArray<FFaceCounters> Counters;
     Counters.SetNum(6);
@@ -859,8 +861,10 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
                     // placa, con la rotacion acumulada. Un solo remuestreo desde el inicio,
                     // en vez de encadenar uno por adveccion.
                     float MAge; uint8 MType; float MThick; float MElev;
+                    ++Count.MaterialReads;
                     if (!ReadPlateMaterial(Owner, Dir, MAge, MType, MThick, MElev))
                     {
+                        ++Count.MaterialFallbacks;
                         // Territorio recien ganado: el marco aun no tiene material ahi.
                         // Se hereda lo que habia en el mundo, y el write-back de este paso
                         // ya lo deja guardado en el marco.
@@ -1125,8 +1129,10 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
                         // Movimiento normal, igual que el caso de un unico reclamante: el
                         // material tambien sale del marco de la placa.
                         float RAge; uint8 RType; float RThick; float RElev;
+                        ++Count.MaterialReads;
                         if (!ReadPlateMaterial(RecoveredPlate, Dir, RAge, RType, RThick, RElev))
                         {
+                            ++Count.MaterialFallbacks;
                             RAge = Prev[RecoveredFace].CrustAgeData[RecoveredIdx];
                             RType = Prev[RecoveredFace].CrustTypeData[RecoveredIdx];
                             RThick = Prev[RecoveredFace].CrustThicknessData[RecoveredIdx];
@@ -1221,8 +1227,10 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
                     for (int32 C = 0; C < Claimants.Num(); ++C)
                     {
                         float CAge; uint8 CType; float CThick; float CElev;
+                        ++Count.MaterialReads;
                         if (!ReadPlateMaterial(Claimants[C], Dir, CAge, CType, CThick, CElev))
                         {
+                            ++Count.MaterialFallbacks;
                             const int32 SFb = SourceFace[C], SIb = SourceIdx[C];
                             CAge = Prev[SFb].CrustAgeData[SIb];
                             CType = Prev[SFb].CrustTypeData[SIb];
@@ -1451,6 +1459,8 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
         AdvectionStats.CollisionCells += C.Collisions;
         AdvectionStats.CellsRecovered += C.Recovered;
         AdvectionStats.CellsUnresolved += C.Unresolved;
+        AdvectionStats.MaterialReads += C.MaterialReads;
+        AdvectionStats.MaterialFallbacks += C.MaterialFallbacks;
     }
     AdvectionStats.AdvectionCount++;
     AdvectionStats.AdvectedTime += DeltaTime;
@@ -1519,6 +1529,10 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
 
             if (Done >= MaxAdvectionsPerStep)
             {
+                // AUDITORIA: aqui se pierde tiempo simulado de verdad. Es lo unico que
+                // significa "el reloj miente"; el resto pendiente sin disparar no lo es.
+                AdvectionStats.DiscardedTime += PendingAdvectionTime;
+                ++AdvectionStats.DiscardEvents;
                 PendingAdvectionTime = 0.0f;
             }
         }

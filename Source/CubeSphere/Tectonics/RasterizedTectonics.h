@@ -358,6 +358,44 @@ struct CUBESPHERE_API FTectonicAdvectionStats
     /** Tiempo simulado total realmente advectado. */
     UPROPERTY(BlueprintReadOnly)
     float AdvectedTime = 0.0f;
+
+    /**
+     * AUDITORÃ‰A (16-08-2026): veces que el material NO estaba en el marco de su placa y
+     * hubo que caer al respaldo -leer del mundo anterior-, que es una lectura ENCADENADA,
+     * justo lo que el marco por placa viene a evitar.
+     *
+     * Se mide porque no se sabe su magnitud. Si es residual, da igual. Si es alto, la
+     * separaciÃ³n entre propiedad y material estÃ¡ medio deshecha sin que nadie lo sepa.
+     */
+    UPROPERTY(BlueprintReadOnly)
+    int32 MaterialFallbacks = 0;
+
+    /** Lecturas de material intentadas, para poder expresar lo anterior en porcentaje. */
+    UPROPERTY(BlueprintReadOnly)
+    int32 MaterialReads = 0;
+
+    /**
+     * AUDITORÃ‰A (16-08-2026): tiempo simulado que se TIRA A LA BASURA.
+     *
+     * `Step()` trocea el desplazamiento en advecciones de ~1 pÃ­xel, con un techo de 8 por
+     * paso para no bloquear el frame. Al agotar el techo, el tiempo sobrante se descarta â€”
+     * pero `TotalSimulationTime` sigue sumando el paso entero. Si eso ocurre, el reloj
+     * miente: el planeta envejece menos de lo que el HUD dice, y con Ã©l todas las edades y
+     * tasas del modelo.
+     *
+     * Se mide aquÃ­ y no restando `TotalSimulationTime - AdvectedTime`, porque esa resta
+     * estÃ¡ dominada por el acumulador a medio llenar â€”un diente de sierra acotado y
+     * benigno, que decae como 1/t y no es pÃ©rdida ninguna. La resta NO puede ver esto.
+     *
+     * Se dispara con `TimeScale` alto y con resoluciÃ³n alta: un pÃ­xel mÃ¡s pequeÃ±o exige
+     * mÃ¡s advecciones por paso.
+     */
+    UPROPERTY(BlueprintReadOnly)
+    float DiscardedTime = 0.0f;
+
+    /** CuÃ¡ntas veces se ha agotado el techo de advecciones y se ha descartado tiempo. */
+    UPROPERTY(BlueprintReadOnly)
+    int32 DiscardEvents = 0;
 };
 
 /**
@@ -440,6 +478,18 @@ public:
 
     UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics")
     FTectonicAdvectionStats GetAdvectionStats() const { return AdvectionStats; }
+
+    /**
+     * Tiempo que el simulador CREE que ha pasado.
+     *
+     * AUDITORÃ‰A (16-08-2026): hay que poder compararlo con `AdvectionStats.AdvectedTime`,
+     * que es el que de verdad se ha advectado. `Step()` tiene un techo de 8 advecciones por
+     * paso y **descarta el tiempo sobrante**, pero sigue sumando el paso entero aquÃ­. Si los
+     * dos nÃºmeros divergen, el reloj miente: las edades de corteza y todas las tasas del
+     * modelo estarÃ­an mal escaladas, y con ellas cualquier medida que se use para juzgar
+     * otro cambio.
+     */
+    float GetTotalSimulationTime() const { return TotalSimulationTime; }
 
     /** Desglose de coste del Ãºltimo paso, por fase. */
     UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics")

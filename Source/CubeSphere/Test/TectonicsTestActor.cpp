@@ -1284,6 +1284,9 @@ void ATectonicsTestActor::DrawScreenDebugInfo()
         TEXT("[+/-] Velocidad | [1-8] Placa\n")
         TEXT("[V] Velocidades | [B] Límites\n")
         TEXT("Corteza: +%d creada / -%d destruida (%d advecciones)\n")
+        TEXT("AUDIT reloj: sim %.2f Ma / advectado %.2f Ma (pendiente %.1f%%)\n")
+        TEXT("AUDIT tiempo TIRADO: %.2f Ma en %d veces\n")
+        TEXT("AUDIT respaldo material: %d de %d (%.2f%%)\n")
         TEXT("Drenaje: %d celdas de cauce | %d lagos\n")
         TEXT("Coste: sim %.1f ms @%.0f Hz | malla %.1f ms @%.0f Hz\n")
         TEXT("  adv %.1f (motas %.1f) front %.1f dif %.1f iso %.1f ms\n")
@@ -1298,6 +1301,28 @@ void ATectonicsTestActor::DrawScreenDebugInfo()
         RasterizedTectonics ? RasterizedTectonics->GetAdvectionStats().CellsCreated : 0,
         RasterizedTectonics ? RasterizedTectonics->GetAdvectionStats().CellsDestroyed : 0,
         RasterizedTectonics ? RasterizedTectonics->GetAdvectionStats().AdvectionCount : 0,
+        // AUDITORIA 0a: el reloj. TotalSimulationTime suma el paso entero siempre, pero
+        // Step() descarta el tiempo sobrante cuando hacen falta mas de 8 advecciones. Si
+        // estos dos numeros divergen, las edades y las tasas estan mal escaladas.
+        RasterizedTectonics ? RasterizedTectonics->GetTotalSimulationTime() : 0.0f,
+        RasterizedTectonics ? RasterizedTectonics->GetAdvectionStats().AdvectedTime : 0.0f,
+        (RasterizedTectonics && RasterizedTectonics->GetTotalSimulationTime() > 0.0f)
+            ? 100.0f * (RasterizedTectonics->GetTotalSimulationTime()
+                      - RasterizedTectonics->GetAdvectionStats().AdvectedTime)
+                     / RasterizedTectonics->GetTotalSimulationTime()
+            : 0.0f,
+        // AUDITORIA 0a-bis: esto SI es tiempo perdido. La resta de arriba esta dominada por
+        // el acumulador a medio llenar y no puede ver este termino.
+        RasterizedTectonics ? RasterizedTectonics->GetAdvectionStats().DiscardedTime : 0.0f,
+        RasterizedTectonics ? RasterizedTectonics->GetAdvectionStats().DiscardEvents : 0,
+        // AUDITORIA 0b: cuantas lecturas de material caen al respaldo (lectura encadenada
+        // del mundo) en vez de salir del marco propio de la placa.
+        RasterizedTectonics ? RasterizedTectonics->GetAdvectionStats().MaterialFallbacks : 0,
+        RasterizedTectonics ? RasterizedTectonics->GetAdvectionStats().MaterialReads : 0,
+        (RasterizedTectonics && RasterizedTectonics->GetAdvectionStats().MaterialReads > 0)
+            ? 100.0f * RasterizedTectonics->GetAdvectionStats().MaterialFallbacks
+                     / RasterizedTectonics->GetAdvectionStats().MaterialReads
+            : 0.0f,
         Hydrology ? Hydrology->GetStats().ChannelCells : 0,
         Hydrology ? Hydrology->GetStats().SinkCells : 0,
         AvgSimStepMs,

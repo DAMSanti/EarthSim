@@ -970,6 +970,28 @@ bool FLongRunStabilityTest::RunTest(const FString& Parameters)
         Stats.CellsRecovered, RecoveredFraction * 100.0f,
         Stats.CellsUnresolved, UnresolvedFraction * 100.0f);
 
+    // ------------------------------------------------------------
+    // AUDITORIA (16-08-2026). Dos numeros que nunca se habian mirado, y que hacen falta
+    // ANTES de juzgar cualquier otro cambio: si el reloj miente, todas las edades y tasas
+    // del modelo estan mal escaladas, y con ellas cualquier medida que se use de criterio.
+    // ------------------------------------------------------------
+    const float ClockDrift = (Raster->GetTotalSimulationTime() > 0.0f)
+        ? 100.0f * (Raster->GetTotalSimulationTime() - Stats.AdvectedTime) / Raster->GetTotalSimulationTime()
+        : 0.0f;
+    UE_LOG(LogTemp, Log, TEXT("  AUDIT reloj: pedido %.1f Ma | sim %.1f Ma | advectado %.1f Ma | pendiente %.2f%%"),
+        Steps * Params.DeltaTime, Raster->GetTotalSimulationTime(), Stats.AdvectedTime, ClockDrift);
+
+    // Esto SI es tiempo perdido. El "pendiente" de arriba es el acumulador a medio llenar:
+    // acotado por un intervalo de adveccion, decae como 1/t, y no es una perdida.
+    UE_LOG(LogTemp, Log, TEXT("  AUDIT tiempo TIRADO: %.2f Ma en %d veces (%.3f%% de lo pedido)"),
+        Stats.DiscardedTime, Stats.DiscardEvents,
+        100.0f * Stats.DiscardedTime / FMath::Max(Steps * Params.DeltaTime, 1.0f));
+
+    const float FallbackFrac = (Stats.MaterialReads > 0)
+        ? 100.0f * static_cast<float>(Stats.MaterialFallbacks) / Stats.MaterialReads : 0.0f;
+    UE_LOG(LogTemp, Log, TEXT("  AUDIT respaldo material: %d de %d lecturas (%.2f%%) salen del mundo y no del marco"),
+        Stats.MaterialFallbacks, Stats.MaterialReads, FallbackFrac);
+
     // Las celdas sin resolver son las que producen cordones congelados. Tienen que ser
     // residuales: si vuelven a ser una fraccion apreciable, los cordones estan de vuelta.
     TestTrue(FString::Printf(TEXT("Casi ninguna celda se queda congelada (%d de %d, %.4f%%)"),
