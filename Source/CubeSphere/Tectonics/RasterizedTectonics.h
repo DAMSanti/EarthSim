@@ -335,6 +335,21 @@ struct CUBESPHERE_API FTectonicAdvectionStats
     int32 CollisionCells = 0;
 
     /**
+     * SENAL 2 de colision (16-08-2026): celdas donde Step() detecto convergencia entre
+     * vecinos directos (ConvergenceSum > 0) y disparo engrosamiento por orogenia o
+     * acrecion de arco. Es la contraparte lenta de CollisionCells (la SENAL 1, que se
+     * dispara en AdvectPlateField cuando Claimants.Num() >= 2 durante la propia adveccion).
+     *
+     * Las dos dependen de PlateIDData pero de forma distinta: CollisionCells del test
+     * estricto de reclamacion contra el mundo anterior, esta de comparar el ID actual
+     * entre los 4 vecinos directos. Cualquier cambio al pase de propiedad que rompa una
+     * de las dos sin romper la otra se ve aqui, comparando ambos contadores paso a paso,
+     * en vez de tener que esperar cientos de Ma a que el relieve final lo delate.
+     */
+    UPROPERTY(BlueprintReadOnly)
+    int32 ConvergentBoundaryCells = 0;
+
+    /**
      * Celdas recuperadas por la bÃºsqueda con tolerancia de media celda: pertenecÃ­an a una
      * placa pero el redondeo al centro de celda mÃ¡s cercano las dejaba fuera de su regiÃ³n.
      * No son fÃ­sica, son error de bÃºsqueda.

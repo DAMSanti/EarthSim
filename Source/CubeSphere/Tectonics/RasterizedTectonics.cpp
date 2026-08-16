@@ -1589,9 +1589,17 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
         // Procesar cada cara. ParallelFor por cara: cada hilo solo escribe en la suya,
         // asi que no hay carrera.
         const double BoundaryStart = FPlatformTime::Seconds();
+
+        // SENAL 2 (16-08-2026): cuenta por cara de celdas que dispararon convergencia
+        // (ConvergenceSum > 0) este sub-paso. Un array por cara evita la carrera del
+        // ParallelFor de abajo; se suma a AdvectionStats.ConvergentBoundaryCells despues.
+        TArray<int32> ConvergentCounts;
+        ConvergentCounts.Init(0, 6);
+
         ParallelFor(6, [&](int32 FaceIdx)
         {
             FTectonicFaceTextureData& Face = FaceData[FaceIdx];
+            int32 LocalConvergentCount = 0;
 
             // Detectar y procesar bordes de placa
             for (int32 Y = 1; Y < Resolution - 1; ++Y)
@@ -1627,6 +1635,8 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
 
                     if (ConvergenceSum > 0.0f)
                     {
+                        ++LocalConvergentCount;
+
                         // OROGENIA COMO ENGROSAMIENTO (ROADMAP.md F2).
                         //
                         // Antes esto sumaba metros a la elevacion directamente. Ahora suma
@@ -1723,7 +1733,14 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
                     }
                 }
             }
+
+            ConvergentCounts[FaceIdx] = LocalConvergentCount;
         });
+
+        for (int32 F = 0; F < 6; ++F)
+        {
+            AdvectionStats.ConvergentBoundaryCells += ConvergentCounts[F];
+        }
         AccumulateMs(StepTimings.BoundaryMs, BoundaryStart);
 
         const double DiffusionStart = FPlatformTime::Seconds();
