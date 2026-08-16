@@ -1,7 +1,3 @@
-> 🗃️ **Documento archivado.** Inventario de código anterior, con secciones ya caducadas conservadas como historial. Reemplazado por [`docs/SPECS.md`](../docs/SPECS.md), reescrito contra el código actual. Ver [`LEEME.md`](LEEME.md).
-
----
-
 # SPECS.md — Especificación Técnica (Simu)
 
 > Este documento describe el sistema **tal como existe hoy en el código**, no la visión aspiracional. Para la visión completa del producto ver [`docs/01-resumen-ejecutivo.md`](docs/01-resumen-ejecutivo.md) y el resto de `docs/`. Cada sección marca explícitamente **Implementado** / **Parcial** / **No implementado**, con referencias a archivo para poder verificarlo.

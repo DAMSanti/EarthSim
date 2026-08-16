@@ -1,7 +1,3 @@
-> 🗃️ **Documento archivado.** Visión de diseño original, anterior al código. Destilado y corregido en [`docs/REQUISITOS.md`](../docs/REQUISITOS.md) — ver [`LEEME.md`](LEEME.md) para saber dónde acabó cada parte y en qué puntos el destilado lo contradice.
-
----
-
 # Hoja de Ruta del Proyecto
 
 ## Cronograma de Desarrollo

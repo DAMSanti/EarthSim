@@ -1,7 +1,3 @@
-> 🗃️ **Documento archivado.** Visión de diseño original, anterior al código. Destilado y corregido en [`docs/REQUISITOS.md`](../docs/REQUISITOS.md) — ver [`LEEME.md`](LEEME.md) para saber dónde acabó cada parte y en qué puntos el destilado lo contradice.
-
----
-
 # Geodinámica: Motor de Tectónica de Placas
 
 La topografía debe ser una **propiedad emergente** de la interacción dinámica de placas tectónicas.

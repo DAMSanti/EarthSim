@@ -1,7 +1,3 @@
-> 🗃️ **Documento archivado.** Plan de trabajo del 15/16-08-2026, con el anexo mezclado dentro. Sus pasos están ahora en [`docs/ROADMAP.md`](../docs/ROADMAP.md) y su anexo en [`docs/ANEXO.md`](../docs/ANEXO.md). Ver [`LEEME.md`](LEEME.md).
-
----
-
 # ROADMAP.md — Plan de Desarrollo
 
 > Basado en el inventario real de código ([`SPECS.md`](SPECS.md)), no en una estimación de calendario. Reescrito el 15-08-2026 tras una auditoría que contradijo la versión anterior; actualizado el 16-08-2026.

@@ -831,8 +831,6 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
         int32 Collisions = 0;
         int32 Recovered = 0;
         int32 Unresolved = 0;
-        int32 MaterialReads = 0;
-        int32 MaterialFallbacks = 0;
     };
     TArray<FFaceCounters> Counters;
     Counters.SetNum(6);
@@ -882,10 +880,8 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
                 // --- Material: del marco propio de la placa, un solo remuestreo ---
                 float MAge, MThick, MElev;
                 uint8 MType;
-                ++Count.MaterialReads;
                 if (!ReadPlateMaterial(Owner, Dir, MAge, MType, MThick, MElev))
                 {
-                    ++Count.MaterialFallbacks;
                     MAge = Prev[SF].CrustAgeData[SI];
                     MType = Prev[SF].CrustTypeData[SI];
                     MThick = Prev[SF].CrustThicknessData[SI];
@@ -992,10 +988,8 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
 
                     float OAge, OThick, OElev;
                     uint8 OType;
-                    ++Count.MaterialReads;
                     if (!ReadPlateMaterial(ConvergentOther, Dir, OAge, OType, OThick, OElev))
                     {
-                        ++Count.MaterialFallbacks;
                         OAge = Prev[ConvergentFace].CrustAgeData[ConvergentIdx];
                         OType = Prev[ConvergentFace].CrustTypeData[ConvergentIdx];
                         OThick = Prev[ConvergentFace].CrustThicknessData[ConvergentIdx];
@@ -1201,8 +1195,6 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
         AdvectionStats.CollisionCells += C.Collisions;
         AdvectionStats.CellsRecovered += C.Recovered;
         AdvectionStats.CellsUnresolved += C.Unresolved;
-        AdvectionStats.MaterialReads += C.MaterialReads;
-        AdvectionStats.MaterialFallbacks += C.MaterialFallbacks;
     }
     AdvectionStats.AdvectionCount++;
     AdvectionStats.AdvectedTime += DeltaTime;
@@ -1271,10 +1263,6 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
 
             if (Done >= MaxAdvectionsPerStep)
             {
-                // AUDITORIA: aqui se pierde tiempo simulado de verdad. Es lo unico que
-                // significa "el reloj miente"; el resto pendiente sin disparar no lo es.
-                AdvectionStats.DiscardedTime += PendingAdvectionTime;
-                ++AdvectionStats.DiscardEvents;
                 PendingAdvectionTime = 0.0f;
             }
         }
