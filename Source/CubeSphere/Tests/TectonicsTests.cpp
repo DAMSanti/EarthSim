@@ -2509,6 +2509,104 @@ bool FNoPermanentlyStuckCellsTest::RunTest(const FString& Parameters)
     return true;
 }
 
+// ------------------------------------------------------------
+// LA CINTA OCEANICA DENTRO DEL CONTINENTE (16-08-2026)
+//
+// Sintoma reportado por el usuario: "puentes" rectos uniendo continentes y una peninsula
+// que no derivaba mientras el resto si.
+//
+// Que se midio hasta dar con ello, porque el camino corto no existio:
+//   - El artefacto sale en TODOS los campos de material - elevacion, grosor, edad, tipo, y
+//     de rebote en temperatura, precipitacion y drenaje - pero NO en el de ID de placa.
+//     No es que ese campo este sano: es que dentro de una placa es un color plano, y sobre
+//     un color plano el deshilachado no se ve.
+//   - Las celdas nuevas de la cinta son corteza oceanica VIEJA (su edad sigue al tiempo de
+//     simulacion), no material recien creado. Nadie las fabrica: la adveccion las
+//     transporta hasta meterlas dentro del continente.
+//   - Y estan en la MISMA PLACA que el continente que las rodea. Dentro de una placa
+//     rigida el material se mueve en bloque y el dibujo deberia trasladarse tal cual.
+//
+// Causa: se ENCADENABAN remuestreos. Cada adveccion volvia a muestrear el resultado ya
+// remuestreado de la anterior, asi que el error no se corregia sino que se acumulaba.
+//
+// La prueba que lo demostro, variando cuantas advecciones caben en los mismos 120 Ma:
+//     advecciones  48  24   6   2   1
+//     cinta        14   8   3   4   2
+// La longitud sigue al NUMERO DE ADVECCIONES, no al tiempo simulado.
+//
+// Este test deja fija esa comparacion: con el muestreo desde el referente, encadenar mas
+// advecciones ya no puede alargar la cinta.
+// ------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FOceanicRibbonOriginTest,
+    "Simu.Tectonics.OceanicRibbon",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FOceanicRibbonOriginTest::RunTest(const FString& Parameters)
+{
+    const int32 Res = 128;
+    const float Strides[3] = { 1.0f, 8.0f, 48.0f };
+    int32 Longest[3] = { 0, 0, 0 };
+
+    for (int32 S = 0; S < 3; ++S)
+    {
+        UCubeSphereGrid* Grid = nullptr;
+        UTectonicPlateSystem* System = nullptr;
+        URasterizedTectonics* Raster = nullptr;
+        if (!TestTrue(TEXT("Fixture montado"), BuildF1Fixture(Res, Res, 8, 31337, Grid, System, Raster)))
+        {
+            return false;
+        }
+
+        FPlateMovementParams Params;
+        Params.DeltaTime = 0.1f;
+        Params.AdvectionPixelStride = Strides[S];
+
+        for (int32 i = 0; i < 1200; ++i)   // 120 Ma
+        {
+            System->Step(Params.DeltaTime);
+            Raster->Step(Params);
+        }
+
+        // La cinta tal como se ve en pantalla: corteza OCEANICA con continente encima y
+        // debajo. Se mide esta polaridad y no la contraria: son cosas distintas, y
+        // contarlas juntas fue lo que despisto durante horas.
+        int32 Best = 0;
+        for (int32 F = 0; F < 6; ++F)
+        {
+            const ECSCubeFace Fc = static_cast<ECSCubeFace>(F);
+            for (int32 Y = 1; Y < Res - 1; ++Y)
+            {
+                int32 Run = 0;
+                for (int32 X = 1; X < Res - 1; ++X)
+                {
+                    const bool bRibbon = (Raster->GetCrustTypeAt(Fc, X, Y) == 0)
+                                      && (Raster->GetCrustTypeAt(Fc, X, Y - 1) == 1)
+                                      && (Raster->GetCrustTypeAt(Fc, X, Y + 1) == 1);
+                    Run = bRibbon ? (Run + 1) : 0;
+                    Best = FMath::Max(Best, Run);
+                }
+            }
+        }
+        Longest[S] = Best;
+
+        UE_LOG(LogTemp, Log, TEXT("Stride %.0f: %d advecciones en 120 Ma | cinta mas larga %d celdas"),
+            Strides[S], Raster->GetAdvectionStats().AdvectionCount, Best);
+    }
+
+    AddInfo(FString::Printf(TEXT("cinta: %d (48 adv), %d (6 adv), %d (1 adv)"),
+        Longest[0], Longest[1], Longest[2]));
+
+    // Lo que hay que exigir no es un numero concreto sino que ENCADENAR NO PENALICE: con
+    // 48 advecciones la cinta no puede ser mucho mas larga que con una sola. Antes del
+    // arreglo era 14 frente a 2.
+    TestTrue(FString::Printf(
+        TEXT("Encadenar advecciones no alarga la cinta (%d con 48 advecciones, %d con 1)"),
+        Longest[0], Longest[2]),
+        Longest[0] <= Longest[2] + 3);
+
+    return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFrozenCellsAtProductionResTest,
     "Simu.Tectonics.FrozenCellsAtProductionRes",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)

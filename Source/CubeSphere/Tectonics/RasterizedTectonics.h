@@ -31,6 +31,11 @@ struct FTectonicFaceTextureData
     TArray<float> CrustAgeData;      // Edad de la corteza
     TArray<uint8> CrustTypeData;     // Tipo (oceÃ¡nica/continental)
     TArray<float> CrustThicknessData; // Grosor de corteza (m) - estado primario desde F2
+
+    // De que celda del ESTADO DE REFERENCIA salio esta celda. Sirve para devolver al
+    // referente los cambios que la fisica hace sobre el mundo (orogenia, rift, erosion).
+    TArray<uint8> RefSourceFaceData;
+    TArray<int32> RefSourceIdxData;
     TArray<int32> RecoveryCountData;
 
     // DIAGNOSTICO: cuantas advecciones ha resuelto esta celda por el camino de
@@ -651,6 +656,36 @@ protected:
 
     /** Nivel del mar (m). Se resuelve por bisecciÃ³n para conservar volumen de ocÃ©ano. */
     float SeaLevel = 0.0f;
+
+    // ================================================================
+    // ESTADO DE REFERENCIA (16-08-2026)
+    //
+    // El artefacto que el usuario reportaba - "puentes" rectos entre continentes y una
+    // peninsula que no derivaba - venia de ENCADENAR remuestreos: cada adveccion volvia a
+    // muestrear el resultado ya remuestreado de la anterior, asi que el error no se
+    // corregia, se acumulaba. Una frontera oblicua entre corteza oceanica y continental se
+    // deshilachaba en la direccion del movimiento, una celda por adveccion.
+    //
+    // Medido variando cuantas advecciones caben en los mismos 120 Ma:
+    //     advecciones  48  24   6   2   1
+    //     cinta        14   8   3   4   2
+    // La cinta sigue al NUMERO DE ADVECCIONES, no al tiempo. Con un solo remuestreo mide 2
+    // celdas; con 48 encadenados, 14.
+    //
+    // Por eso el campo de ID de placa se veia limpio en las capturas: dentro de una placa
+    // es un color plano, y sobre un color plano el deshilachado no se ve. Los campos de
+    // material si tienen contraste, y ahi salta a la vista.
+    //
+    // La solucion es no encadenar: se guarda el estado en un REFERENTE y cada adveccion
+    // muestrea desde el con la rotacion ACUMULADA. Un solo remuestreo, por muchas
+    // advecciones que pasen. Lo que la fisica cambia sobre el mundo se devuelve al
+    // referente al final del paso, a traves del mismo mapa.
+    // ================================================================
+    TArray<FTectonicFaceTextureData> ReferenceData;
+    TArray<FQuat> PlateAccumRotation;
+
+    /** Devuelve al referente lo que la fisica ha cambiado sobre el mundo. */
+    void WriteBackToReference();
 
     /**
      * Volumen de ocÃ©ano a conservar (mÂ·celda, unidades arbitrarias pero consistentes).

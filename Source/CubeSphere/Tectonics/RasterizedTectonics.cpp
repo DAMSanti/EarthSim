@@ -53,6 +53,8 @@ void URasterizedTectonics::Initialize(UCubeSphereGrid* InGrid, UTectonicPlateSys
         Face.VelocityData.SetNum(PixelsPerFace);
         Face.CrustAgeData.SetNumZeroed(PixelsPerFace);
         Face.RecoveryCountData.SetNumZeroed(PixelsPerFace);
+        Face.RefSourceFaceData.SetNumZeroed(PixelsPerFace);
+        Face.RefSourceIdxData.SetNumZeroed(PixelsPerFace);
         Face.CrustTypeData.SetNumZeroed(PixelsPerFace);
         Face.CrustThicknessData.SetNumZeroed(PixelsPerFace);
 
@@ -67,6 +69,19 @@ void URasterizedTectonics::Initialize(UCubeSphereGrid* InGrid, UTectonicPlateSys
 
     // Poblar texturas desde el sistema de placas
     InitializeFromPlateSystem();
+
+    // El referente arranca como copia del estado inicial, y cada placa sin rotacion
+    // acumulada. A partir de aqui la adveccion muestrea SIEMPRE desde aqui.
+    ReferenceData = FaceData;
+    PlateAccumRotation.Reset();
+    for (int32 F = 0; F < 6; ++F)
+    {
+        for (int32 C = 0; C < FaceData[F].RefSourceIdxData.Num(); ++C)
+        {
+            FaceData[F].RefSourceFaceData[C] = static_cast<uint8>(F);
+            FaceData[F].RefSourceIdxData[C] = C;
+        }
+    }
 
     bIsInitialized = true;
     StepCount = 0;
@@ -620,7 +635,7 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
     InverseRotations.Reserve(NumPlates);
     for (const FTectonicPlate& Plate : Plates)
     {
-        InverseRotations.Add(UPlateKinematics::CalculatePlateRotation(Plate, DeltaTime).Inverse());
+        InverseRotations.Add(FQuat::Identity);   // se rellena abajo con la acumulada
     }
 
     // Copia del estado anterior. Imprescindible: la adveccion lee el pasado mientras
@@ -634,7 +649,23 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
         MaxAngularSpeed = FMath::Max(MaxAngularSpeed, FMath::Abs(Plate.AngularVelocity));
     }
 
-    const TArray<FTectonicFaceTextureData> Prev = FaceData;
+    // ROTACION ACUMULADA, NO INCREMENTAL. Aqui esta el arreglo: en vez de retrotrazar un
+    // paso sobre el resultado del paso anterior - lo que encadena remuestreos y acumula
+    // error - se retrotraza la rotacion TOTAL desde el referente. Da igual que hayan
+    // pasado 1 o 200 advecciones: siempre es UN remuestreo.
+    if (PlateAccumRotation.Num() != NumPlates)
+    {
+        PlateAccumRotation.Init(FQuat::Identity, NumPlates);
+    }
+    for (int32 P = 0; P < NumPlates; ++P)
+    {
+        PlateAccumRotation[P] = UPlateKinematics::CalculatePlateRotation(Plates[P], DeltaTime)
+                              * PlateAccumRotation[P];
+        InverseRotations[P] = PlateAccumRotation[P].Inverse();
+    }
+
+    // "Prev" pasa a ser el REFERENTE, no el estado del paso anterior.
+    const TArray<FTectonicFaceTextureData>& Prev = ReferenceData;
 
     // PRIMERA PASADA: solo se cuenta cuantas placas reclaman cada celda.
     //
@@ -809,6 +840,8 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
                     Face.CrustAgeData[Idx]  = Prev[SF].CrustAgeData[SI];
                     Face.CrustTypeData[Idx] = Prev[SF].CrustTypeData[SI];
                     Face.CrustThicknessData[Idx] = Prev[SF].CrustThicknessData[SI];
+                    Face.RefSourceFaceData[Idx] = static_cast<uint8>(SF);
+                    Face.RefSourceIdxData[Idx] = SI;
                     ++Count.Moved;
                 }
                 else if (Claimants.Num() == 0)
@@ -1060,6 +1093,8 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
                         Face.CrustAgeData[Idx]       = Prev[RecoveredFace].CrustAgeData[RecoveredIdx];
                         Face.CrustTypeData[Idx]      = Prev[RecoveredFace].CrustTypeData[RecoveredIdx];
                         Face.CrustThicknessData[Idx] = Prev[RecoveredFace].CrustThicknessData[RecoveredIdx];
+                        Face.RefSourceFaceData[Idx] = static_cast<uint8>(RecoveredFace);
+                        Face.RefSourceIdxData[Idx] = RecoveredIdx;
                         ++Count.Moved;
                         ++Count.Recovered;
                         ++Face.RecoveryCountData[Idx];
@@ -1179,6 +1214,8 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
                     Face.ElevationData[Idx] = Prev[WinnerFace].ElevationData[WinnerIdx];
                     Face.CrustAgeData[Idx]  = Prev[WinnerFace].CrustAgeData[WinnerIdx];
                     Face.CrustTypeData[Idx] = Prev[WinnerFace].CrustTypeData[WinnerIdx];
+                    Face.RefSourceFaceData[Idx] = static_cast<uint8>(WinnerFace);
+                    Face.RefSourceIdxData[Idx] = WinnerIdx;
 
                     // CONSERVACION DE CORTEZA CONTINENTAL (ROADMAP.md F2).
                     //
@@ -1710,6 +1747,11 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
     UpdateSeaLevel();
     AccumulateMs(StepTimings.IsostasyMs, IsostasyStart);
 
+    // Lo que la fisica acaba de cambiar sobre el mundo (orogenia, acrecion, difusion,
+    // isostasia) hay que devolverlo al referente: si no, la proxima adveccion lo borraria
+    // al remuestrear desde un referente que no se entero.
+    WriteBackToReference();
+
     TotalSimulationTime += DeltaTimeScaled;
     StepCount++;
 
@@ -1717,6 +1759,48 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
     {
         UE_LOG(LogRasterizedTectonics, Log, TEXT("Step %d, SimTime: %.2f Ma"), StepCount, TotalSimulationTime);
     }
+}
+
+void URasterizedTectonics::WriteBackToReference()
+{
+    if (!bIsInitialized || ReferenceData.Num() != 6 || !PlateSystem)
+    {
+        return;
+    }
+
+    const TArray<FTectonicPlate>& Plates = PlateSystem->GetPlates();
+    if (PlateAccumRotation.Num() != Plates.Num())
+    {
+        return;
+    }
+
+    // Se devuelve por EL MISMO CAMINO que uso la lectura. Recalcular el mapa con floor()
+    // no vale: varias celdas del mundo caen en la misma del referente y otras no reciben
+    // nada, se quedan con datos viejos y la siguiente adveccion lee basura. Medido asi:
+    // 6,45% de celdas sin resolver y la corteza destruida disparada a 574.306 frente a
+    // 50.508 creada. Usando el camino de lectura no puede haber huecos.
+    ParallelFor(6, [&](int32 FaceIdx)
+    {
+        const FTectonicFaceTextureData& Face = FaceData[FaceIdx];
+
+        for (int32 Idx = 0; Idx < Resolution * Resolution; ++Idx)
+        {
+            const int32 RFaceIdx = static_cast<int32>(Face.RefSourceFaceData[Idx]);
+            const int32 RIdx = Face.RefSourceIdxData[Idx];
+            if (RFaceIdx < 0 || RFaceIdx >= 6 || !ReferenceData[RFaceIdx].PlateIDData.IsValidIndex(RIdx))
+            {
+                continue;
+            }
+
+            FTectonicFaceTextureData& Ref = ReferenceData[RFaceIdx];
+            Ref.PlateIDData[RIdx]        = Face.PlateIDData[Idx];
+            Ref.ElevationData[RIdx]      = Face.ElevationData[Idx];
+            Ref.CrustAgeData[RIdx]       = Face.CrustAgeData[Idx];
+            Ref.CrustTypeData[RIdx]      = Face.CrustTypeData[Idx];
+            Ref.CrustThicknessData[RIdx] = Face.CrustThicknessData[Idx];
+            Ref.VelocityData[RIdx]       = Face.VelocityData[Idx];
+        }
+    });
 }
 
 void URasterizedTectonics::SyncFromGPU()
