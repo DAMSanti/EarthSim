@@ -1,3 +1,7 @@
+> 🗃️ **Índice archivado** del conjunto de documentos de diseño original. La documentación viva está en [`../docs/`](../docs/); ver [`LEEME.md`](LEEME.md).
+
+---
+
 # 📚 Documentación del Proyecto - Simulación Planetaria
 
 ## Índice de Documentos
