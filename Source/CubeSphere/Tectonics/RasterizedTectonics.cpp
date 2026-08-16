@@ -1774,40 +1774,80 @@ void URasterizedTectonics::WriteBackToReference()
         return;
     }
 
-    // Se devuelve por EL MISMO CAMINO que uso la lectura. Recalcular el mapa con floor()
-    // no vale: varias celdas del mundo caen en la misma del referente y otras no reciben
-    // nada, se quedan con datos viejos y la siguiente adveccion lee basura. Medido asi:
-    // 6,45% de celdas sin resolver y la corteza destruida disparada a 574.306 frente a
-    // 50.508 creada. Usando el camino de lectura no puede haber huecos.
-    ParallelFor(6, [&](int32 FaceIdx)
+    // SE RECORRE EL REFERENTE Y SE TIRA DEL MUNDO, no al reves.
+    //
+    // Empujando desde el mundo, unas celdas del referente recibian dos escrituras y otras
+    // ninguna, y esas se quedaban con material rancio; la siguiente adveccion leia de
+    // ellas y la celda salia sin resolver. Medido: 18,92% empujando con floor() y 20,32%
+    // empujando por el camino de lectura.
+    //
+    // Recorriendo el referente, cada una de sus celdas se escribe EXACTAMENTE UNA VEZ y no
+    // queda ningun hueco. Es la misma leccion que el resto del dia: el sentido en que se
+    // recorre un remuestreo decide quien se queda sin datos.
+    ParallelFor(6, [&](int32 RFaceIdx)
     {
-        const FTectonicFaceTextureData& Face = FaceData[FaceIdx];
+        FTectonicFaceTextureData& Ref = ReferenceData[RFaceIdx];
 
-        for (int32 Idx = 0; Idx < Resolution * Resolution; ++Idx)
+        for (int32 Y = 0; Y < Resolution; ++Y)
         {
-            const int32 RFaceIdx = static_cast<int32>(Face.RefSourceFaceData[Idx]);
-            const int32 RIdx = Face.RefSourceIdxData[Idx];
-            if (RFaceIdx < 0 || RFaceIdx >= 6 || !ReferenceData[RFaceIdx].PlateIDData.IsValidIndex(RIdx))
+            for (int32 X = 0; X < Resolution; ++X)
             {
-                continue;
+                const int32 RIdx = Y * Resolution + X;
+                const int32 P = static_cast<int32>(Ref.PlateIDData[RIdx]);
+                if (!PlateAccumRotation.IsValidIndex(P))
+                {
+                    continue;
+                }
+
+                // Donde esta ahora, en el mundo, el material que vive en esta celda del
+                // marco de la placa.
+                const FVector RefDir = CubeFaceMapping::PixelToDirection(
+                    static_cast<ECSCubeFace>(RFaceIdx), X, Y, Resolution);
+                const FVector WorldDir = PlateAccumRotation[P].RotateVector(RefDir);
+
+                ECSCubeFace WF; float WU, WV;
+                CubeFaceMapping::DirectionToFaceTexUV(WorldDir, WF, WU, WV);
+                const int32 WFaceIdx = static_cast<int32>(WF);
+                const int32 WX = FMath::Clamp(FMath::FloorToInt(WU * Resolution), 0, Resolution - 1);
+                const int32 WY = FMath::Clamp(FMath::FloorToInt(WV * Resolution), 0, Resolution - 1);
+                const int32 WIdx = WY * Resolution + WX;
+
+                const FTectonicFaceTextureData& World = FaceData[WFaceIdx];
+
+                // EL TERRITORIO NO SE REASIGNA. Se probaron las dos alternativas y las dos
+                // rompen el planeta:
+                //
+                //   - Darle la celda a la placa que el mundo dice que ocupa ese sitio: en
+                //     el marco de referencia una placa se come a las demas. 12.370 celdas
+                //     continentales frente a 4.798 oceanicas y la tierra emergida al 0,0%,
+                //     porque el mar cubre un mundo sin cuencas. Error de concepto: en el
+                //     marco propio de una placa el territorio de otra no existe.
+                //   - Marcarla vacia e insertar ademas la corteza nueva de los rifts:
+                //     arregla el reparto (sin resolver 20,3% -> 7,1%) pero vuelve a hundir
+                //     la tierra emergida al 0,6%, porque al insertar territorio se propaga
+                //     corteza continental.
+                //
+                // Asi que si el mundo ya no reconoce a esta placa ahi, el material no se
+                // recoge y punto. El coste, conocido y medido, es que el reparto se queda
+                // en el inicial: al rotar cada placa por su lado los territorios dejan de
+                // teselar la esfera y aparecen huecos (20,3% de celdas sin resolver) y
+                // solapes (de ahi que se cuenten 71.000 celdas "destruidas" por adveccion
+                // sobre 98.304, porque casi cada celda tiene varios reclamantes).
+                //
+                // Es un DEFECTO ABIERTO, no una solucion. No se ve en pantalla y el
+                // planeta se comporta bien, pero el recuento de corteza no significa nada
+                // mientras siga asi.
+                if (World.PlateIDData[WIdx] != static_cast<uint8>(P))
+                {
+                    continue;
+                }
+
+                Ref.ElevationData[RIdx]      = World.ElevationData[WIdx];
+                Ref.CrustAgeData[RIdx]       = World.CrustAgeData[WIdx];
+                Ref.CrustTypeData[RIdx]      = World.CrustTypeData[WIdx];
+                Ref.CrustThicknessData[RIdx] = World.CrustThicknessData[WIdx];
+                Ref.VelocityData[RIdx]       = World.VelocityData[WIdx];
             }
-
-            FTectonicFaceTextureData& Ref = ReferenceData[RFaceIdx];
-
-            // EL ID DE PLACA NO SE DEVUELVE. En el marco propio de una placa la
-            // pertenencia no cambia: la placa es rigida y su territorio ahi dentro es
-            // fijo; lo que se mueve son las fronteras vistas desde el mundo.
-            //
-            // Devolverlo era lo que rompia el esquema. Como varias celdas del mundo caen
-            // en la misma del referente, las escrituras se pisaban y dejaban el ID
-            // inconsistente; la siguiente lectura exige que el referente diga que esa
-            // celda es de la placa P, no lo encontraba, y la celda salia SIN RESOLVER.
-            // Medido: 18,92% de celdas sin resolver y la corteza destruida disparada.
-            Ref.ElevationData[RIdx]      = Face.ElevationData[Idx];
-            Ref.CrustAgeData[RIdx]       = Face.CrustAgeData[Idx];
-            Ref.CrustTypeData[RIdx]      = Face.CrustTypeData[Idx];
-            Ref.CrustThicknessData[RIdx] = Face.CrustThicknessData[Idx];
-            Ref.VelocityData[RIdx]       = Face.VelocityData[Idx];
         }
     });
 }
