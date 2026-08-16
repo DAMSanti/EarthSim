@@ -427,6 +427,50 @@ struct CUBESPHERE_API FTectonicAdvectionStats
 };
 
 /**
+ * R2.12 (16-08-2026): la frontera como objeto de primera clase, no inferida celda a
+ * celda. Un segmento agrupa las celdas de frontera contiguas que comparten el mismo par
+ * de placas -componentes conexas, no una suma de contribuciones sueltas como el intento
+ * de la normal de Sobel por celda.
+ *
+ * LA IDENTIDAD ES EL RETO REAL. Las celdas que componen un segmento cambian en cada
+ * adveccion -el raster se re-resuelve entero-, asi que SegmentID no se ata a celdas: se
+ * ata al par de placas mas solape espacial con el segmento del paso anterior. Ver
+ * MatchAndUpdateBoundarySegments() en el .cpp. Age se acumula mientras el ID persiste, y
+ * es directamente lo que R2.16 necesitara para decidir sutura (frontera sin movimiento
+ * relativo prolongado).
+ */
+USTRUCT(BlueprintType)
+struct CUBESPHERE_API FBoundarySegment
+{
+    GENERATED_BODY()
+
+    UPROPERTY(BlueprintReadOnly)
+    int32 SegmentID = -1;
+
+    /** Convenio: PlateA < PlateB siempre, para que el par sea una clave estable. */
+    UPROPERTY(BlueprintReadOnly)
+    int32 PlateA = -1;
+
+    UPROPERTY(BlueprintReadOnly)
+    int32 PlateB = -1;
+
+    UPROPERTY(BlueprintReadOnly)
+    int32 CellCount = 0;
+
+    /** Ma que este ID lleva existiendo de forma continuada, no el tiempo total simulado. */
+    UPROPERTY(BlueprintReadOnly)
+    float Age = 0.0f;
+
+    /** Normal promedio del segmento en marco MUNDO 3D (no por cara), saliendo de PlateA. */
+    UPROPERTY(BlueprintReadOnly)
+    FVector AverageNormal = FVector::ZeroVector;
+
+    // AverageConvergence/AverageTangential se anaden en la fase 2 (cuando la
+    // clasificacion pase a leer del segmento), no antes: sin consumidor todavia
+    // serian campos que solo dan una falsa sensacion de precision.
+};
+
+/**
  * URasterizedTectonics
  *  
  * Sistema de tectÃ³nica de placas basado en texturas GPU.
@@ -507,6 +551,10 @@ public:
     UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics")
     FTectonicAdvectionStats GetAdvectionStats() const { return AdvectionStats; }
 
+    /** R2.12: los segmentos de frontera activos ahora mismo, con su ID persistente. */
+    UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics")
+    const TArray<FBoundarySegment>& GetBoundarySegments() const { return BoundarySegments; }
+
     /**
      * Tiempo que el simulador CREE que ha pasado.
      *
@@ -565,6 +613,18 @@ public:
     /** FracciÃ³n de la superficie del planeta por encima del nivel del mar (0..1). */
     UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics|Isostasy")
     float GetLandFraction() const;
+
+    /**
+     * DIAGNOSTICO (16-08-2026): desglose de CrustTypeData cruzado con ElevationData, para
+     * separar "corteza continental" (tipo) de "tierra emergida" (elevacion) -no son lo
+     * mismo. Hipotesis a verificar: la acrecion de arco convierte oceanica en continental
+     * en cuanto supera ArcMaturityThickness (~20 km), pero por flotacion de Airy esos 20 km
+     * dan ~-1.660 m -sigue bajo el agua. Si la hipotesis es cierta, OutSubmergedContinental
+     * crece mientras OutEmergedContinental (la tierra de verdad) no compensa la perdida en
+     * LongRunStability.
+     */
+    UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics|Isostasy")
+    void GetContinentalBreakdown(float& OutSubmergedContinental, float& OutEmergedContinental, float& OutOceanic) const;
 
     /**
      * Recalcula el nivel del mar para conservar el volumen de ocÃ©ano.
@@ -814,6 +874,32 @@ protected:
 
     /** Rotacion acumulada de cada placa desde el inicio. Solo la usa el material. */
     TArray<FQuat> PlateAccumRotation;
+
+    // ============================================================
+    // R2.12: FRONTERA COMO OBJETO (16-08-2026)
+    // ============================================================
+
+    /** Segmentos activos, con ID persistente. Ver FBoundarySegment. */
+    TArray<FBoundarySegment> BoundarySegments;
+
+    /** SegmentID por celda (6 caras x Res x Res), -1 si la celda no es de frontera. */
+    TArray<TArray<int32>> BoundarySegmentIdPerFace;
+
+    /** Copia del paso anterior, para el emparejamiento por solape. */
+    TArray<TArray<int32>> PrevBoundarySegmentIdPerFace;
+
+    /** Contador monotono: nunca se reutiliza un ID, ni siquiera si un segmento muere. */
+    int32 NextSegmentID = 0;
+
+    /**
+     * Recorre las celdas de frontera (mismo par de placas por voto mayoritario que ya usa
+     * la clasificacion por Sobel), las agrupa en componentes conexas de 4 vecinos -
+     * cruzando caras del cubo igual que el resto del proyecto-, y les asigna SegmentID
+     * emparejando contra BoundarySegments del paso anterior por solape de celdas. Escribe
+     * BoundarySegmentIdPerFace y actualiza BoundarySegments (CellCount, Age, promedios).
+     * No toca ninguna fisica: solo construye y mantiene el objeto.
+     */
+    void ExtractAndTrackBoundarySegments(float DeltaTime);
 
     /** Celdas por marco de placa: 6 caras x Res x Res. */
     int32 GetFrameCellCount() const { return 6 * Resolution * Resolution; }

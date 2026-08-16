@@ -1274,6 +1274,16 @@ void ATectonicsTestActor::DrawScreenDebugInfo()
         return;
     }
 
+    // DIAGNOSTICO (16-08-2026): desglose continental sumergido vs emergido, para verificar
+    // en vivo si la acrecion de arco fabrica plataforma sumergida (~20 km -> ~-1.660 m por
+    // Airy) en vez de tierra de verdad. Ver ANEXO.md "Acrecion de arco: restriccion por
+    // placa".
+    float SubmergedContinentalFrac = 0.0f, EmergedContinentalFrac = 0.0f, OceanicFrac = 0.0f;
+    if (RasterizedTectonics)
+    {
+        RasterizedTectonics->GetContinentalBreakdown(SubmergedContinentalFrac, EmergedContinentalFrac, OceanicFrac);
+    }
+
     // Info básica en pantalla
     FString InfoText = FString::Printf(
         TEXT("=== TECTÓNICA ===\n")
@@ -1283,6 +1293,8 @@ void ATectonicsTestActor::DrawScreenDebugInfo()
         TEXT("\n[SPACE] Pausa | [R] Reiniciar\n")
         TEXT("[+/-] Velocidad | [1-8] Placa\n")
         TEXT("[V] Velocidades | [B] Límites\n")
+        TEXT("DIAG tierra: emergida %.1f%% | continental sumergida %.1f%% | oceanica %.1f%%\n")
+        TEXT("R2.12 segmentos: %d activos | edad media %.2f Ma | celdas %d\n")
         TEXT("Corteza: +%d creada / -%d destruida (%d advecciones)\n")
         TEXT("AUDIT reloj: sim %.2f Ma / advectado %.2f Ma (pendiente %.1f%%)\n")
         TEXT("AUDIT tiempo TIRADO: %.2f Ma en %d veces\n")
@@ -1298,6 +1310,24 @@ void ATectonicsTestActor::DrawScreenDebugInfo()
         TimeScale,
         PlateSystem ? PlateSystem->GetNumPlates() : 0,
         GridResolution,
+        EmergedContinentalFrac * 100.0f,
+        SubmergedContinentalFrac * 100.0f,
+        OceanicFrac * 100.0f,
+        RasterizedTectonics ? RasterizedTectonics->GetBoundarySegments().Num() : 0,
+        [this]() {
+            if (!RasterizedTectonics) return 0.0f;
+            const TArray<FBoundarySegment>& Segs = RasterizedTectonics->GetBoundarySegments();
+            if (Segs.Num() == 0) return 0.0f;
+            float Sum = 0.0f;
+            for (const FBoundarySegment& S : Segs) { Sum += S.Age; }
+            return Sum / Segs.Num();
+        }(),
+        [this]() {
+            if (!RasterizedTectonics) return 0;
+            int32 Sum = 0;
+            for (const FBoundarySegment& S : RasterizedTectonics->GetBoundarySegments()) { Sum += S.CellCount; }
+            return Sum;
+        }(),
         RasterizedTectonics ? RasterizedTectonics->GetAdvectionStats().CellsCreated : 0,
         RasterizedTectonics ? RasterizedTectonics->GetAdvectionStats().CellsDestroyed : 0,
         RasterizedTectonics ? RasterizedTectonics->GetAdvectionStats().AdvectionCount : 0,

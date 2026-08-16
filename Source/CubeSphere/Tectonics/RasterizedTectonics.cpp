@@ -543,6 +543,50 @@ float URasterizedTectonics::GetLandFraction() const
     return (Total > 0) ? (static_cast<float>(Land) / static_cast<float>(Total)) : 0.0f;
 }
 
+void URasterizedTectonics::GetContinentalBreakdown(float& OutSubmergedContinental, float& OutEmergedContinental, float& OutOceanic) const
+{
+    OutSubmergedContinental = 0.0f;
+    OutEmergedContinental = 0.0f;
+    OutOceanic = 0.0f;
+
+    if (!bIsInitialized)
+    {
+        return;
+    }
+
+    int32 SubmergedContinental = 0;
+    int32 EmergedContinental = 0;
+    int32 Oceanic = 0;
+    int32 Total = 0;
+
+    for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
+    {
+        const TArray<uint8>& Type = FaceData[FaceIdx].CrustTypeData;
+        const TArray<float>& Elev = FaceData[FaceIdx].ElevationData;
+
+        for (int32 i = 0; i < Type.Num(); ++i)
+        {
+            ++Total;
+            if (Type[i] == 1)
+            {
+                if (Elev[i] >= SeaLevel) { ++EmergedContinental; }
+                else { ++SubmergedContinental; }
+            }
+            else
+            {
+                ++Oceanic;
+            }
+        }
+    }
+
+    if (Total > 0)
+    {
+        OutSubmergedContinental = static_cast<float>(SubmergedContinental) / static_cast<float>(Total);
+        OutEmergedContinental = static_cast<float>(EmergedContinental) / static_cast<float>(Total);
+        OutOceanic = static_cast<float>(Oceanic) / static_cast<float>(Total);
+    }
+}
+
 namespace
 {
     // Media movil exponencial. El coste por paso varia mucho (la adveccion no entra en
@@ -1523,6 +1567,11 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
             while (PendingAdvectionTime >= MaxAdvectionDt && Done < MaxAdvectionsPerStep)
             {
                 AdvectPlateField(MaxAdvectionDt);
+
+                // R2.12: PlateIDData solo cambia aqui, asi que los segmentos se
+                // reconstruyen a la misma cadencia que la propia adveccion.
+                ExtractAndTrackBoundarySegments(MaxAdvectionDt);
+
                 PendingAdvectionTime -= MaxAdvectionDt;
                 ++Done;
             }
@@ -2160,6 +2209,300 @@ void URasterizedTectonics::WriteBackToPlateFrames()
             }
         }
     });
+}
+
+// ============================================================
+// R2.12: FRONTERA COMO OBJETO (16-08-2026)
+//
+// No se llama cada sub-paso: PlateIDData solo cambia cuando corre AdvectPlateField, asi
+// que se llama justo despues, una vez por adveccion -la misma cadencia que la propia
+// adveccion, no la del framerate.
+// ============================================================
+void URasterizedTectonics::ExtractAndTrackBoundarySegments(float DeltaTime)
+{
+    if (!bIsInitialized || !PlateSystem)
+    {
+        return;
+    }
+
+    // El resultado del paso anterior es lo unico contra lo que se puede emparejar por
+    // solape -las celdas de este paso todavia no existen.
+    PrevBoundarySegmentIdPerFace = BoundarySegmentIdPerFace;
+
+    BoundarySegmentIdPerFace.SetNum(6);
+    for (int32 F = 0; F < 6; ++F)
+    {
+        BoundarySegmentIdPerFace[F].Init(-1, Resolution * Resolution);
+    }
+
+    // ------------------------------------------------------------
+    // PASADA 1: info por celda. Mismo gradiente de Sobel que la clasificacion de R2.13
+    // (normal real, no eje de rejilla), mas un voto mayoritario a 4 vecinos -no 8- para
+    // que el "otro" plate coincida con la conectividad que usa el recorrido de
+    // componentes de la pasada 2. Es diagnostico puro: no escribe en FaceData.
+    // ------------------------------------------------------------
+    struct FCellBoundaryInfo
+    {
+        bool bBoundary = false;
+        int32 OtherPlate = INDEX_NONE;
+        FVector WorldNormal = FVector::ZeroVector;
+    };
+
+    TArray<TArray<FCellBoundaryInfo>> Info;
+    Info.SetNum(6);
+    for (int32 F = 0; F < 6; ++F)
+    {
+        Info[F].SetNum(Resolution * Resolution);
+    }
+
+    ParallelFor(6, [&](int32 FaceIdx)
+    {
+        const FTectonicFaceTextureData& Face = FaceData[FaceIdx];
+        FVector TU, TV, FN;
+        CubeFaceMapping::GetFaceAxes(static_cast<ECSCubeFace>(FaceIdx), TU, TV, FN);
+
+        static const int32 Off8[8][2] = {
+            {-1,-1}, {0,-1}, {1,-1},
+            {-1, 0},         {1, 0},
+            {-1, 1}, {0, 1}, {1, 1}
+        };
+        static const float SobelX[8] = { -1.0f, 0.0f, 1.0f, -2.0f, 2.0f, -1.0f, 0.0f, 1.0f };
+        static const float SobelY[8] = { -1.0f, -2.0f, -1.0f, 0.0f, 0.0f, 1.0f, 2.0f, 1.0f };
+        const int32 Offsets4[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+
+        for (int32 Y = 1; Y < Resolution - 1; ++Y)
+        {
+            for (int32 X = 1; X < Resolution - 1; ++X)
+            {
+                const int32 Idx = Y * Resolution + X;
+                const uint8 MyPlate = Face.PlateIDData[Idx];
+                FCellBoundaryInfo& Cell = Info[FaceIdx][Idx];
+
+                // Voto a 4 vecinos: cual otra placa domina esta celda de frontera. Misma
+                // conectividad que el flood-fill de la pasada 2.
+                uint8 VoteID4[4]; int32 VoteCount4[4]; int32 NumVotes4 = 0;
+                float Gx = 0.0f, Gy = 0.0f;
+
+                for (int32 k = 0; k < 8; ++k)
+                {
+                    const int32 NIdx = GetLinearIndex(X + Off8[k][0], Y + Off8[k][1]);
+                    const uint8 NPlate = Face.PlateIDData[NIdx];
+                    Gx += SobelX[k] * ((NPlate == MyPlate) ? 1.0f : 0.0f);
+                    Gy += SobelY[k] * ((NPlate == MyPlate) ? 1.0f : 0.0f);
+                }
+
+                for (int32 i = 0; i < 4; ++i)
+                {
+                    const int32 NIdx = GetLinearIndex(X + Offsets4[i][0], Y + Offsets4[i][1]);
+                    const uint8 NPlate = Face.PlateIDData[NIdx];
+                    if (NPlate == MyPlate) { continue; }
+
+                    Cell.bBoundary = true;
+                    int32 V = INDEX_NONE;
+                    for (int32 v = 0; v < NumVotes4; ++v)
+                    {
+                        if (VoteID4[v] == NPlate) { V = v; break; }
+                    }
+                    if (V == INDEX_NONE)
+                    {
+                        V = NumVotes4++;
+                        VoteID4[V] = NPlate;
+                        VoteCount4[V] = 0;
+                    }
+                    ++VoteCount4[V];
+                }
+
+                if (!Cell.bBoundary)
+                {
+                    continue;
+                }
+
+                int32 Best4 = 0;
+                for (int32 v = 1; v < NumVotes4; ++v)
+                {
+                    if (VoteCount4[v] > VoteCount4[Best4]) { Best4 = v; }
+                }
+                Cell.OtherPlate = VoteID4[Best4];
+
+                const float GradMagSq = Gx * Gx + Gy * Gy;
+                if (GradMagSq < KINDA_SMALL_NUMBER)
+                {
+                    continue;
+                }
+                const float InvGradMag = FMath::InvSqrt(GradMagSq);
+                const FVector2f Normal2D(-Gx * InvGradMag, -Gy * InvGradMag);
+                const FVector2f Perp2D(-Normal2D.Y, Normal2D.X);
+
+                Cell.WorldNormal = (TU * Normal2D.X + TV * Normal2D.Y).GetSafeNormal();
+            }
+        }
+    });
+
+    // ------------------------------------------------------------
+    // PASADA 2: componentes conexas por flood-fill (4 vecinos, cruzando caras). Cada
+    // componente agrupa las celdas de frontera contiguas con el MISMO par de placas.
+    // Secuencial a proposito: el flood-fill cruza caras y es mas simple y seguro sin
+    // paralelizar por ahora -el coste es O(celdas de frontera), un 1-3% del planeta.
+    // ------------------------------------------------------------
+    struct FRawComponent
+    {
+        int32 PlateA = -1;
+        int32 PlateB = -1;
+        TArray<TPair<int32,int32>> Cells; // (FaceIdx, LinearIdx)
+        FVector NormalSum = FVector::ZeroVector;
+    };
+
+    TArray<TArray<bool>> Visited;
+    Visited.SetNum(6);
+    for (int32 F = 0; F < 6; ++F)
+    {
+        Visited[F].Init(false, Resolution * Resolution);
+    }
+
+    TArray<FRawComponent> RawComponents;
+    TArray<TPair<int32,int32>> Stack;
+
+    for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
+    {
+        for (int32 Y = 1; Y < Resolution - 1; ++Y)
+        {
+            for (int32 X = 1; X < Resolution - 1; ++X)
+            {
+                const int32 Idx = Y * Resolution + X;
+                if (Visited[FaceIdx][Idx] || !Info[FaceIdx][Idx].bBoundary)
+                {
+                    continue;
+                }
+
+                const int32 SeedPlate = FaceData[FaceIdx].PlateIDData[Idx];
+                const int32 SeedOther = Info[FaceIdx][Idx].OtherPlate;
+                const int32 PA = FMath::Min(SeedPlate, SeedOther);
+                const int32 PB = FMath::Max(SeedPlate, SeedOther);
+
+                FRawComponent Comp;
+                Comp.PlateA = PA;
+                Comp.PlateB = PB;
+
+                Stack.Reset();
+                Stack.Add(TPair<int32,int32>(FaceIdx, Idx));
+                Visited[FaceIdx][Idx] = true;
+
+                while (Stack.Num() > 0)
+                {
+                    const TPair<int32,int32> Cur = Stack.Pop(EAllowShrinking::No);
+                    const int32 CFace = Cur.Key;
+                    const int32 CIdx = Cur.Value;
+                    const int32 CY = CIdx / Resolution;
+                    const int32 CX = CIdx % Resolution;
+
+                    Comp.Cells.Add(Cur);
+                    Comp.NormalSum += Info[CFace][CIdx].WorldNormal;
+
+                    const int32 Offsets4[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+                    for (int32 i = 0; i < 4; ++i)
+                    {
+                        ECSCubeFace NF; int32 NX, NY;
+                        if (!GetNeighborPixel(static_cast<ECSCubeFace>(CFace), CX, CY, Offsets4[i][0], Offsets4[i][1], NF, NX, NY))
+                        {
+                            continue;
+                        }
+                        const int32 NFaceIdx = static_cast<int32>(NF);
+                        const int32 NIdx = NY * Resolution + NX;
+
+                        if (Visited[NFaceIdx][NIdx] || !Info[NFaceIdx][NIdx].bBoundary)
+                        {
+                            continue;
+                        }
+
+                        const int32 NPlate = FaceData[NFaceIdx].PlateIDData[NIdx];
+                        const int32 NOther = Info[NFaceIdx][NIdx].OtherPlate;
+                        const int32 NPA = FMath::Min(NPlate, NOther);
+                        const int32 NPB = FMath::Max(NPlate, NOther);
+
+                        if (NPA != PA || NPB != PB)
+                        {
+                            continue; // frontera de otro par de placas: otro segmento
+                        }
+
+                        Visited[NFaceIdx][NIdx] = true;
+                        Stack.Add(TPair<int32,int32>(NFaceIdx, NIdx));
+                    }
+                }
+
+                RawComponents.Add(MoveTemp(Comp));
+            }
+        }
+    }
+
+    // ------------------------------------------------------------
+    // PASADA 3: emparejar cada componente nuevo contra los segmentos del paso anterior
+    // por solape de celdas -no por posicion ni por indice, que no son estables. Sin
+    // solape (o par de placas distinto), nace un ID nuevo.
+    // ------------------------------------------------------------
+    TArray<FBoundarySegment> NewSegments;
+    NewSegments.Reserve(RawComponents.Num());
+
+    for (FRawComponent& Comp : RawComponents)
+    {
+        TMap<int32, int32> OverlapCounts;
+        for (const TPair<int32,int32>& Cell : Comp.Cells)
+        {
+            if (!PrevBoundarySegmentIdPerFace.IsValidIndex(Cell.Key))
+            {
+                continue;
+            }
+            const int32 PrevID = PrevBoundarySegmentIdPerFace[Cell.Key][Cell.Value];
+            if (PrevID >= 0)
+            {
+                OverlapCounts.FindOrAdd(PrevID)++;
+            }
+        }
+
+        int32 BestID = INDEX_NONE;
+        int32 BestCount = 0;
+        for (const TPair<int32,int32>& Entry : OverlapCounts)
+        {
+            if (Entry.Value > BestCount)
+            {
+                BestCount = Entry.Value;
+                BestID = Entry.Key;
+            }
+        }
+
+        const FBoundarySegment* OldSeg = (BestID != INDEX_NONE)
+            ? BoundarySegments.FindByPredicate([BestID](const FBoundarySegment& S) { return S.SegmentID == BestID; })
+            : nullptr;
+
+        FBoundarySegment Seg;
+        if (OldSeg && OldSeg->PlateA == Comp.PlateA && OldSeg->PlateB == Comp.PlateB)
+        {
+            // Continua el mismo segmento: hereda ID y acumula edad.
+            Seg.SegmentID = OldSeg->SegmentID;
+            Seg.Age = OldSeg->Age + DeltaTime;
+        }
+        else
+        {
+            // Ni solape, ni el par de placas coincide con el segmento que mas solapaba:
+            // es un segmento nuevo -naci por un rift, una colision partio el anterior, o
+            // simplemente no existia hace un paso.
+            Seg.SegmentID = NextSegmentID++;
+            Seg.Age = DeltaTime;
+        }
+
+        Seg.PlateA = Comp.PlateA;
+        Seg.PlateB = Comp.PlateB;
+        Seg.CellCount = Comp.Cells.Num();
+        Seg.AverageNormal = (Comp.Cells.Num() > 0) ? Comp.NormalSum.GetSafeNormal() : FVector::ZeroVector;
+
+        for (const TPair<int32,int32>& Cell : Comp.Cells)
+        {
+            BoundarySegmentIdPerFace[Cell.Key][Cell.Value] = Seg.SegmentID;
+        }
+
+        NewSegments.Add(Seg);
+    }
+
+    BoundarySegments = MoveTemp(NewSegments);
 }
 
 void URasterizedTectonics::SyncFromGPU()
