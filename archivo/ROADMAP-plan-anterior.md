@@ -1,3 +1,7 @@
+> 🗃️ **Documento archivado.** Plan de trabajo del 15/16-08-2026, con el anexo mezclado dentro. Sus pasos están ahora en [`docs/ROADMAP.md`](../docs/ROADMAP.md) y su anexo en [`docs/ANEXO.md`](../docs/ANEXO.md). Ver [`LEEME.md`](LEEME.md).
+
+---
+
 # ROADMAP.md — Plan de Desarrollo
 
 > Basado en el inventario real de código ([`SPECS.md`](SPECS.md)), no en una estimación de calendario. Reescrito el 15-08-2026 tras una auditoría que contradijo la versión anterior; actualizado el 16-08-2026.
@@ -458,14 +462,44 @@ El invariante correcto **no menciona el número de placas**:
 
 ### El plan
 
-1. **Separar propiedad de material.** El ráster del mundo es la única verdad sobre quién posee qué, y la pregunta *"¿es tuyo este punto?"* se le hace al mundo de ahora, nunca a una foto vieja. El material vive en un ráster **por placa**, en el marco de esa placa, leído con una sola rotación acumulada.
-2. **La frontera, como objeto.** Clasificar por velocidad relativa proyectada sobre la normal de la frontera. Funciona con bandas de una celda de ancho.
+1. **Separar propiedad de material.** ✅ *Hecho (commit `f8708c2`).* El ráster del mundo es la única verdad sobre quién posee qué, y la pregunta *"¿es tuyo este punto?"* se le hace al mundo de ahora, nunca a una foto vieja. El material vive en un ráster **por placa**, en el marco de esa placa, leído con una sola rotación acumulada.
+2. **Propiedad total y frontera por física.** Ver [abajo](#el-paso-2-en-detalle-por-qué-es-legítimo-y-dónde-no-lo-es).
 3. **Ciclo de vida.** Componentes conexas sobre el mapa de IDs: sin celdas, la placa muere; partida en dos, nace una con su propio polo.
-4. **Lazo dinámico**, al final: la velocidad angular responde a la longitud del margen en subducción.
+4. **Lazo dinámico**, al final: la velocidad angular responde al tirón de la losa en subducción.
 
 **Se tira `ReferenceData` entero.** No es reparable: es el sitio donde están soldadas las dos cosas que hay que separar. Con él se van la recuperación por tolerancia de media celda y la rama de "celda sin resolver que conserva su estado" — ambas existen para tapar huecos que solo aparecen porque la partición está podrida.
 
 **No se toca** el ráster de cubesfera, la isostasia de F2, el nivel del mar, el clima ni el drenaje. Todos leen el mundo y el mundo sigue igual.
+
+### El paso 2 en detalle: por qué es legítimo, y dónde no lo es
+
+*(Escrito porque el usuario pidió garantía explícita de que esto es la forma correcta de calcular la física y no un maquillaje para que se vea bien. Las dos piezas no tienen el mismo grado de legitimidad y conviene no venderlas juntas.)*
+
+**2a. La propiedad es total.** Cada punto de la litosfera pertenece a exactamente una placa: ni a cero ni a dos. Eso no es una aproximación, es la definición de placa. El código actual **viola esa ley** y luego parchea las violaciones — de ahí los tres caminos (recuperación por tolerancia, celda sin resolver, y el respaldo de material). Imponer la ley no es maquillaje: es dejar de romperla, y **elimina los tres parches de golpe**.
+
+Que el criterio sea *el más cercano* sí es una elección de discretización, no una ley. Lo que la hace defendible es que es **imparcial**: no prefiere continental, ni oceánica, ni al dueño anterior. Esas preferencias son justamente lo que generaba los trinquetes.
+
+**Y por sí sola no basta**, que es la parte fácil de colar: en una frontera convergente **la geometría no debe decidir** quién se queda la celda. Lo decide la **densidad** — la oceánica subduce bajo la continental, y entre dos oceánicas subduce la más vieja y fría. O sea: *la geometría decide dónde está la frontera, la física decide qué pasa en ella*. Las dos piezas juntas no son un parche; la 2a sola sí lo sería.
+
+**2b. La clasificación sale de la velocidad relativa**, proyectada sobre la normal de la frontera: se alejan → divergente; se acercan → convergente; se deslizan → transformante. **Así se clasifican las fronteras de placa en geofísica**, y es la razón de que la categoría "transformante" exista. Contar reclamantes es un *sustituto geométrico* de esto que solo funciona si el reparto es perfecto, y en una rejilla nunca lo es.
+
+**La consecuencia fuerte, y es el argumento de verdad:** si la creación en dorsales y la destrucción en fosas salen **del mismo campo de velocidades relativas**, la conservación de corteza **deja de calibrarse y pasa a cumplirse por construcción**. Las placas son rígidas (no cambian de área por dentro) y la esfera es cerrada (área total fija), luego lo que se abre en todas las dorsales iguala lo que se cierra en todas las fosas. Se sigue de la cinemática, no de un ajuste.
+
+Con eso **desaparece el umbral `0,10 × MaxAngularSpeed`** y desaparece el riesgo de que quede sin calibrar. Es el mismo principio que hace fisica la isostasia de F2: el número sale de una ley, no de que un test pase.
+
+**Lo que este paso NO arregla, y no se va a afirmar que sí:**
+
+- **La tierra emergida en 13,2 %.** Es otro problema; puede que no se mueva con esto.
+- **Las placas siguen siendo rígidas y con polos de Euler fijos.** La clasificación será correcta *dadas* las velocidades, pero las velocidades siguen sin ser dinámicas. Eso es el punto 4.
+- **La frontera conserva ±media celda de imprecisión.** Límite de la rejilla.
+- **La península parada.** Se quita la familia de parches donde vive, en vez de adivinar cuál de los tres la produce — tras fallar dos veces adivinando. Es lo correcto aunque el síntoma sobreviva; si sobrevive, se dice.
+
+**Cómo detectar que esto se ha convertido en un parche.** Sería maquillaje si aparece cualquiera de estas:
+
+- elegir al dueño de forma que la tierra emergida quede en un número bonito
+- meter un factor que frene el crecimiento continental "porque si no crece demasiado"
+- tocar un umbral hasta que pase un test
+- preferir continental sobre oceánica **fuera** de una frontera convergente real
 
 ### Cómo se verifica
 
