@@ -70,10 +70,9 @@ void URasterizedTectonics::Initialize(UCubeSphereGrid* InGrid, UTectonicPlateSys
     // Poblar texturas desde el sistema de placas
     InitializeFromPlateSystem();
 
-    // El referente arranca como copia del estado inicial, y cada placa sin rotacion
-    // acumulada. A partir de aqui la adveccion muestrea SIEMPRE desde aqui.
-    ReferenceData = FaceData;
-    PlateAccumRotation.Reset();
+    // Cada placa se lleva a su marco propio el material que le toca del estado inicial, y
+    // arranca sin rotacion acumulada.
+    InitializePlateMaterialFrames();
     for (int32 F = 0; F < 6; ++F)
     {
         for (int32 C = 0; C < FaceData[F].RefSourceIdxData.Num(); ++C)
@@ -649,23 +648,43 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
         MaxAngularSpeed = FMath::Max(MaxAngularSpeed, FMath::Abs(Plate.AngularVelocity));
     }
 
-    // ROTACION ACUMULADA, NO INCREMENTAL. Aqui esta el arreglo: en vez de retrotrazar un
-    // paso sobre el resultado del paso anterior - lo que encadena remuestreos y acumula
-    // error - se retrotraza la rotacion TOTAL desde el referente. Da igual que hayan
-    // pasado 1 o 200 advecciones: siempre es UN remuestreo.
+    // DOS ROTACIONES DISTINTAS, PORQUE SON DOS PROBLEMAS DISTINTOS (16-08-2026).
+    //
+    // La PROPIEDAD usa la rotacion INCREMENTAL de esta adveccion, y se pregunta contra el
+    // mundo de AHORA. El mundo siempre es una particion por construccion - una celda, un
+    // dueno - asi que preguntarle a el mantiene la particion apretada: el borde entre dos
+    // placas se mueve ~1 celda por adveccion y no mas. Deducirla de una foto vieja es lo
+    // que disolvia las placas en ruido.
+    //
+    // El MATERIAL usa la rotacion ACUMULADA contra el marco propio de cada placa, y de eso
+    // se encarga ReadPlateMaterial(). Un solo remuestreo por muchas advecciones que pasen,
+    // que es lo que evita que se deshilache.
+    //
+    // Antes las dos salian del mismo sitio con la misma rotacion, y por eso arreglar una
+    // rompia la otra. Ver ROADMAP.md A10.
     if (PlateAccumRotation.Num() != NumPlates)
     {
         PlateAccumRotation.Init(FQuat::Identity, NumPlates);
     }
     for (int32 P = 0; P < NumPlates; ++P)
     {
-        PlateAccumRotation[P] = UPlateKinematics::CalculatePlateRotation(Plates[P], DeltaTime)
-                              * PlateAccumRotation[P];
-        InverseRotations[P] = PlateAccumRotation[P].Inverse();
+        const FQuat StepRotation = UPlateKinematics::CalculatePlateRotation(Plates[P], DeltaTime);
+
+        // Inversa del paso: lleva un punto de "ahora" a donde estaba hace DeltaTime.
+        InverseRotations[P] = StepRotation.Inverse();
+
+        // Y la acumulada avanza, para que el material siga sabiendo llegar a su marco.
+        PlateAccumRotation[P] = StepRotation * PlateAccumRotation[P];
     }
 
-    // "Prev" pasa a ser el REFERENTE, no el estado del paso anterior.
-    const TArray<FTectonicFaceTextureData>& Prev = ReferenceData;
+    // Copia del mundo anterior. Imprescindible: la adveccion lee el pasado mientras escribe
+    // el presente, y sin copia unas celdas verian datos ya sobrescritos y otras no, segun
+    // el orden de recorrido.
+    //
+    // Sirve para dos cosas: el test de propiedad (quien mandaba aqui hace un paso) y como
+    // RESPALDO de material cuando el marco de la placa no tiene nada guardado en ese punto
+    // - que pasa en el territorio recien ganado, antes de que el write-back lo rellene.
+    const TArray<FTectonicFaceTextureData> Prev = FaceData;
 
     // PRIMERA PASADA: solo se cuenta cuantas placas reclaman cada celda.
     //
@@ -834,12 +853,28 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
                     // desplazarse y se disolveria en el oceano.
                     const int32 SF = SourceFace[0];
                     const int32 SI = SourceIdx[0];
+                    const int32 Owner = Claimants[0];
 
-                    Face.PlateIDData[Idx]   = static_cast<uint8>(Claimants[0]);
-                    Face.ElevationData[Idx] = Prev[SF].ElevationData[SI];
-                    Face.CrustAgeData[Idx]  = Prev[SF].CrustAgeData[SI];
-                    Face.CrustTypeData[Idx] = Prev[SF].CrustTypeData[SI];
-                    Face.CrustThicknessData[Idx] = Prev[SF].CrustThicknessData[SI];
+                    // El material NO sale de aqui al lado: sale del marco propio de la
+                    // placa, con la rotacion acumulada. Un solo remuestreo desde el inicio,
+                    // en vez de encadenar uno por adveccion.
+                    float MAge; uint8 MType; float MThick; float MElev;
+                    if (!ReadPlateMaterial(Owner, Dir, MAge, MType, MThick, MElev))
+                    {
+                        // Territorio recien ganado: el marco aun no tiene material ahi.
+                        // Se hereda lo que habia en el mundo, y el write-back de este paso
+                        // ya lo deja guardado en el marco.
+                        MAge = Prev[SF].CrustAgeData[SI];
+                        MType = Prev[SF].CrustTypeData[SI];
+                        MThick = Prev[SF].CrustThicknessData[SI];
+                        MElev = Prev[SF].ElevationData[SI];
+                    }
+
+                    Face.PlateIDData[Idx]   = static_cast<uint8>(Owner);
+                    Face.ElevationData[Idx] = MElev;
+                    Face.CrustAgeData[Idx]  = MAge;
+                    Face.CrustTypeData[Idx] = MType;
+                    Face.CrustThicknessData[Idx] = MThick;
                     Face.RefSourceFaceData[Idx] = static_cast<uint8>(SF);
                     Face.RefSourceIdxData[Idx] = SI;
                     ++Count.Moved;
@@ -1087,12 +1122,22 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
 
                     if (RecoveredPlate != INDEX_NONE)
                     {
-                        // Movimiento normal, igual que el caso de un unico reclamante.
+                        // Movimiento normal, igual que el caso de un unico reclamante: el
+                        // material tambien sale del marco de la placa.
+                        float RAge; uint8 RType; float RThick; float RElev;
+                        if (!ReadPlateMaterial(RecoveredPlate, Dir, RAge, RType, RThick, RElev))
+                        {
+                            RAge = Prev[RecoveredFace].CrustAgeData[RecoveredIdx];
+                            RType = Prev[RecoveredFace].CrustTypeData[RecoveredIdx];
+                            RThick = Prev[RecoveredFace].CrustThicknessData[RecoveredIdx];
+                            RElev = Prev[RecoveredFace].ElevationData[RecoveredIdx];
+                        }
+
                         Face.PlateIDData[Idx]        = static_cast<uint8>(RecoveredPlate);
-                        Face.ElevationData[Idx]      = Prev[RecoveredFace].ElevationData[RecoveredIdx];
-                        Face.CrustAgeData[Idx]       = Prev[RecoveredFace].CrustAgeData[RecoveredIdx];
-                        Face.CrustTypeData[Idx]      = Prev[RecoveredFace].CrustTypeData[RecoveredIdx];
-                        Face.CrustThicknessData[Idx] = Prev[RecoveredFace].CrustThicknessData[RecoveredIdx];
+                        Face.ElevationData[Idx]      = RElev;
+                        Face.CrustAgeData[Idx]       = RAge;
+                        Face.CrustTypeData[Idx]      = RType;
+                        Face.CrustThicknessData[Idx] = RThick;
                         Face.RefSourceFaceData[Idx] = static_cast<uint8>(RecoveredFace);
                         Face.RefSourceIdxData[Idx] = RecoveredIdx;
                         ++Count.Moved;
@@ -1163,14 +1208,38 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
                     // COLISION. Gana una placa y el resto subducen.
                     ++Count.Collisions;
 
+                    // El material de CADA reclamante sale de SU PROPIO marco. Importa: quien
+                    // gana una colision se decide comparando tipo, edad y altura, y si esas
+                    // comparaciones se hicieran sobre material remuestreado en cadena, el
+                    // ganador podria cambiar de una celda a la siguiente por ruido y no por
+                    // fisica. Eso es parte de lo que picaba el mapa de placas.
+                    TArray<float, TInlineAllocator<8>> ClaimAge;
+                    TArray<uint8, TInlineAllocator<8>> ClaimType;
+                    TArray<float, TInlineAllocator<8>> ClaimThickness;
+                    TArray<float, TInlineAllocator<8>> ClaimElevation;
+
+                    for (int32 C = 0; C < Claimants.Num(); ++C)
+                    {
+                        float CAge; uint8 CType; float CThick; float CElev;
+                        if (!ReadPlateMaterial(Claimants[C], Dir, CAge, CType, CThick, CElev))
+                        {
+                            const int32 SFb = SourceFace[C], SIb = SourceIdx[C];
+                            CAge = Prev[SFb].CrustAgeData[SIb];
+                            CType = Prev[SFb].CrustTypeData[SIb];
+                            CThick = Prev[SFb].CrustThicknessData[SIb];
+                            CElev = Prev[SFb].ElevationData[SIb];
+                        }
+                        ClaimAge.Add(CAge);
+                        ClaimType.Add(CType);
+                        ClaimThickness.Add(CThick);
+                        ClaimElevation.Add(CElev);
+                    }
+
                     int32 Winner = 0;
                     for (int32 C = 1; C < Claimants.Num(); ++C)
                     {
-                        const int32 WF = SourceFace[Winner], WI = SourceIdx[Winner];
-                        const int32 CF = SourceFace[C],      CI = SourceIdx[C];
-
-                        const bool bWinnerContinental = (Prev[WF].CrustTypeData[WI] == 1);
-                        const bool bChallengerContinental = (Prev[CF].CrustTypeData[CI] == 1);
+                        const bool bWinnerContinental = (ClaimType[Winner] == 1);
+                        const bool bChallengerContinental = (ClaimType[C] == 1);
 
                         if (bChallengerContinental != bWinnerContinental)
                         {
@@ -1186,7 +1255,7 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
                         {
                             // Oceanica contra oceanica: subduce la MAS VIEJA, que se ha
                             // enfriado y es mas densa. Gana la mas joven.
-                            if (Prev[CF].CrustAgeData[CI] < Prev[WF].CrustAgeData[WI])
+                            if (ClaimAge[C] < ClaimAge[Winner])
                             {
                                 Winner = C;
                             }
@@ -1197,7 +1266,7 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
                             // flotan. Se queda la mas alta, aproximacion barata a que el
                             // material se apila. El relieve de la colision en si lo
                             // produce el termino de frontera de Step().
-                            if (Prev[CF].ElevationData[CI] > Prev[WF].ElevationData[WI])
+                            if (ClaimElevation[C] > ClaimElevation[Winner])
                             {
                                 Winner = C;
                             }
@@ -1211,9 +1280,9 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
                     const int32 WinnerIdx = WI;
 
                     Face.PlateIDData[Idx]   = static_cast<uint8>(Claimants[Winner]);
-                    Face.ElevationData[Idx] = Prev[WinnerFace].ElevationData[WinnerIdx];
-                    Face.CrustAgeData[Idx]  = Prev[WinnerFace].CrustAgeData[WinnerIdx];
-                    Face.CrustTypeData[Idx] = Prev[WinnerFace].CrustTypeData[WinnerIdx];
+                    Face.ElevationData[Idx] = ClaimElevation[Winner];
+                    Face.CrustAgeData[Idx]  = ClaimAge[Winner];
+                    Face.CrustTypeData[Idx] = ClaimType[Winner];
                     Face.RefSourceFaceData[Idx] = static_cast<uint8>(WinnerFace);
                     Face.RefSourceIdxData[Idx] = WinnerIdx;
 
@@ -1232,7 +1301,7 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
                     // Asi que el grosor del perdedor continental se suma al del ganador,
                     // y de ahi salen las montanas por flotacion isostatica, sin ningun
                     // termino de levantamiento inventado.
-                    float Thickness = Prev[WinnerFace].CrustThicknessData[WinnerIdx];
+                    float Thickness = ClaimThickness[Winner];
                     int32 SubductedCount = 0;
 
                     for (int32 C = 0; C < Claimants.Num(); ++C)
@@ -1242,11 +1311,10 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
                             continue;
                         }
 
-                        const int32 LF = SourceFace[C], LI = SourceIdx[C];
-                        if (Prev[LF].CrustTypeData[LI] == 1)
+                        if (ClaimType[C] == 1)
                         {
                             // Continental: se apila, no se pierde.
-                            Thickness += Prev[LF].CrustThicknessData[LI];
+                            Thickness += ClaimThickness[C];
                         }
                         else
                         {
@@ -1748,9 +1816,9 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
     AccumulateMs(StepTimings.IsostasyMs, IsostasyStart);
 
     // Lo que la fisica acaba de cambiar sobre el mundo (orogenia, acrecion, difusion,
-    // isostasia) hay que devolverlo al referente: si no, la proxima adveccion lo borraria
-    // al remuestrear desde un referente que no se entero.
-    WriteBackToReference();
+    // isostasia) hay que devolverlo a los marcos de placa: si no, la proxima adveccion lo
+    // borraria al leer de un marco que no se entero.
+    WriteBackToPlateFrames();
 
     TotalSimulationTime += DeltaTimeScaled;
     StepCount++;
@@ -1761,92 +1829,180 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
     }
 }
 
-void URasterizedTectonics::WriteBackToReference()
+// ============================================================
+// MARCOS DE MATERIAL POR PLACA (16-08-2026)
+//
+// Cada placa se lleva a su propio marco el material que le toca del mundo inicial. A partir
+// de aqui ese marco es de donde sale el material al advectar, leido SIEMPRE con una sola
+// rotacion - la acumulada - por muchas advecciones que pasen.
+//
+// Ojo con que significa `Occupied`: NO es la huella territorial de la placa. El territorio
+// lo dice el mundo y solo el mundo. Esto es "aqui hay material guardado", que es otra cosa
+// y puede crecer y encoger libremente.
+// ============================================================
+void URasterizedTectonics::InitializePlateMaterialFrames()
 {
-    if (!bIsInitialized || ReferenceData.Num() != 6 || !PlateSystem)
+    if (!PlateSystem)
     {
         return;
     }
 
-    const TArray<FTectonicPlate>& Plates = PlateSystem->GetPlates();
-    if (PlateAccumRotation.Num() != Plates.Num())
+    const int32 NumPlates = PlateSystem->GetPlates().Num();
+    const int32 NumCells = GetFrameCellCount();
+
+    PlateMaterial.Reset();
+    PlateMaterial.SetNum(NumPlates);
+    for (int32 P = 0; P < NumPlates; ++P)
     {
-        return;
+        PlateMaterial[P].SetNum(NumCells);
     }
 
-    // SE RECORRE EL REFERENTE Y SE TIRA DEL MUNDO, no al reves.
-    //
-    // Empujando desde el mundo, unas celdas del referente recibian dos escrituras y otras
-    // ninguna, y esas se quedaban con material rancio; la siguiente adveccion leia de
-    // ellas y la celda salia sin resolver. Medido: 18,92% empujando con floor() y 20,32%
-    // empujando por el camino de lectura.
-    //
-    // Recorriendo el referente, cada una de sus celdas se escribe EXACTAMENTE UNA VEZ y no
-    // queda ningun hueco. Es la misma leccion que el resto del dia: el sentido en que se
-    // recorre un remuestreo decide quien se queda sin datos.
-    ParallelFor(6, [&](int32 RFaceIdx)
+    PlateAccumRotation.Reset();
+    PlateAccumRotation.Init(FQuat::Identity, NumPlates);
+
+    // Con las rotaciones a identidad, el marco de cada placa coincide celda a celda con el
+    // mundo, asi que basta con copiar donde el mundo dice que manda esa placa.
+    for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
     {
-        FTectonicFaceTextureData& Ref = ReferenceData[RFaceIdx];
+        const FTectonicFaceTextureData& Face = FaceData[FaceIdx];
 
         for (int32 Y = 0; Y < Resolution; ++Y)
         {
             for (int32 X = 0; X < Resolution; ++X)
             {
-                const int32 RIdx = Y * Resolution + X;
-                const int32 P = static_cast<int32>(Ref.PlateIDData[RIdx]);
-                if (!PlateAccumRotation.IsValidIndex(P))
+                const int32 WIdx = Y * Resolution + X;
+                const int32 P = static_cast<int32>(Face.PlateIDData[WIdx]);
+                if (!PlateMaterial.IsValidIndex(P))
                 {
                     continue;
                 }
 
-                // Donde esta ahora, en el mundo, el material que vive en esta celda del
-                // marco de la placa.
-                const FVector RefDir = CubeFaceMapping::PixelToDirection(
-                    static_cast<ECSCubeFace>(RFaceIdx), X, Y, Resolution);
-                const FVector WorldDir = PlateAccumRotation[P].RotateVector(RefDir);
+                const int32 FIdx = GetFrameIndex(FaceIdx, X, Y);
+                FPlateMaterialFrame& Frame = PlateMaterial[P];
 
-                ECSCubeFace WF; float WU, WV;
-                CubeFaceMapping::DirectionToFaceTexUV(WorldDir, WF, WU, WV);
-                const int32 WFaceIdx = static_cast<int32>(WF);
-                const int32 WX = FMath::Clamp(FMath::FloorToInt(WU * Resolution), 0, Resolution - 1);
-                const int32 WY = FMath::Clamp(FMath::FloorToInt(WV * Resolution), 0, Resolution - 1);
-                const int32 WIdx = WY * Resolution + WX;
+                Frame.Occupied[FIdx]       = 1;
+                Frame.CrustAge[FIdx]       = Face.CrustAgeData[WIdx];
+                Frame.CrustType[FIdx]      = Face.CrustTypeData[WIdx];
+                Frame.CrustThickness[FIdx] = Face.CrustThicknessData[WIdx];
+                Frame.Elevation[FIdx]      = Face.ElevationData[WIdx];
+            }
+        }
+    }
+}
 
-                const FTectonicFaceTextureData& World = FaceData[WFaceIdx];
+bool URasterizedTectonics::ReadPlateMaterial(int32 PlateIdx, const FVector& WorldDir,
+                                             float& OutAge, uint8& OutType,
+                                             float& OutThickness, float& OutElevation) const
+{
+    if (!PlateMaterial.IsValidIndex(PlateIdx) || !PlateAccumRotation.IsValidIndex(PlateIdx))
+    {
+        return false;
+    }
 
-                // EL TERRITORIO NO SE REASIGNA. Se probaron las dos alternativas y las dos
-                // rompen el planeta:
-                //
-                //   - Darle la celda a la placa que el mundo dice que ocupa ese sitio: en
-                //     el marco de referencia una placa se come a las demas. 12.370 celdas
-                //     continentales frente a 4.798 oceanicas y la tierra emergida al 0,0%,
-                //     porque el mar cubre un mundo sin cuencas. Error de concepto: en el
-                //     marco propio de una placa el territorio de otra no existe.
-                //   - Marcarla vacia e insertar ademas la corteza nueva de los rifts:
-                //     arregla el reparto (sin resolver 20,3% -> 7,1%) pero vuelve a hundir
-                //     la tierra emergida al 0,6%, porque al insertar territorio se propaga
-                //     corteza continental.
-                //
-                // Asi que si el mundo ya no reconoce a esta placa ahi, el material no se
-                // recoge y punto. El coste, conocido y medido, es que el reparto se queda
-                // en el inicial: al rotar cada placa por su lado los territorios dejan de
-                // teselar la esfera y aparecen huecos (20,3% de celdas sin resolver) y
-                // solapes (de ahi que se cuenten 71.000 celdas "destruidas" por adveccion
-                // sobre 98.304, porque casi cada celda tiene varios reclamantes).
-                //
-                // Es un DEFECTO ABIERTO, no una solucion. No se ve en pantalla y el
-                // planeta se comporta bien, pero el recuento de corteza no significa nada
-                // mientras siga asi.
-                if (World.PlateIDData[WIdx] != static_cast<uint8>(P))
+    // Del mundo al marco propio de la placa. UNA sola rotacion, la acumulada desde el
+    // inicio: da igual que hayan pasado 1 o 200 advecciones, siempre es un remuestreo.
+    // Esto es lo que evita que el material se deshilache.
+    const FVector FrameDir = PlateAccumRotation[PlateIdx].Inverse().RotateVector(WorldDir);
+
+    ECSCubeFace FF;
+    float FU, FV;
+    CubeFaceMapping::DirectionToFaceTexUV(FrameDir, FF, FU, FV);
+
+    const int32 FX = FMath::Clamp(FMath::FloorToInt(FU * Resolution), 0, Resolution - 1);
+    const int32 FY = FMath::Clamp(FMath::FloorToInt(FV * Resolution), 0, Resolution - 1);
+    const int32 FIdx = GetFrameIndex(static_cast<int32>(FF), FX, FY);
+
+    const FPlateMaterialFrame& Frame = PlateMaterial[PlateIdx];
+    if (!Frame.Occupied.IsValidIndex(FIdx) || Frame.Occupied[FIdx] == 0)
+    {
+        return false;
+    }
+
+    OutAge       = Frame.CrustAge[FIdx];
+    OutType      = Frame.CrustType[FIdx];
+    OutThickness = Frame.CrustThickness[FIdx];
+    OutElevation = Frame.Elevation[FIdx];
+    return true;
+}
+
+// ============================================================
+// WRITE-BACK A LOS MARCOS DE PLACA
+//
+// SE RECORRE CADA MARCO Y SE TIRA DEL MUNDO, no al reves. Empujando desde el mundo, unas
+// celdas del marco recibian dos escrituras y otras ninguna, y esas se quedaban con material
+// rancio; la siguiente adveccion leia de ellas y la celda salia sin resolver. Medido:
+// 18,92% empujando con floor() y 20,32% empujando por el camino de lectura. Recorriendo el
+// marco, cada celda se escribe EXACTAMENTE UNA VEZ y no queda ningun hueco.
+//
+// LA DIFERENCIA CON LO QUE HABIA ANTES, y es la que desatasca el problema de raiz: aqui ya
+// NO se rechaza el territorio que la placa acaba de ganar. El write-back viejo hacia
+// `if (World.PlateID != P) continue;` porque el ID de aquel referente compartido era quien
+// decidia la propiedad, y meter territorio ajeno hacia que una placa se comiera a las demas
+// (12.370 celdas continentales frente a 4.798, tierra emergida al 0,0%).
+//
+// Ahora la propiedad no sale de aqui - sale del mundo, y se decide en cada adveccion - asi
+// que este marco puede crecer y encoger sin consecuencias sobre quien manda. Que es
+// justamente lo que hacia falta para que una placa gane suelo en un rift y lo pierda en una
+// subduccion.
+// ============================================================
+void URasterizedTectonics::WriteBackToPlateFrames()
+{
+    if (!bIsInitialized || !PlateSystem)
+    {
+        return;
+    }
+
+    const int32 NumPlates = PlateSystem->GetPlates().Num();
+    if (PlateMaterial.Num() != NumPlates || PlateAccumRotation.Num() != NumPlates)
+    {
+        return;
+    }
+
+    ParallelFor(NumPlates, [&](int32 P)
+    {
+        FPlateMaterialFrame& Frame = PlateMaterial[P];
+        const FQuat& AccumRot = PlateAccumRotation[P];
+
+        for (int32 FrameFace = 0; FrameFace < 6; ++FrameFace)
+        {
+            for (int32 Y = 0; Y < Resolution; ++Y)
+            {
+                for (int32 X = 0; X < Resolution; ++X)
                 {
-                    continue;
-                }
+                    const int32 FIdx = GetFrameIndex(FrameFace, X, Y);
 
-                Ref.ElevationData[RIdx]      = World.ElevationData[WIdx];
-                Ref.CrustAgeData[RIdx]       = World.CrustAgeData[WIdx];
-                Ref.CrustTypeData[RIdx]      = World.CrustTypeData[WIdx];
-                Ref.CrustThicknessData[RIdx] = World.CrustThicknessData[WIdx];
-                Ref.VelocityData[RIdx]       = World.VelocityData[WIdx];
+                    // Donde esta ahora, en el mundo, el material que vive en esta celda del
+                    // marco de la placa.
+                    const FVector FrameDir = CubeFaceMapping::PixelToDirection(
+                        static_cast<ECSCubeFace>(FrameFace), X, Y, Resolution);
+                    const FVector WorldDir = AccumRot.RotateVector(FrameDir);
+
+                    ECSCubeFace WF;
+                    float WU, WV;
+                    CubeFaceMapping::DirectionToFaceTexUV(WorldDir, WF, WU, WV);
+
+                    const int32 WFaceIdx = static_cast<int32>(WF);
+                    const int32 WX = FMath::Clamp(FMath::FloorToInt(WU * Resolution), 0, Resolution - 1);
+                    const int32 WY = FMath::Clamp(FMath::FloorToInt(WV * Resolution), 0, Resolution - 1);
+                    const int32 WIdx = WY * Resolution + WX;
+
+                    const FTectonicFaceTextureData& World = FaceData[WFaceIdx];
+
+                    // Si el mundo dice que ahi manda otra placa, esta celda del marco deja
+                    // de tener material valido. No se conserva lo viejo: eso es exactamente
+                    // lo que congelaba celdas.
+                    if (World.PlateIDData[WIdx] != static_cast<uint8>(P))
+                    {
+                        Frame.Occupied[FIdx] = 0;
+                        continue;
+                    }
+
+                    Frame.Occupied[FIdx]       = 1;
+                    Frame.CrustAge[FIdx]       = World.CrustAgeData[WIdx];
+                    Frame.CrustType[FIdx]      = World.CrustTypeData[WIdx];
+                    Frame.CrustThickness[FIdx] = World.CrustThicknessData[WIdx];
+                    Frame.Elevation[FIdx]      = World.ElevationData[WIdx];
+                }
             }
         }
     });

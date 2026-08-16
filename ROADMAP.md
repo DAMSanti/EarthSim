@@ -39,17 +39,26 @@ Un simulador planetario completo y **acoplado**: tectónica → relieve → clim
 - [ ] Campos vectoriales (velocidad, viento, drenaje) como flechas
 - [ ] Vista de sección/perfil a lo largo de un gran círculo
 
-### F1 — Movimiento real de placas 🟡 NÚCLEO HECHO
+### F1 — Movimiento real de placas 🔴 REABIERTO (16-08-2026)
 
-- [x] `UPlateKinematics` por fin cableada; los centroides rotan
-- [x] **Advección hacia atrás** del campo de IDs: el número de reclamantes *es* la clasificación del borde (1 = movimiento, 0 = rift, ≥2 = colisión)
+> **Las placas se disuelven.** El campo de IDs arranca como 8 regiones limpias y a los ~200 Ma es una mezcla a escala de píxel. Visto en el visor, confirmado midiendo. No es un defecto acotado: es que **las placas han dejado de existir como objetos**, y toda la clasificación de fronteras se apoya en ellas. Diagnóstico completo en [A10](#a10-el-defecto-de-raíz-de-f1-la-propiedad-y-el-material).
+
+Lo que sigue siendo válido:
+
+- [x] `UPlateKinematics` cableada; los centroides rotan
 - [x] Colisión por densidad: océano subduce bajo continente; entre océanos subduce la más vieja
-- [x] Creación de corteza en rifts y destrucción en subducción, con contabilidad explícita
 - [x] Se advectan edad, tipo y grosor junto con el ID
 - [x] La advección no corre en cada paso, sino al acumular ~1 píxel de desplazamiento
 - [x] Orogenia calibrada contra el Himalaya ([detalle](#a4-calibración-de-la-orogenia))
-- [x] Verificado en editor: deriva, cordilleras de ~8.600 m y **bandas de edad en las dorsales**
-- [ ] ⏸️ **Aparcado, y con motivo** — los dos puntos que quedaban se replantean tras F2 ([por qué](#a9-los-dos-puntos-aparcados-de-f1))
+- [x] Los "puentes" rectos de corteza: **resueltos y verificados en pantalla** ([por qué el test dice lo contrario](#el-quinto-engaño-de-una-métrica-16-08-2026))
+
+Lo que hay que rehacer:
+
+- [ ] **Separar la propiedad del material.** Hoy comparten `ReferenceData` y necesitan lo contrario: la propiedad hay que re-deducirla del mundo actual en cada paso; el material no se puede remuestrear más de una vez ([A10](#a10-el-defecto-de-raíz-de-f1-la-propiedad-y-el-material))
+- [ ] **La frontera, como objeto.** Clasificar por velocidad relativa proyectada sobre la normal de la frontera, no contando reclamantes
+- [ ] **Ciclo de vida de placas.** Hoy nacen 8 y son 8 para siempre: una placa no puede morir subducida ni nacer de un rift, y eso es imposible *por construcción*, no por falta de código
+- [ ] **Lazo dinámico** (después de todo lo anterior): la velocidad angular responde al tirón de la losa en subducción. Sin él hay cinemática, no dinámica
+- [ ] ⏸️ Los dos puntos aparcados de F1 siguen aparcados ([por qué](#a9-los-dos-puntos-aparcados-de-f1))
 
 ### F2 — Isostasia y nivel del mar ✅ COMPLETO (16-08-2026)
 
@@ -131,20 +140,29 @@ El límite real es **la malla de visualización** (`GridResolution = 128`, ~78 k
 
 ## Defectos abiertos
 
-Ninguno bloquea, todos están medidos y acotados. Detalle completo en [A6](#a6-defectos-abiertos-en-detalle).
+> **Hay uno que sí bloquea, y desde el 16-08-2026 es el único que importa.** La tabla anterior daba todos los defectos por acotados; era falsa, porque los medía por separado sin ver que casi todos son síntomas de lo mismo.
 
-| Defecto | Medida | ¿Lo arregla una fase posterior? |
+| Defecto | Medida (16-08-2026) | ¿Es de raíz? |
 |---|---|---|
-| Escalonado de bordes de placa | ×2,3 | **No.** Y está bloqueado por falta de métrica válida |
-| Crecimiento del área continental | converge a ×2,27 (21,7 % de la superficie) | **No** (la erosión no convierte continente en océano) |
-| Tierra emergida decae en 1000 Ma | 24,5 % → 17,2 % | Parcialmente: falta el sumidero de la erosión-sedimento (F4) |
-| Celdas sin resolver en la advección | 0,016 % | Residual, vigilado por test |
+| **Las placas se disuelven** | ID de placa: de 8 regiones a mezcla de píxel en ~200 advecciones | **SÍ — es la raíz** ([A10](#a10-el-defecto-de-raíz-de-f1-la-propiedad-y-el-material)) |
+| Balanza de corteza rota | creada 47.999 / destruida 1.185.542 (ratio 0,04) | Síntoma. Con el reparto sano sube a 0,99 |
+| Solape (celdas con ≥2 reclamantes) | 28,7 % de las actualizaciones | Síntoma. Con el reparto sano baja a 1,26 % |
+| Celdas sin resolver | **31,6 %** (el ROADMAP decía 0,016 %: cifra caducada) | Síntoma. Con el reparto sano baja a 0,003 % |
+| Grosor continental medio | 53,9 km, con `ContinentalThickness` = 35 km | Síntoma: la banda de solape apila corteza |
+| Área continental creciendo | hasta cubrir el planeta | Síntoma: el desempate continental-gana-a-oceánica es un trinquete sobre el 28,7 % |
+| Escalonado de bordes | ×2,96 (mejora a ×2,04 con el reparto sano) | Parcialmente síntoma |
+| Sin ciclo de vida de placas | nacen 8, mueren 0, nacen 0 | Defecto **independiente**, de modelo |
+| Sin dinámica (polos de Euler fijos) | nunca se escriben | Defecto **independiente**, de modelo |
+
+La lección de esta tabla: **medir defectos por separado los hizo parecer acotados.** Cada uno tenía su número, su test y su casilla, y ninguno pasaba de "vigilado". Mirando el campo de IDs en pantalla se ve en dos segundos que son el mismo.
 
 ## Riesgos vigentes
 
 - **Coste `O(Res²)` por campo.** Cada fase añade campos que recorren las 6 caras, y el coste escala con el número de celdas (medido: ×16 de Res 32 a 96). Es el riesgo principal de F3/F4.
 - **Calibración cruzada de parámetros.** `OrogenyFactor` y `DiffusionRate` forman un equilibrio; tocar uno obliga a revisar el otro.
+- **Calibraciones apoyadas en la balanza de corteza.** El umbral de rift (`0,10 × MaxAngularSpeed`) se fijó igualando creación y destrucción. Esa balanza estaba rota al hacerlo, así que **el umbral no está calibrado**: hay que rehacerlo cuando el reparto sea sano, y hasta entonces no es un valor de fiar.
 - **Bordes del cubo.** Cada sistema nuevo con vecindad vuelve a pagarlo. Usar siempre `CubeFaceMapping` y `GetNeighborCell`.
+- **Nombres de test que no describen lo que miden.** Ha costado dos días una vez ([detalle](#el-quinto-engaño-de-una-métrica-16-08-2026)). Antes de creerse un test en rojo, leer su aserción.
 - **Estabilidad numérica de las SWE** y **VRAM a resolución alta** (heredados del plan original).
 
 ---
@@ -272,6 +290,26 @@ Los tres parches previos (crear océano / rellenar del vecindario / conservar) e
 
 La tierra emergida bajó de 25,1 % a 18,8 %, y **no es una regresión**: el 25,1 % estaba inflado por el propio bug, porque los cordones eran corteza continental elevada que no debía estar ahí.
 
+**Nota (16-08-2026): las cifras de esta tabla están caducadas.** Se midieron antes de que el referente entrara en juego. Hoy las celdas sin resolver son el **31,6 %**, no el 0,0157 %, y la balanza es 47.999/1.185.542. El arreglo de los cordones sigue siendo correcto y los cordones no han vuelto; lo que cambió el orden de magnitud es otra cosa ([A10](#a10-el-defecto-de-raíz-de-f1-la-propiedad-y-el-material)).
+
+### El quinto engaño de una métrica (16-08-2026)
+
+El apartado del escalonado avisaba de que el cociente de frontera había inducido a error **tres veces**. Ha vuelto a pasar, con otra métrica y con un coste mucho mayor: dos días de trabajo en la dirección equivocada.
+
+`Simu.Tectonics.NoStraightCrustBridges` estaba en rojo con "12 de 104", y se dio por hecho que los **puentes rectos de corteza habían vuelto** — contradiciendo lo que el usuario estaba viendo en pantalla, que es que no están.
+
+Lo que ese test mide **no son puentes**. Su aserción es `SamePlate == 0` sobre "anomalías de una celda": píxeles *sueltos* cuyo tipo de corteza difiere del de sus dos vecinas en un eje. "12 de 104" son 104 motas de un píxel, 12 de ellas dentro de una misma placa. A Res=256 eso es invisible.
+
+Se llama así porque se escribió durante la caza de los puentes, para detectar la **semilla** de uno. La medida que sí vería una franja larga es `LongestRun()`, que el test calcula y **registra pero no comprueba**.
+
+**Los puentes están resueltos.** Lo confirman las capturas del usuario y lo confirma leer la aserción.
+
+Reglas que salen de esto, y que valen para todo el proyecto:
+
+1. **Un test en rojo no prueba lo que dice su nombre.** Antes de creerlo, leer la aserción concreta que falla.
+2. **Si un test contradice lo que se ve en pantalla, la sospecha va primero al test.** La regla de verificación ([A1](#a1-la-regla-de-verificación)) dice que ninguna fase se da por hecha si no se ve en pantalla; su recíproca también vale.
+3. **Un test cuyo nombre no describe su aserción es peor que no tener test**, porque induce a error con la autoridad de una medición.
+
 ## A7. Mediciones
 
 ### Rendimiento por fase
@@ -298,6 +336,28 @@ después: sim  27.6 ms | adv 174.1 (motas 9.2) front 2.9 dif 2.9 iso  6.8
 | 96 | ×1,63 | 9,07 | 78 |
 
 El coste escala con el número de celdas. Es el dato que dimensiona F3 y F4: **cada campo nuevo paga ese factor**.
+
+### Barrido de re-anclaje del referente (16-08-2026)
+
+`Simu.Tectonics.ReferenceRebaseSweep`. 1000 Ma, Res=48, 8 placas, semilla 4242. `N` = cada cuántas advecciones se adopta el mundo como referente nuevo; `nunca` es el comportamiento de hoy.
+
+| N | tierra % | balanza | solape % | sin resolver % | escalonado | continental | grosor cont. |
+|---|---|---|---|---|---|---|---|
+| nunca | 24,5 → 23,9 | **0,04** | 28,70 | 31,62 | ×2,96 | 3630 → 4046 | **53,9 km** |
+| 1 | 24,5 → 13,1 | **0,99** | 1,26 | 0,003 | ×2,04 | 3630 → 2182 | **36,8 km** |
+| 4 | 24,5 → 17,8 | 0,49 | 4,27 | 0,69 | ×2,28 | 3630 → 2863 | 40,5 km |
+| 16 | 24,5 → 25,8 | 0,24 | 11,16 | 5,43 | ×2,68 | 3630 → 6526 | 46,8 km |
+| 64 | 24,5 → 28,2 | 0,09 | 24,43 | 21,78 | ×3,35 | 3630 → 5390 | 53,4 km |
+
+Qué prueba esto:
+
+- **Todo escala monótonamente con `N`.** Balanza, solape, sin resolver, escalonado, área continental y grosor medio. No son seis defectos: son seis vistas del desajuste del reparto.
+- **La balanza se arregla del todo** (0,04 → 0,99). Las 1.185.542 celdas "destruidas" eran desajuste, no subducción.
+- **El escalonado MEJORA al re-anclar** (×2,96 → ×2,04, que iguala la mejor marca histórica). Se temía lo contrario. Parte del escalonado también era el desajuste.
+- **El grosor continental delata el mecanismo**: 53,9 km sin re-anclar frente a 36,8 con `N`=1, y `ContinentalThickness` es 35 km. La banda de solape corría la rama de colisión sobre el 28,7 % del planeta en cada advección, y ahí el material continental **se apila**. Era una máquina de fabricar corteza.
+- **Y sin embargo `N`=1 no es la solución**, que es el resultado importante del barrido: rompe `OceanicRibbon` (*"encadenar advecciones no alarga la cinta (13 con 48 advecciones, 1 con 1)"*), que es justo el test que justifica que el referente exista. Tres tests pasan a verde y otros tres se ponen en rojo.
+
+**Ningún `N` funciona**, y por qué no puede funcionar está en [A10](#a10-el-defecto-de-raíz-de-f1-la-propiedad-y-el-material). El barrido no era el arreglo: era el experimento que demuestra que hace falta el arreglo de verdad.
 
 ## A8. Historial M0–M5 (10 y 11-08-2026)
 
@@ -338,9 +398,88 @@ Hacerlo ahora sería exactamente el patrón que destapó la auditoría: **calcul
 
 ### Consecuencia para el estado de F1
 
-F1 cumple su definición de hecho: las placas se mueven, la subducción y las dorsales son emergentes, hay conservación de corteza, y está verificado en pantalla con bandas de edad en las dorsales. Lo que queda no es F1 sin terminar, es **trabajo que cambió de sitio**.
+~~F1 cumple su definición de hecho.~~ **Anulado el 16-08-2026.** Esa conclusión se apoyaba en que había conservación de corteza, y no la había: la balanza estaba en 0,04. Ver [A10](#a10-el-defecto-de-raíz-de-f1-la-propiedad-y-el-material).
 
-## A10. Documentos relacionados
+## A10. El defecto de raíz de F1: la propiedad y el material
+
+*(16-08-2026. Encontrado mirando el visor de ID de placa, no midiendo.)*
+
+### El síntoma
+
+El campo de ID de placa **arranca como 8 regiones limpias y se disuelve en una mezcla a escala de píxel**. A los ~200 Ma no hay placas: hay ocho etiquetas repartidas como ruido, con una trama diagonal.
+
+Y la observación que lo convierte en diagnóstico: **ningún otro campo está roto.** Grosor, edad, tipo, altura y relieve muestran cuerpos grandes, limpios y con el mismo contorno entre sí. El mismo blob aparece idéntico en los seis filtros.
+
+Si las placas se hubieran fragmentado de verdad, el material se habría fragmentado con ellas — viaja en la misma pasada del mismo código. No lo ha hecho. **El material se transporta como cuerpos sólidos y la etiqueta de propiedad se ha convertido en ruido: están desacoplados.**
+
+### Por qué es lo peor que podía pasar
+
+Toda la clasificación de fronteras sale de contar reclamantes por celda: 1 movimiento, 0 rift, ≥2 colisión. No hay ningún otro sitio donde se decida qué es una dorsal y qué una subducción.
+
+Con el ID hecho ruido ese conteo no está mal calibrado: **está sin significado**. Cada celda tiene vecinas de tres o cuatro placas, así que cada celda es frontera. Y la prueba de divergencia que decide si un hueco es rift lee la velocidad de las placas vecinas — o sea, lee cuatro placas al azar.
+
+### Nivel 1 — La propiedad y el material comparten estructura, y necesitan lo contrario
+
+Es el hallazgo central, y explica por qué **todo arreglo hasta ahora ha sido un balancín**.
+
+En `AdvectPlateField`, la pregunta *"¿de quién es esta celda?"* y la pregunta *"¿qué material hay aquí?"* se le hacen al mismo sitio: `ReferenceData`. Misma estructura, misma línea, misma antigüedad. Pero tienen requisitos **opuestos**:
+
+- **La propiedad es una partición.** Debe seguir siéndolo en todo momento, y para eso hay que **re-deducirla del estado actual en cada paso**. Deducida de una foto vieja, se despega de la realidad y degenera en ruido.
+- **El material es una sustancia transportada.** No se puede remuestrear repetidamente sin deshilacharlo. Hay que leerlo **una sola vez** desde un marco propio con la rotación acumulada.
+
+Uno exige encadenar. El otro exige no encadenar nunca. Y están soldados.
+
+| | propiedad | material |
+|---|---|---|
+| Con referente (hoy) | se pudre → ID hecho ruido | limpio, sin cinta |
+| Re-anclando cada advección | perfecta (solape 1,26 %) | vuelve la cinta |
+
+No son dos problemas que compiten por un ajuste: **son dos campos con necesidades contrarias en el mismo cajón**. Cualquier valor de `N` mejora uno y rompe el otro. El [barrido](#barrido-de-re-anclaje-del-referente-16-08-2026) lo mide de punta a punta.
+
+### Nivel 2 — El modelo no tiene fronteras, tiene interiores
+
+En la Tierra la tectónica **es** la frontera: rifts, subducciones, orogenias y transformantes ocurren todos en una línea. El interior de una placa solo rota.
+
+Aquí no existe la frontera como objeto en ninguna parte. Existe el interior —una etiqueta por celda— y la frontera se infiere a posteriori contando reclamantes. Dos consecuencias:
+
+- **El coste está invertido.** Cada advección hace 6·Res²·N rotaciones de cuaternión para calcular con precisión perfecta la parte aburrida, y la parte interesante sale de restos.
+- **Nada garantiza la teselación.** Ocho regiones rígidas rotando cada una por su lado **no pueden** teselar una esfera. Es geometría, no un bug. Se confió en que la partición emergiera, y no puede.
+
+**Corrección de un error de concepto propio:** los huecos y los solapes no son el error. *Son* la tectónica — en una dorsal sobra sitio de verdad y en una fosa falta material de verdad; la tectónica de placas no conserva área localmente. El error es que ocurren **en el 28,7 % de la superficie** en vez de en una banda de una celda a lo largo de las fronteras reales.
+
+### Nivel 3 — Cinemática sin dinámica, y sin ciclo de vida
+
+- **Las placas no nacen ni mueren.** `GeneratePlates()` las crea una vez; no hay un solo `Add` ni `RemoveAt` después. En la Tierra el número no se conserva: la Farallón se subdujo casi entera (quedan Juan de Fuca, Cocos y Nazca), India y Australia se separaron, y el Rift de África Oriental está fabricando una ahora. Aquí es imposible **por construcción**.
+- **Ningún polo de Euler se escribe nunca.** `EulerPole` y `AngularVelocity` se leen para rotar y nada más. En la Tierra el motor principal es el **tirón de la losa**: una placa con un margen largo en subducción acelera, y una que pierde su losa frena. Sin ese lazo no hay estados de equilibrio: nada regula la fracción de tierra y nada hace que un supercontinente se rompa y se vuelva a juntar.
+
+El invariante correcto **no menciona el número de placas**:
+
+> En cada instante, cada punto de la esfera pertenece a exactamente una placa.
+
+### El plan
+
+1. **Separar propiedad de material.** El ráster del mundo es la única verdad sobre quién posee qué, y la pregunta *"¿es tuyo este punto?"* se le hace al mundo de ahora, nunca a una foto vieja. El material vive en un ráster **por placa**, en el marco de esa placa, leído con una sola rotación acumulada.
+2. **La frontera, como objeto.** Clasificar por velocidad relativa proyectada sobre la normal de la frontera. Funciona con bandas de una celda de ancho.
+3. **Ciclo de vida.** Componentes conexas sobre el mapa de IDs: sin celdas, la placa muere; partida en dos, nace una con su propio polo.
+4. **Lazo dinámico**, al final: la velocidad angular responde a la longitud del margen en subducción.
+
+**Se tira `ReferenceData` entero.** No es reparable: es el sitio donde están soldadas las dos cosas que hay que separar. Con él se van la recuperación por tolerancia de media celda y la rama de "celda sin resolver que conserva su estado" — ambas existen para tapar huecos que solo aparecen porque la partición está podrida.
+
+**No se toca** el ráster de cubesfera, la isostasia de F2, el nivel del mar, el clima ni el drenaje. Todos leen el mundo y el mundo sigue igual.
+
+### Cómo se verifica
+
+- Balanza creada/destruida ≈ 1, y estable en el tiempo
+- Solape < 1 %
+- **El área de cada placa cambia con el tiempo.** Hoy es exactamente constante *por construcción*: si tras el arreglo sigue constante, no se arregló nada. Es la prueba directa.
+- `OceanicRibbon` en verde — la cinta no vuelve. Es lo que el re-anclaje no podía dar.
+- **En el visor de ID de placa: regiones, no ruido.** Es el criterio que descubrió el defecto y el que dice cuándo está cerrado.
+
+### Descartado, y por qué
+
+**Placas como polígonos esféricos con aristas compartidas** (lo que hace GPlates). Teselan por construcción, sin huecos posibles. Descartado por riesgo: mantener esa topología automáticamente, con placas que nacen y mueren, es un problema abierto — en GPlates lo hace un humano a mano. La vía del ráster con los invariantes bien puestos está probada (`platec`, Viitanen).
+
+## A11. Documentos relacionados
 
 - [`SPECS.md`](SPECS.md) — inventario por archivo, con el estado real de cada subsistema.
 - [`docs/`](docs/) — visión de producto original. Referencia de **alcance y contenido físico** (qué modelos, qué ecuaciones), no de orden ni fechas.

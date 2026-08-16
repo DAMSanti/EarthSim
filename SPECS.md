@@ -3,15 +3,18 @@
 > Este documento describe el sistema **tal como existe hoy en el código**, no la visión aspiracional. Para la visión completa del producto ver [`docs/01-resumen-ejecutivo.md`](docs/01-resumen-ejecutivo.md) y el resto de `docs/`. Cada sección marca explícitamente **Implementado** / **Parcial** / **No implementado**, con referencias a archivo para poder verificarlo.
 >
 > **Revisado el 15-08-2026** tras una auditoría de código que corrigió varias afirmaciones de la versión anterior de este documento — señaladas en línea con 🔻.
+>
+> **Actualizado el 16-08-2026.** §5.1 describe el estado anterior a F1 y se conserva como historial; el estado real de la tectónica hoy está en **§5.7**, incluido su defecto de raíz. La tabla de abajo tenía filas contradictorias (isostasia y clima aparecían a la vez como hechos y como no implementados); corregidas.
 
 ## 0. Resumen de estado
 
 | Subsistema | Estado | Motor de cómputo |
 |---|---|---|
 | Cube-Sphere grid + métricas | ✅ Implementado, con tests | CPU |
-| **Movimiento de placas** | ✅ Implementado (advección del campo de IDs, §5.1) | CPU |
+| **Movimiento de placas** | 🔴 Implementado pero **las placas se disuelven** (§5.7) | CPU |
 | Generación de placas (Voronoi) | ✅ Implementado | CPU |
-| Orogenia / dorsales / subducción | ✅ Emergentes de la advección | CPU |
+| Ciclo de vida de placas (nacer/morir) | ❌ Imposible por construcción (§5.7) | — |
+| Orogenia / dorsales / subducción | ⚠️ Emergentes de la advección, pero sobre un reparto roto (§5.7) | CPU |
 | Isostasia (Airy) / grosor de corteza | ✅ Implementado, estado primario (§12) | CPU |
 | Batimetría por edad (hundimiento térmico) | ✅ Implementado (§12) | CPU |
 | Nivel del mar con volumen conservado | ✅ Implementado (§12) | CPU |
@@ -26,9 +29,9 @@
 | UI de configuración tectónica | ✅ Implementado | — |
 | Guardado/serialización | ✅ Implementado y verificado | — |
 | Control de versiones (git) | ✅ Inicializado | — |
-| Isostasia / nivel del mar | ❌ No implementado | — |
-| Clima / precipitación | ❌ No implementado | — |
-| Erosión / hidrología | ❌ No implementado | — |
+| Clima (temperatura/viento/precipitación) | ✅ Implementado (F3), 4 tests | CPU |
+| Drenaje (acumulación de flujo) | ✅ Implementado (F4) | CPU |
+| Erosión / sedimento | ❌ No implementado | — |
 | Atmósfera (SWE) / ciclo del agua | ❌ No implementado | — |
 | Climatología (carbono/albedo) | ❌ No implementado | — |
 | Biosfera/agentes | ❌ No implementado | — |
@@ -146,6 +149,38 @@ Lo mismo en `−Z`, invertida en sentido contrario (`Grid: (U,-V,-1)` vs `Raster
 
 **Relacionado:** hay **dos asignaciones distintas de placa→celda** que no dan el mismo resultado — Voronoi/JFA sobre el `Grid`, y una búsqueda de centroide más cercano `O(Res²·N)` en `InitializeFromPlateSystem`.
 
+### 5.7 La advección hoy, y su defecto de raíz (16-08-2026)
+
+> §5.1 describe el estado **anterior** a F1 ("las placas nunca se mueven"), ya superado: hoy sí se mueven. Esta sección describe lo que hay ahora.
+
+**Cómo funciona.** `RasterizedTectonics::AdvectPlateField` (`:616`) hace advección semi-lagrangiana hacia atrás. Para cada celda destino y cada placa `P` se retro-rota el punto con la rotación acumulada inversa de `P` y se comprueba si en ese sitio el estado de referencia pertenecía a `P`. El **número de reclamantes** clasifica: 1 movimiento, 0 rift, ≥2 colisión.
+
+Estructuras implicadas:
+
+- `FaceData` — el mundo. 6 caras × Res², con `PlateIDData`, `ElevationData`, `VelocityData`, `CrustAgeData`, `CrustTypeData`, `CrustThicknessData`.
+- `ReferenceData` (`:704`) — copia del estado inicial. La advección **siempre** muestrea de aquí, para no encadenar remuestreos.
+- `PlateAccumRotation` (`:705`) — rotación acumulada por placa desde el inicio.
+- `WriteBackToReference` (`:1764`) — devuelve al referente lo que la física cambió sobre el mundo.
+
+**El defecto de raíz.** `WriteBackToReference` escribe elevación, edad, tipo, grosor y velocidad, y **deliberadamente no escribe `PlateIDData`** (`:1840`, con el razonamiento en el comentario). O sea: la **huella** de cada placa en el referente es el Voronoi inicial y no cambia nunca.
+
+De ahí salen dos cosas, y la segunda es la grave:
+
+1. **Ocho huellas rígidas rotando cada una por su lado no teselan la esfera.** Es geometría, no un bug de implementación. Medido: 28,7 % de las actualizaciones con ≥2 reclamantes, 31,6 % sin resolver, balanza de corteza 47.999/1.185.542.
+
+2. **La propiedad y el material se leen de la misma estructura, y necesitan lo contrario.** La propiedad es una *partición* y hay que re-deducirla del estado actual en cada paso o degenera; el material es una *sustancia* y hay que leerlo una sola vez o se deshilacha. Estando soldados, arreglar uno rompe el otro — comprobado con un barrido de re-anclaje: con el referente el ID se pudre y el material está limpio; re-anclando en cada advección el ID es perfecto y vuelve la cinta del material.
+
+**Efecto visible:** el campo de ID de placa arranca como 8 regiones limpias y a los ~200 Ma es una mezcla a escala de píxel, mientras grosor, edad, tipo y relieve siguen mostrando cuerpos limpios y coherentes entre sí. Las placas han dejado de existir como objetos.
+
+**Consecuencias sobre lo que hay documentado como calibrado:**
+
+- El umbral de rift `0,10 × MaxAngularSpeed` (`:943`) se fijó igualando creación y destrucción de corteza. Esa balanza estaba rota al hacerlo, así que **no está calibrado**.
+- El grosor continental medio es 53,9 km con `ContinentalThickness` = 35 km: la banda de solape corre la rama de colisión sobre el 28,7 % del planeta, y ahí el material continental se apila (`:1249`).
+
+**Lo que además no existe:** ciclo de vida de placas (`GeneratePlates()` las crea una vez; no hay ningún `Add` ni `RemoveAt` posterior, así que una placa no puede morir subducida ni nacer de un rift) y realimentación dinámica (`EulerPole` y `AngularVelocity` se leen para rotar y nunca se escriben).
+
+Plan de arreglo y verificación en `ROADMAP.md` A10.
+
 ## 6. Simulación de flujo simple
 
 **Prueba de concepto, no producción** — `SimpleFlowSimulation.cpp/h` (400/193 líneas).
@@ -174,9 +209,12 @@ Confirmado por ausencia total de referencias en `Source/`:
 
 ## 10. Riesgos y deuda técnica activa
 
-Ordenados por impacto, tras la auditoría del 15-08-2026:
+Ordenados por impacto, tras la auditoría del 15-08-2026.
 
-1. 🔻 **Las placas no se mueven** (§5.1). Bloquea todo lo demás: no tiene sentido erosionar un relieve que nunca cambia. Es F1 en `ROADMAP.md`.
+> **Reordenado el 16-08-2026.** El riesgo 1 ya no es que las placas no se muevan —se mueven— sino que **se disuelven**:
+
+0. 🔴 **Las placas dejan de existir como objetos** (§5.7). El campo de ID degenera de 8 regiones a ruido de píxel en ~200 advecciones, y toda la clasificación de fronteras se apoya en contar reclamantes sobre ese campo. Arrastra la balanza de corteza, el área continental, el grosor medio y el escalonado. Bloquea F4: la erosión correría sobre un relieve producido en parte por rifts y subducciones inventados. Plan en `ROADMAP.md` A10.
+1. ~~**Las placas no se mueven** (§5.1).~~ **Resuelto en F1.** Se mueven. Ver §5.7 para lo que hay hoy.
 2. **Mapeo de caras inconsistente en los polos** (§5.6). Corrompe en silencio cualquier sistema nuevo que cruce campos por cara — es decir, todos los de las fases siguientes. Es F0.
 3. **`BoundaryInteractions` inerte** (§5.1): 693 líneas de física real ejecutándose cada paso sobre 6×Res² celdas sin que nadie lea el resultado. Coste puro hasta que F1 le dé consumidor.
 4. **Código muerto: ~150 KB de ~430 KB de fuentes.** `Streaming/ChunkStreamingManager` (27 KB) y `CubeSphereVisualizerComponent` (16 KB) tienen 0 referencias externas; `PlateSimulationGPU` + `PlateMovementShader` + los 4 `.usf` (~50 KB) tienen todos los `Dispatch*` vacíos; `Nanite/`+`LOD/`+`QuadTree/` (~80 KB) solo los usa un actor cuyo Nanite está comentado.

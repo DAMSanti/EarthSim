@@ -234,6 +234,7 @@ struct CUBESPHERE_API FPlateMovementParams
      */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "1.0", ClampMax = "8.0"))
     float AdvectionPixelStride = 1.0f;
+
 };
 
 /**
@@ -658,34 +659,112 @@ protected:
     float SeaLevel = 0.0f;
 
     // ================================================================
-    // ESTADO DE REFERENCIA (16-08-2026)
+    // LA PROPIEDAD Y EL MATERIAL VAN POR SEPARADO (16-08-2026)
     //
-    // El artefacto que el usuario reportaba - "puentes" rectos entre continentes y una
-    // peninsula que no derivaba - venia de ENCADENAR remuestreos: cada adveccion volvia a
-    // muestrear el resultado ya remuestreado de la anterior, asi que el error no se
-    // corregia, se acumulaba. Una frontera oblicua entre corteza oceanica y continental se
-    // deshilachaba en la direccion del movimiento, una celda por adveccion.
+    // QUE HABIA ANTES. Un unico REFERENTE compartido (`ReferenceData`) del que se leian dos
+    // cosas a la vez: de quien es cada celda, y que material hay en ella. Las dos preguntas,
+    // a la misma estructura, con la misma antiguedad.
     //
-    // Medido variando cuantas advecciones caben en los mismos 120 Ma:
-    //     advecciones  48  24   6   2   1
-    //     cinta        14   8   3   4   2
-    // La cinta sigue al NUMERO DE ADVECCIONES, no al tiempo. Con un solo remuestreo mide 2
-    // celdas; con 48 encadenados, 14.
+    // POR QUE ESTABA MAL. Tienen requisitos OPUESTOS:
     //
-    // Por eso el campo de ID de placa se veia limpio en las capturas: dentro de una placa
-    // es un color plano, y sobre un color plano el deshilachado no se ve. Los campos de
-    // material si tienen contraste, y ahi salta a la vista.
+    //   - La PROPIEDAD es una particion. Tiene que seguir siendo una particion en todo
+    //     momento, y para eso hay que RE-DEDUCIRLA DEL MUNDO ACTUAL en cada adveccion.
+    //     Deducida de una foto vieja se despega de la realidad y degenera en ruido: el campo
+    //     de ID arrancaba con 8 regiones limpias y a los ~200 Ma era una mezcla a escala de
+    //     pixel. Las placas dejaban de existir como objetos.
     //
-    // La solucion es no encadenar: se guarda el estado en un REFERENTE y cada adveccion
-    // muestrea desde el con la rotacion ACUMULADA. Un solo remuestreo, por muchas
-    // advecciones que pasen. Lo que la fisica cambia sobre el mundo se devuelve al
-    // referente al final del paso, a traves del mismo mapa.
+    //   - El MATERIAL es una sustancia transportada. Remuestrearlo una y otra vez lo
+    //     deshilacha. Medido variando cuantas advecciones caben en los mismos 120 Ma:
+    //         advecciones  48  24   6   2   1
+    //         cinta        14   8   3   4   2
+    //     La cinta sigue al NUMERO DE ADVECCIONES, no al tiempo. Hay que leerlo UNA SOLA VEZ
+    //     desde un marco propio con la rotacion ACUMULADA.
+    //
+    // Uno exige encadenar. El otro exige no encadenar nunca. Estando soldados, arreglar uno
+    // rompia el otro, y por eso todo intento anterior fue un balancin (ver ROADMAP.md A10):
+    //
+    //                        propiedad                 material
+    //     con referente      se pudre -> ruido         limpio
+    //     re-anclando        perfecta (1,26% solape)   vuelve la cinta
+    //
+    // COMO QUEDA AHORA.
+    //
+    //   - La propiedad se decide contra `FaceData`, el mundo de AHORA, con la rotacion
+    //     INCREMENTAL de esta adveccion. El mundo siempre es una particion por construccion
+    //     - una celda, un dueno - asi que preguntarle a el no puede degenerar.
+    //
+    //   - El material vive en `PlateMaterial[P]`, un raster en el marco propio de la placa P,
+    //     y se lee con `PlateAccumRotation[P]`. Un solo remuestreo por muchas advecciones que
+    //     pasen.
+    //
+    // Y esto desbloquea algo que antes era imposible: el write-back puede escribir territorio
+    // que la placa ACABA de ganar. Antes no podia, porque el ID del referente compartido era
+    // quien decidia la propiedad y meter territorio ajeno hacia que una placa se comiera a las
+    // demas. Ahora la propiedad no sale de aqui, asi que el marco de material puede crecer y
+    // encogerse libremente: es lo que permite que una placa gane suelo en un rift y lo pierda
+    // en una subduccion.
     // ================================================================
-    TArray<FTectonicFaceTextureData> ReferenceData;
+
+    /**
+     * Material que transporta una placa, en el marco propio de esa placa.
+     *
+     * Indice: `FaceIdx * Res*Res + Y*Res + X`, o sea las 6 caras concatenadas.
+     *
+     * `Occupied` dice si esa celda del marco tiene material valido. No es la huella
+     * territorial de la placa - eso lo dice el mundo - sino "aqui hay material guardado".
+     */
+    struct FPlateMaterialFrame
+    {
+        TArray<uint8> Occupied;
+        TArray<float> CrustAge;
+        TArray<uint8> CrustType;
+        TArray<float> CrustThickness;
+        TArray<float> Elevation;
+
+        void SetNum(int32 NumCells)
+        {
+            Occupied.SetNumZeroed(NumCells);
+            CrustAge.SetNumZeroed(NumCells);
+            CrustType.SetNumZeroed(NumCells);
+            CrustThickness.SetNumZeroed(NumCells);
+            Elevation.SetNumZeroed(NumCells);
+        }
+    };
+
+    /** Un marco de material por placa. */
+    TArray<FPlateMaterialFrame> PlateMaterial;
+
+    /** Rotacion acumulada de cada placa desde el inicio. Solo la usa el material. */
     TArray<FQuat> PlateAccumRotation;
 
-    /** Devuelve al referente lo que la fisica ha cambiado sobre el mundo. */
-    void WriteBackToReference();
+    /** Celdas por marco de placa: 6 caras x Res x Res. */
+    int32 GetFrameCellCount() const { return 6 * Resolution * Resolution; }
+
+    /** Indice dentro de un marco de placa. */
+    int32 GetFrameIndex(int32 FaceIdx, int32 X, int32 Y) const
+    {
+        return FaceIdx * Resolution * Resolution + Y * Resolution + X;
+    }
+
+    /** Llena los marcos de material desde el mundo actual, con rotaciones a identidad. */
+    void InitializePlateMaterialFrames();
+
+    /**
+     * Devuelve a los marcos de placa lo que la fisica ha cambiado sobre el mundo.
+     *
+     * Se recorre CADA MARCO y se tira del mundo, no al reves: asi cada celda del marco se
+     * escribe exactamente una vez y no quedan huecos. Empujando desde el mundo unas celdas
+     * recibian dos escrituras y otras ninguna, y esas se quedaban con material rancio.
+     */
+    void WriteBackToPlateFrames();
+
+    /**
+     * Lee el material que la placa `PlateIdx` guarda en la direccion mundial `WorldDir`.
+     * Devuelve false si el marco no tiene material ahi, y entonces el llamante usa su
+     * respaldo (el valor que el mundo ya tenia en esa celda).
+     */
+    bool ReadPlateMaterial(int32 PlateIdx, const FVector& WorldDir,
+                           float& OutAge, uint8& OutType, float& OutThickness, float& OutElevation) const;
 
     /**
      * Volumen de ocÃ©ano a conservar (mÂ·celda, unidades arbitrarias pero consistentes).
