@@ -125,6 +125,18 @@ La corteza continental solo podía perderse; nada la reponía. En la Tierra crec
 
 **Límite conocido del test de convergencia**, comprobado saboteándolo: con la tasa ×10 el test sigue pasando. El punto de equilibrio lo fija la geometría de los márgenes de subducción, no el ritmo. Esa aserción **no valida la calibración**; eso lo cubre la fracción de tierra emergida de `LongRunStability`.
 
+### Acreción de arco: restricción por placa (16-08-2026)
+
+Al construir la clasificación de frontera por normal de Sobel (R2.13, commit `705459d`) se midió que `ContinentsPersist` pasaba de estar cerca de converger a saltar directamente la red de seguridad: **74,3 % de cobertura continental** en el fixture de prueba.
+
+**Causa.** `bTouchesContinent` comprobaba solo `CrustTypeData == 1` del vecino, sin mirar de qué placa era. Una celda oceánica que acreccionaba pasaba a tipo continental, y al paso siguiente su propio vecino oceánico —de la **misma** placa subducente— ya "tocaba continente" sin haber llegado nunca al margen con la placa cabalgante. Es un frente que se propaga solo, célula a célula, dentro de la propia placa.
+
+**Arreglo:** exigir `PlateIDData` distinto además de tipo continental. Ancla la acreción al contacto real con la placa cabalgante.
+
+**Medido:** 74,3 % → **68,3 %**. Mejora real (6 puntos), pero `ContinentsPersist` se queda en rojo — sigue saltando la red de seguridad del 50 %.
+
+**Por qué no basta, y qué hace falta de verdad.** Una vez una celda supera `ArcMaturityThickness` queda continental para siempre — nada la recicla. Cualquier margen convergente que se mantenga activo el tiempo suficiente acaba convirtiéndose entero, célula a célula, sin que el ritmo lo evite (ya medido arriba: ×10 sigue pasando el test). En la Tierra esto no ocurre porque los márgenes se reorganizan —cambios de polaridad, colisión, nuevos rifts— a escala de cientos de Ma. Aquí no hay ciclo de vida de placas todavía (`ROADMAP.md` F1E, posterior a F1D): una placa oceánica no puede **morir** cuando la subducción la consume entera, así que el margen que alimenta la acreción no se cierra nunca. Hipótesis con respaldo, no confirmada: la resolución de fondo depende de F1E, no de afinar más la clasificación de frontera.
+
 ---
 
 ## A6. Defectos con historia

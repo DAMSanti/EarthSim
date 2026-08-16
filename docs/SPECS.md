@@ -142,10 +142,24 @@ Es el cambio estructural de F1, y lo que hace que el campo de ID de placa siga s
 - **Subducción por densidad:** oceánica bajo continental; entre oceánicas, subduce la más vieja.
 - **Orogenia:** en colisión continental el material se **apila** (grosor), calibrada contra el Himalaya. `OrogenyFactor` = 0,08 adimensional.
 - **Rift por divergencia real:** se proyecta `ω × r` de las placas vecinas sobre la dirección de alejamiento. Umbral `0,10 × MaxAngularSpeed`. ⚠️ **Esta calibración se hizo con la balanza de corteza rota y hay que rehacerla.**
-- **Acreción de arco:** corteza oceánica convergente que supera `ArcMaturityThickness` (~20 km) pasa a continental. Restringida a celdas que tocan continente.
+- **Acreción de arco:** corteza oceánica convergente que supera `ArcMaturityThickness` (~20 km) pasa a continental. Restringida a celdas que tocan continente **de otra placa** (`PlateIDData` distinto, no solo `CrustTypeData`). ⚠️ **Corregido el 16-08-2026, sin resolver del todo:** la restricción original solo comprobaba el tipo, así que una celda oceánica podía acreccionar por tocar continente de su **propia** placa (ya convertido un paso antes) y el frente se propagaba solo. Exigir placa distinta ancla la acreción al margen real con la placa cabalgante y redujo la cobertura continental del fixture de `ContinentsPersist` de 74,3 % a 68,3 % — mejora real, pero el test sigue en rojo. Ver [`ANEXO.md`](ANEXO.md#acreción-de-arco-restricción-por-placa-16-08-2026).
 - **Difusión / erosión termal:** `DiffusionRate` = 0,02 por Ma, sobre el **grosor**, no sobre la elevación.
 
-### 3.6 Lo que no existe
+### 3.6 `UPlateKinematics`: la fórmula se usa, la clase no (auditado 16-08-2026)
+
+`Tectonics/PlateKinematics.cpp/.h` (441/252 líneas) es una clase completa: rotación, campo de velocidades, detección de colisiones, clasificación de frontera por ángulo. `ROADMAP.md` F1A la listaba como «cableada al bucle real» — es inexacto.
+
+**Verificado por código, no por documentación:**
+
+- `ATectonicsTestActor::Kinematics` (el puntero a la instancia) se inicializa a `nullptr` (`TectonicsTestActor.cpp:284`) y **no hay un solo `NewObject<UPlateKinematics>()` en todo el proyecto.** Nunca se instancia.
+- Ninguno de sus métodos de instancia (`Initialize`, `ApplyPlateRotation`, `SimulationStep`, `DetectAllCollisions`, `CalculateVelocityAtPoint`, `IsBoundaryCell`, `GetVelocityField`, `CalculateBoundaryNormal`) se llama nunca en producción. Código muerto, ~400 de las 441 líneas.
+- Lo único que sobrevive es la función **estática** `UPlateKinematics::CalculatePlateRotation` (la fórmula del cuaternión sobre el polo de Euler), reutilizada directamente por `TectonicPlateSystem::Step()` (`:397`) y `RasterizedTectonics::AdvectPlateField` (`:671`) — ambos reimplementan en línea lo que `ApplyPlateRotation` ya hacía, en vez de llamar a la clase.
+
+**La física en sí es correcta** — verificado: fórmula de cuaternión estándar, composición de rotación acumulada en el orden correcto (`PlateAccumRotation[P] = StepRotation * PlateAccumRotation[P]`), umbral de advección atado a la resolución real (`GetPixelAngularSize() = (π/2)/Resolution`, no una constante), paso fijo por acumulador genuinamente desacoplado del framerate (`TectonicsTestActor.cpp:99-117`). El problema es de arquitectura muerta, no de física rota.
+
+**Pendiente:** decidir si `UPlateKinematics` se borra (nadie más que la función estática y los tests la usan) o se termina de cablear de verdad. No hacer ninguna de las dos cosas es dejar 400 líneas que parecen ser el sistema de cinemática sin serlo.
+
+### 3.7 Lo que no existe
 
 - **Frontera como objeto** con normal y velocidad relativa proyectada.
 - **Ciclo de vida:** `GeneratePlates()` crea las placas una vez; no hay ningún `Add` ni `RemoveAt` posterior. Una placa no puede morir subducida ni nacer de un rift, **por construcción**.
@@ -370,7 +384,7 @@ Ordenada por impacto.
 | `Tectonics/BoundaryInteractions.cpp` / `.h` | 693 / 460 | ⏸️ Desactivado |
 | `LOD/CubeLODController.cpp` / `.h` | 518 / 251 | ⏸️ Dormido |
 | `Tectonics/TectonicPlateSystem.cpp` / `.h` | 534 / 223 | ✅ Contenedor de placas |
-| `Tectonics/PlateKinematics.cpp` / `.h` | 441 / 252 | ✅ Rotación por cuaterniones |
+| `Tectonics/PlateKinematics.cpp` / `.h` | 441 / 252 | ⚠️ Solo la función estática `CalculatePlateRotation` está en uso; el resto de la clase es código muerto (§3.6) |
 | `CubeSphereGrid.cpp` / `.h` | 421 / 302 | ✅ |
 | `SimpleFlowSimulation.cpp` / `.h` | 400 / 193 | ⚠️ Validador de masa |
 | `Visualization/PlanetFieldRegistry.cpp` / `.h` | 368 / 95 | ✅ |
