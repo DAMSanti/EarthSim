@@ -2662,6 +2662,37 @@ bool URasterizedTectonics::GetNeighborPixel(ECSCubeFace Face, int32 X, int32 Y, 
         return false;
     }
 
+    // ============================================================
+    // ARREGLO (17-08-2026): ESQUINA DE VERDAD, DOS EJES A LA VEZ.
+    //
+    // Si el paso se sale por los dos ejes a la vez, cae en una ESQUINA del cubo, donde se
+    // tocan TRES caras, no dos. Reproyectar en un solo tiro (extrapolando U,V mas alla de
+    // +-1 sobre el plano de la cara ORIGINAL, mas abajo) distorsiona: la proyeccion
+    // gnomonica no es lineal, y el punto extrapolado no corresponde a "un pixel mas" en la
+    // cara vecina correcta -puede resolver, de forma CONSISTENTE, hacia una cara
+    // equivocada para todo un grupo de celdas cercanas a esa esquina. Medido: un bloque
+    // rectangular fijo, identico en todos los campos de diagnostico, pegado a una esquina.
+    //
+    // Arreglo: descomponer la diagonal en dos pasos de UN eje cada uno, cada uno usando el
+    // cruce de arista normal (Y invariable en el primero, X invariable en el segundo), que
+    // ya esta bien probado (Simu.CubeSphere.AdjacencyContinuity, SeamContinuity). El
+    // primer paso cruza a la cara vecina en X; el segundo, desde ahi, cruza en Y -si esa
+    // cara tambien tiene el borde justo ahi, resuelve sola la tercera cara de la esquina,
+    // sin extrapolar nada fuera de su rango natural. Recursion acotada a un nivel: el
+    // segundo paso siempre tiene un eje sin variar, asi que nunca puede volver a caer en
+    // esta misma rama.
+    // ============================================================
+    if ((NewX < 0 || NewX >= Resolution) && (NewY < 0 || NewY >= Resolution))
+    {
+        ECSCubeFace MidFace;
+        int32 MidX, MidY;
+        if (!GetNeighborPixel(Face, X, Y, DX, 0, MidFace, MidX, MidY))
+        {
+            return false;
+        }
+        return GetNeighborPixel(MidFace, MidX, MidY, 0, DY, OutFace, OutX, OutY);
+    }
+
     // Se sale del cuadrado UV a proposito y se reproyecta: la cara vecina y la rotacion
     // relativa entre ambas salen solas. Ver CubeFaceMapping.h.
     const float U = (static_cast<float>(NewX) + 0.5f) / static_cast<float>(Resolution) * 2.0f - 1.0f;
