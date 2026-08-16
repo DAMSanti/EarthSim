@@ -2055,6 +2055,247 @@ bool FSeamArtifactTest::RunTest(const FString& Parameters)
 // Prediccion falsable: las celdas que se resuelven por recuperacion en TODAS las
 // advecciones estaran mucho mas cerca del polo de Euler de su placa que una celda tipica.
 // ------------------------------------------------------------
+// ------------------------------------------------------------
+// LOS "PUENTES" RECTOS: ¿TECTONICA O REJILLA? (16-08-2026)
+//
+// El usuario paso capturas de los campos a la vez, y desmontan la hipotesis anterior: en
+// la vista de ID DE PLACA el hemisferio visible es casi una sola placa, pero en elevacion,
+// tipo de corteza y grosor hay lineas rectas larguisimas DENTRO de ella. Los puentes no
+// estan en fronteras de placa.
+//
+// Dos detalles apuntan a la rejilla y no a la fisica:
+//   - en tipo de corteza el puente es una franja OCEANICA recta atravesando corteza
+//     continental, y un rift perfectamente recto en mitad de una placa no existe;
+//   - en grosor aparecen bandas horizontales paralelas, y la tectonica no es periodica.
+//
+// Ambas son la firma de coordenadas de cara: rectas en el espacio UV. Este test lo decide
+// midiendo, no mirando. Busca anomalias de UNA celda de ancho en el tipo de corteza (una
+// celda oceanica cuyas dos vecinas en un eje son continentales) y pregunta:
+//
+//   1. ¿Se alinean con X o Y constante? Una linea recta en UV es un artefacto de rejilla;
+//      una frontera real serpentea.
+//   2. ¿Estan pegadas a las aristas del cubo?
+//
+// Si la respuesta a las dos es que no, el origen es otro y hay que seguir buscando.
+// ------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FNoStraightCrustBridgesTest,
+    "Simu.Tectonics.NoStraightCrustBridges",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FNoStraightCrustBridgesTest::RunTest(const FString& Parameters)
+{
+    const int32 Res = 128;
+
+    UCubeSphereGrid* Grid = nullptr;
+    UTectonicPlateSystem* System = nullptr;
+    URasterizedTectonics* Raster = nullptr;
+    if (!TestTrue(TEXT("Fixture montado"), BuildF1Fixture(Res, Res, 8, 31337, Grid, System, Raster)))
+    {
+        return false;
+    }
+
+    FPlateMovementParams Params;
+    Params.DeltaTime = 0.1f;
+
+    // PRUEBA DECISIVA: la franja mide 38 celdas tras 44 advecciones, casi uno a uno. Si
+    // crece una celda por adveccion (o sea, si el frente deja estela en vez de moverse),
+    // al doblar el tiempo tiene que medir el doble. Si se queda igual, es una estructura
+    // estable y la explicacion es otra.
+    const int32 StepsA = 1100;   // ~110 Ma, como las capturas del usuario
+    const int32 StepsB = 2200;
+
+    auto LongestRun = [&]()
+    {
+        int32 Best = 0;
+        for (int32 F = 0; F < 6; ++F)
+        {
+            const ECSCubeFace Fc = static_cast<ECSCubeFace>(F);
+            for (int32 Y = 1; Y < Res - 1; ++Y)
+            {
+                int32 Run = 0;
+                for (int32 X = 1; X < Res - 1; ++X)
+                {
+                    const int32 T = Raster->GetCrustTypeAt(Fc, X, Y);
+                    const bool bAnom = (Raster->GetCrustTypeAt(Fc, X, Y - 1) != T)
+                                    && (Raster->GetCrustTypeAt(Fc, X, Y + 1) != T);
+                    Run = bAnom ? (Run + 1) : 0;
+                    Best = FMath::Max(Best, Run);
+                }
+            }
+        }
+        return Best;
+    };
+
+    // ¿Existe la cinta ANTES de simular? Si el reparto inicial de placas ya deja tiras de
+    // una celda, el origen esta en la inicializacion y no en la adveccion, y todo lo
+    // anterior estaba mirando al sitio equivocado.
+    const int32 RunAtZero = LongestRun();
+    UE_LOG(LogTemp, Log, TEXT("EN T=0, ANTES DE SIMULAR: franja mas larga %d celdas"), RunAtZero);
+
+    // Muestreo en el tiempo para localizar CUANDO se forma: un salto de golpe apunta a un
+    // suceso concreto, un crecimiento gradual a una acumulacion.
+    for (int32 i = 0; i < StepsA; ++i)
+    {
+        System->Step(Params.DeltaTime);
+        Raster->Step(Params);
+        if ((i + 1) % 50 == 0)
+        {
+            UE_LOG(LogTemp, Log, TEXT("  t=%.1f Ma (%d advecciones): franja mas larga %d celdas"),
+                (i + 1) * Params.DeltaTime, Raster->GetAdvectionStats().AdvectionCount, LongestRun());
+        }
+    }
+    const int32 RunA = LongestRun();
+    const int32 AdvA = Raster->GetAdvectionStats().AdvectionCount;
+
+    for (int32 i = 0; i < StepsB - StepsA; ++i)
+    {
+        System->Step(Params.DeltaTime);
+        Raster->Step(Params);
+    }
+    const int32 RunB = LongestRun();
+    const int32 AdvB = Raster->GetAdvectionStats().AdvectionCount;
+
+    UE_LOG(LogTemp, Log,
+        TEXT("CRECIMIENTO: franja mas larga %d celdas tras %d advecciones -> %d celdas tras %d advecciones"),
+        RunA, AdvA, RunB, AdvB);
+    AddInfo(FString::Printf(TEXT("franja %d->%d celdas, advecciones %d->%d"), RunA, RunB, AdvA, AdvB));
+
+    // Anomalia de una celda: su tipo difiere del de sus DOS vecinas en un eje. Se anota si
+    // ocurre en horizontal (linea vertical) o en vertical (linea horizontal).
+    int32 Anomalies = 0, SamePlate = 0, NearEdge = 0, OceanicAnomalies = 0;
+    double AnomalyAgeSum = 0.0;
+    TArray<FIntVector> WorstRowSamples;
+    TMap<int32, int32> PerRow, PerCol;
+
+    for (int32 F = 0; F < 6; ++F)
+    {
+        const ECSCubeFace Face = static_cast<ECSCubeFace>(F);
+        for (int32 Y = 1; Y < Res - 1; ++Y)
+        {
+            for (int32 X = 1; X < Res - 1; ++X)
+            {
+                const int32 T = Raster->GetCrustTypeAt(Face, X, Y);
+                const bool bHoriz = (Raster->GetCrustTypeAt(Face, X - 1, Y) != T)
+                                 && (Raster->GetCrustTypeAt(Face, X + 1, Y) != T);
+                const bool bVert  = (Raster->GetCrustTypeAt(Face, X, Y - 1) != T)
+                                 && (Raster->GetCrustTypeAt(Face, X, Y + 1) != T);
+                if (!bHoriz && !bVert) { continue; }
+
+                ++Anomalies;
+
+                // ¿La anomalia y sus vecinas son de la MISMA placa? Si lo son, la linea no
+                // puede explicarse por una frontera tectonica.
+                const int32 P = Raster->GetPlateIDAt(Face, X, Y);
+                if (Raster->GetPlateIDAt(Face, X - 1, Y) == P && Raster->GetPlateIDAt(Face, X + 1, Y) == P
+                 && Raster->GetPlateIDAt(Face, X, Y - 1) == P && Raster->GetPlateIDAt(Face, X, Y + 1) == P)
+                {
+                    ++SamePlate;
+                }
+
+                if (FMath::Min(FMath::Min(X, Res - 1 - X), FMath::Min(Y, Res - 1 - Y)) <= 2)
+                {
+                    ++NearEdge;
+                }
+
+                if (bVert)  { PerRow.FindOrAdd(F * Res + Y)++; }
+                if (bHoriz) { PerCol.FindOrAdd(F * Res + X)++; }
+
+                // La edad separa las dos causas posibles sin ambiguedad: corteza RECIEN
+                // CREADA significa que el fallo esta al generar rift; corteza VIEJA
+                // significa que esta al advectar y la franja es un resto olvidado.
+                AnomalyAgeSum += Raster->GetCrustAgeAt(Face, X, Y);
+                if (T == 0) { ++OceanicAnomalies; }
+                WorstRowSamples.Add(FIntVector(F, X, Y));
+            }
+        }
+    }
+
+    // Concentracion: si las anomalias caen en unas pocas filas o columnas concretas, son
+    // rectas en el espacio de la cara. Si se reparten, no lo son.
+    int32 MaxRow = 0, MaxCol = 0;
+    for (const TPair<int32, int32>& It : PerRow) { MaxRow = FMath::Max(MaxRow, It.Value); }
+    for (const TPair<int32, int32>& It : PerCol) { MaxCol = FMath::Max(MaxCol, It.Value); }
+
+    const float SamePlateFrac = (Anomalies > 0) ? static_cast<float>(SamePlate) / Anomalies : 0.0f;
+    const float NearEdgeFrac  = (Anomalies > 0) ? static_cast<float>(NearEdge) / Anomalies : 0.0f;
+
+    // Edad media del planeta, para comparar.
+    double AllAgeSum = 0.0; int32 AllAgeCount = 0;
+    for (int32 F = 0; F < 6; ++F)
+    {
+        const ECSCubeFace Face = static_cast<ECSCubeFace>(F);
+        for (int32 Y = 0; Y < Res; ++Y)
+        {
+            for (int32 X = 0; X < Res; ++X)
+            {
+                AllAgeSum += Raster->GetCrustAgeAt(Face, X, Y);
+                ++AllAgeCount;
+            }
+        }
+    }
+
+    // La fila con mas anomalias, para ver su geometria de cerca.
+    int32 WorstKey = -1, WorstVal = 0;
+    for (const TPair<int32, int32>& It : PerRow)
+    {
+        if (It.Value > WorstVal) { WorstVal = It.Value; WorstKey = It.Key; }
+    }
+    if (WorstKey >= 0)
+    {
+        const int32 WF = WorstKey / Res;
+        const int32 WY = WorstKey % Res;
+        // Perfil de la fila peor: si estas celdas son las mismas que el contador marca
+        // como atascadas, el puente y las celdas que nunca advectan son EL MISMO fallo.
+        const int32 Adv = Raster->GetAdvectionStats().AdvectionCount;
+        const ECSCubeFace WFace = static_cast<ECSCubeFace>(WF);
+        int32 StuckInRow = 0, MinX = Res, MaxX = -1;
+        for (const FIntVector& V : WorstRowSamples)
+        {
+            if (V.X != WF || V.Z != WY) { continue; }
+            MinX = FMath::Min(MinX, V.Y); MaxX = FMath::Max(MaxX, V.Y);
+            if (Raster->GetRecoveryCountAt(WFace, V.Y, WY) >= Adv / 2) { ++StuckInRow; }
+        }
+
+        // Comparacion contra la fila de al lado: si la anomalia es de la fila y no del
+        // vecindario, Y+1 tiene que estar limpia.
+        int32 NeighbourRowStuck = 0;
+        for (int32 X = MinX; X <= MaxX; ++X)
+        {
+            if (Raster->GetRecoveryCountAt(WFace, X, WY + 1) >= Adv / 2) { ++NeighbourRowStuck; }
+        }
+
+        UE_LOG(LogTemp, Log,
+            TEXT("  fila peor: cara %d, Y=%d, X de %d a %d (%d celdas contiguas) | %d de ellas atascadas | fila Y+1: %d atascadas | %d advecciones"),
+            WF, WY, MinX, MaxX, WorstVal, StuckInRow, NeighbourRowStuck, Adv);
+
+        for (int32 X = MinX; X <= FMath::Min(MinX + 5, MaxX); ++X)
+        {
+            UE_LOG(LogTemp, Log,
+                TEXT("    (%d,%d) placa %d tipo %d edad %.0f Ma grosor %.0f m | recuperada %d de %d veces"),
+                X, WY, Raster->GetPlateIDAt(WFace, X, WY), Raster->GetCrustTypeAt(WFace, X, WY),
+                Raster->GetCrustAgeAt(WFace, X, WY), Raster->GetCrustThicknessAt(WFace, X, WY),
+                Raster->GetRecoveryCountAt(WFace, X, WY), Adv);
+        }
+    }
+
+    const float MeanAnomalyAge = (Anomalies > 0) ? static_cast<float>(AnomalyAgeSum / Anomalies) : 0.0f;
+    const float MeanAllAge = (AllAgeCount > 0) ? static_cast<float>(AllAgeSum / AllAgeCount) : 0.0f;
+    UE_LOG(LogTemp, Log, TEXT("  edad: anomalias %.1f Ma vs planeta %.1f Ma | oceanicas %d de %d"),
+        MeanAnomalyAge, MeanAllAge, OceanicAnomalies, Anomalies);
+
+    UE_LOG(LogTemp, Log,
+        TEXT("Puentes: %d anomalias de 1 celda | %.1f%% dentro de UNA placa | %.1f%% junto a arista | fila peor %d, columna peor %d (de %d filas/%d columnas con algo)"),
+        Anomalies, SamePlateFrac * 100.0f, NearEdgeFrac * 100.0f, MaxRow, MaxCol, PerRow.Num(), PerCol.Num());
+    AddInfo(FString::Printf(TEXT("%d anomalias, %.1f%% intraplaca, fila peor %d"),
+        Anomalies, SamePlateFrac * 100.0f, MaxRow));
+
+    // Una linea recta de corteza atravesando el interior de una placa no es tectonica.
+    TestTrue(FString::Printf(TEXT("No hay franjas rectas de corteza dentro de una placa (%d de %d)"),
+        SamePlate, Anomalies), SamePlate == 0);
+
+    return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FStuckCellsNearEulerPoleTest,
     "Simu.Tectonics.StuckCellsNearEulerPole",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
