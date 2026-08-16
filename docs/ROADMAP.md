@@ -73,11 +73,12 @@ Las fases son secuenciales por **dependencia técnica**, no por calendario.
 ## F1 — Las placas como objetos 🟡
 
 ### 1A. Cinemática ✅
-- [x] Rotación por cuaternión sobre el polo de Euler, cableada al bucle real; los centroides rotan — **no a través de la clase `UPlateKinematics`** (auditado 16-08-2026): `ATectonicsTestActor::Kinematics` se inicializa a `nullptr` y nunca se instancia; ninguno de sus métodos de instancia se llama en producción. Lo único que se usa es la función **estática** `UPlateKinematics::CalculatePlateRotation`, reimplementada en línea por `TectonicPlateSystem::Step()` (`:397`) y `RasterizedTectonics::AdvectPlateField` (`:671`). La fórmula es correcta; la clase entera (441 líneas: campo de velocidades, detección de colisiones, clasificación de frontera por ángulo) es código muerto salvo esa función suelta. Ver `SPECS.md §3.6`.
+- [x] Rotación por cuaternión sobre el polo de Euler, cableada al bucle real; los centroides rotan (auditado 16-08-2026 — ver [`ANEXO.md`](ANEXO.md#f1a-auditoría-la-rotación-está-bien-la-clase-no) para el matiz de `UPlateKinematics`)
 - [x] Advección semi-lagrangiana hacia atrás sobre el ráster
 - [x] Advección por **umbral de ~1 píxel**, no cada paso
 - [x] Sub-pasos de máx. 0,5 Ma para que `TimeScale` alto no meta 16 Ma de golpe
 - [x] Paso fijo desacoplado del framerate
+- [ ] Decidir destino de `UPlateKinematics`: borrarla o cablearla de verdad (441 líneas, código muerto salvo una función estática — ver ANEXO)
 
 ### 1B. Propiedad y material separados ✅
 - [x] Diagnosticar la raíz: propiedad y material compartían `ReferenceData` con requisitos opuestos
@@ -95,18 +96,18 @@ Las fases son secuenciales por **dependencia técnica**, no por calendario.
 - [x] Entre oceánicas subduce la **más vieja**
 - [x] Orogenia calibrada contra el Himalaya
 - [x] Rift detectado por **divergencia real**, no por contar huecos
-- [x] Acreción de arco, restringida a celdas que tocan continente **de otra placa** (corregido 16-08-2026 — antes bastaba el tipo, y el frente se propagaba dentro de la propia placa subducente; ver `SPECS.md §3.5`). Ayuda pero no cierra `ContinentsPersist`
+- [x] Acreción de arco, restringida a celdas que tocan continente **de otra placa** (corregido 16-08-2026, ver [`ANEXO.md`](ANEXO.md#acreción-de-arco-restricción-por-placa-16-08-2026))
 - [x] Advección conjunta de edad, tipo y grosor junto al ID
 - [x] Placas de forma fractal, no arcos limpios
 - [x] Limpieza de motas de un píxel
 
 ### 1D. La frontera como objeto ⬅ **siguiente**
-- [ ] Extraer los segmentos de frontera del mapa de IDs (recorrido de contorno)
-- [ ] Calcular la **normal** de cada segmento
-- [ ] Clasificar por velocidad relativa proyectada sobre la normal: convergente / divergente / transformante
-- [ ] Distinguir subducción de orogenia por tipo de corteza de los dos lados
-- [ ] Aplicar la física **solo en la banda de frontera**, no en el 28 % del planeta
-- [ ] Fallas transformantes: fricción y sismicidad, sin crear ni destruir corteza
+- [x] Extraer los segmentos de frontera del mapa de IDs (componentes conexas, con ID persistente entre advecciones — ver [`ANEXO.md`](ANEXO.md#r212-segmentos-de-frontera-con-id-persistente-16-08-2026))
+- [x] Calcular la **normal** de cada segmento
+- [x] Clasificar por velocidad relativa proyectada sobre la normal: convergente / divergente / transformante
+- [x] Distinguir subducción de orogenia por tipo de corteza de los dos lados (ya en la selección de ganador de colisión, verificado en la auditoría de F1C)
+- [x] Aplicar la física **solo en la banda de frontera**, no en el 28 % del planeta (resuelto como efecto lateral de F1B; confirmado hoy por el propio recuento de celdas de segmento, 1–3 % del planeta)
+- [ ] Fallas transformantes: fricción y sismicidad, sin crear ni destruir corteza (hoy solo se excluyen de crecer/decrecer corteza — no hay fricción ni sismicidad modeladas)
 - [ ] Registrar «tipo de frontera» como campo categórico en el visor
 - [ ] Recalibrar el umbral de rift ahora que la balanza de corteza es sana (el valor actual no es de fiar)
 

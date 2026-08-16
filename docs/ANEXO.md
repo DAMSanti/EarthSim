@@ -22,6 +22,7 @@
 - [A10. El defecto de raíz de F1: la propiedad y el material](#a10-el-defecto-de-raíz-de-f1-la-propiedad-y-el-material)
 - [A11. Defectos abiertos hoy](#a11-defectos-abiertos-hoy)
 - [A12. Riesgos vigentes](#a12-riesgos-vigentes)
+- [A13. F1D — la frontera como objeto (16-08-2026)](#a13-f1d--la-frontera-como-objeto-16-08-2026)
 
 ---
 
@@ -135,7 +136,7 @@ Al construir la clasificación de frontera por normal de Sobel (R2.13, commit `7
 
 **Medido:** 74,3 % → **68,3 %**. Mejora real (6 puntos), pero `ContinentsPersist` se queda en rojo — sigue saltando la red de seguridad del 50 %.
 
-**Por qué no basta, y qué hace falta de verdad.** Una vez una celda supera `ArcMaturityThickness` queda continental para siempre — nada la recicla. Cualquier margen convergente que se mantenga activo el tiempo suficiente acaba convirtiéndose entero, célula a célula, sin que el ritmo lo evite (ya medido arriba: ×10 sigue pasando el test). En la Tierra esto no ocurre porque los márgenes se reorganizan —cambios de polaridad, colisión, nuevos rifts— a escala de cientos de Ma. Aquí no hay ciclo de vida de placas todavía (`ROADMAP.md` F1E, posterior a F1D): una placa oceánica no puede **morir** cuando la subducción la consume entera, así que el margen que alimenta la acreción no se cierra nunca. Hipótesis con respaldo, no confirmada: la resolución de fondo depende de F1E, no de afinar más la clasificación de frontera.
+**Por qué no bastaba, hipótesis del momento:** se sospechó que hacía falta ciclo de vida de placas (F1E) — una placa oceánica que no puede morir nunca cierra el margen que alimenta la acreción. **Descartada por medición** ([A13](#a13-f1d--la-frontera-como-objeto-16-08-2026)): lo que de verdad hacía falta era promediar la clasificación por segmento de frontera en vez de por celda suelta (R2.12), no ciclo de vida. Con eso, `ContinentsPersist` pasa sin tocar F1E. Queda como aviso: que una hipótesis esté bien motivada físicamente no la libra de estar equivocada.
 
 ---
 
@@ -453,7 +454,7 @@ Descartado por riesgo: mantener esa topología automáticamente, con placas que 
 | **Respaldos de lectura de material** | 1,93 % de 4,8 M de lecturas, estable | 🟢 Vigilado. Residual pero no cero |
 | Sin ciclo de vida de placas | nacen 8, mueren 0, nacen 0 | 🔴 Defecto de **modelo**, no de implementación |
 | Sin dinámica (polos de Euler fijos) | nunca se escriben | 🔴 Defecto de **modelo** |
-| Frontera inferida por conteo, no como objeto | — | 🔴 Defecto de **modelo** |
+| Frontera inferida por conteo, no como objeto | — | 🟢 **Resuelto en parte (16-08-2026).** La clasificación física (convergente/divergente/transformante) ya lee de un segmento con ID persistente, no de la celda suelta. Lo que sigue infiriéndose por conteo/vecino-más-cercano es `PlateIDData` en sí -la propiedad-, que es F1B y no se ha tocado. Ver [A13](#a13-f1d--la-frontera-como-objeto-16-08-2026) |
 | `BoundaryInteractions` desactivado | 693 líneas sin consumidor | ⏸️ Aparcado con motivo ([A9](#a9-los-dos-puntos-aparcados-de-f1)) |
 | Copia de la tabla de bordes en el QuadTree | sin cobertura de test | ⏸️ Dormido hasta que se retome el QuadTree |
 
@@ -468,3 +469,56 @@ Descartado por riesgo: mantener esa topología automáticamente, con placas que 
 - **Nombres de test que no describen lo que miden.** Ha costado dos días una vez. Antes de creerse un test en rojo, leer su aserción.
 - **Estabilidad numérica de las SWE** y **VRAM a resolución alta** — heredados del plan original, todavía sin tocar.
 - **Renderizado de producto sin resolver.** El único camino verificado hoy es una malla procedimental sin LOD. El enfoque de F6 está diseñado pero no probado.
+
+---
+
+## A13. F1D — la frontera como objeto (16-08-2026)
+
+### F1A, auditoría: la rotación está bien, la clase no
+
+`ROADMAP.md` F1A decía *"`UPlateKinematics` cableada al bucle real"*. Verificado por código, no por lo escrito: es falso tal cual está redactado.
+
+`Tectonics/PlateKinematics.cpp/.h` (441/252 líneas) es una clase completa — rotación, campo de velocidades, detección de colisiones, clasificación de frontera por ángulo (`ClassifyBoundaryType`, con umbrales de coseno — un intento anterior de lo que hoy es R2.13, con otro enfoque geométrico). Pero:
+
+- `ATectonicsTestActor::Kinematics` se inicializa a `nullptr` (`TectonicsTestActor.cpp:284`) y **no hay un solo `NewObject<UPlateKinematics>()` en todo el proyecto.** Nunca se instancia.
+- Ninguno de sus métodos de instancia se llama en producción — ni `ApplyPlateRotation`, ni `SimulationStep`, ni `DetectAllCollisions`.
+- Lo único que sobrevive es la función **estática** `CalculatePlateRotation`, reutilizada directamente por `TectonicPlateSystem::Step()` (`:397`) y `RasterizedTectonics::AdvectPlateField` (`:671`) — ambos reimplementan en línea lo que `ApplyPlateRotation` ya hacía, en vez de llamar a la clase. El propio código lo admite: *"Hasta el 15-08-2026 esto solo envejecía las placas: `CalculatePlateRotation` existía, estaba testeada, y no la llamaba nadie fuera de los tests."*
+
+**La física en sí es correcta** — fórmula de cuaternión estándar, composición de rotación acumulada en el orden correcto, umbral de advección atado a la resolución real, paso fijo genuinamente desacoplado del framerate. El problema es arquitectura muerta, no física rota.
+
+**Por qué importa ahora:** `ClassifyBoundaryType` es, con otro método (ángulo contra normal geométrica de posiciones 3D reales, no gradiente de Sobel), la misma pregunta que resuelve R2.12 más abajo. No se reutilizó — toda su plomería (`BoundaryCells` cacheado una vez en `Initialize()` y nunca refrescado, `Plates` como copia propia desincronizada de `PlateSystem`) asume una frontera estática, que es justo lo contrario de cómo funciona el motor real. Pendiente: decidir si se borra o se cablea de verdad (`ROADMAP.md` F1A).
+
+### R2.12: segmentos de frontera con ID persistente (16-08-2026)
+
+**Tres intentos de clasificación por celda, documentados arriba y en el commit `705459d`**, todos con el mismo síntoma de fondo: el ruido de re-cuantización de una celda suelta podía decidir el régimen de todo un tramo de frontera.
+
+1. Radial con signo + tangencial en valor absoluto → sesgo sistemático hacia "transformante".
+2. Contacto dominante por magnitud, mismo eje de rejilla → mejor, seguía sesgado.
+3. Normal real por gradiente de Sobel → clasificación correcta por fin, pero **destapó** que la acreción de arco satura sin control cuando la convergencia se mide bien (ver arriba, "Acreción de arco: restricción por placa").
+
+**La pieza que faltaba no era una normal mejor — era dejar de decidir celda a celda.**
+
+**Diseño.** `ExtractAndTrackBoundarySegments()`, llamada una vez por advección (justo después de `AdvectPlateField`, la misma cadencia — `PlateIDData` solo cambia ahí):
+
+1. **Info por celda:** el mismo gradiente de Sobel de siempre, más un voto mayoritario a **4** vecinos (no 8) para fijar el par de placas — tiene que coincidir con la conectividad del flood-fill del paso 2. Radial y tangencial se guardan **con signo**, no en valor absoluto: es la corrección directa del primer intento fallido.
+2. **Componentes conexas** por flood-fill de 4 vecinos, cruzando caras del cubo (`GetNeighborPixel`), agrupando celdas de frontera contiguas con el mismo par de placas.
+3. **Identidad persistente por solape, no por posición ni índice** — ninguno de los dos es estable entre advecciones, porque el ráster se re-resuelve entero cada vez. Un componente nuevo hereda el `SegmentID` del segmento viejo con el que más celdas comparte, si el par de placas coincide; si no, nace un ID nuevo (contador monótono, nunca se reutiliza). `Age` se acumula mientras el ID persiste.
+4. La clasificación de `Step()` (orogenia / rift / acreción / transformante) deja de recalcular nada: **lee** `AverageConvergence`/`AverageTangential` del segmento vía un mapa `SegmentID → índice`, construido una vez por `Step()`.
+
+**Verificación por fases, sin mezclar geometría y física de golpe** (lección de los tres intentos anteriores): primero se construyó y verificó el objeto solo (contador de segmentos en el HUD, mismos resultados exactos en el subconjunto rápido — 45/45 idéntico), y solo con eso confirmado se cambió la clasificación para que leyera del segmento.
+
+**Resultado, medido:**
+
+| | Por celda (Sobel, `705459d`) | Por segmento |
+|---|---|---|
+| `ContinentsPersist` | 🔴 Rojo (68,3 %, salta la red de seguridad) | 🟢 **Verde** |
+| `OrogenyBuildsMountains` | 7507 m | 7353 m (sigue sano, techo en 4000 m) |
+| Señal 1 (colisiones) | 7795 | 7662 |
+| Señal 2 (convergentes) | 227.701 | 165.803 |
+| Señal 3 (transformantes) | 504.138 | 415.688 |
+
+Promediar sobre el segmento entero cancela el ruido de celda suelta en vez de acumularlo — es lo que arregla `ContinentsPersist` sin tocar ningún umbral a mano. Confirma además que la hipótesis anterior ("hace falta F1E, ciclo de vida de placas") estaba equivocada: no hacía falta que un margen pudiera cerrarse, hacía falta que se clasificara bien.
+
+**Lo que esto NO arregla, y hay que decirlo explícito.** El "peine" (escalonado de bordes, [más arriba](#escalonado-de-bordes-peine)) es un artefacto de **`PlateIDData`**, no de la física de frontera. Los segmentos se **construyen a partir de** `PlateIDData` ya resuelto por `AdvectPlateField` — lo leen, no lo cambian. La propiedad sigue decidiéndose exactamente igual que siempre (vecino más cercano sobre un campo categórico, re-cuantizado cada advección), así que el contorno visual de ID de placa sigue tan dentado como antes. Confirmado visualmente en el editor tras este commit: el peine seguía ahí. Lo que sí debería suavizarse es el crecimiento de relieve a lo largo de un margen (ya no lo decide una celda suelta mal clasificada), no la forma del propio contorno de placa.
+
+**Lo que esto tampoco es todavía:** segmentos persistentes con historia rica (fusión, ciclo de vida propio) — la identidad de hoy es puramente "qué componente solapa más con cuál del paso anterior", suficiente para `Age` pero no para todo lo que R2.16 va a necesitar de un segmento (por ejemplo, longitud real para el tirón de la losa, R2.17).
