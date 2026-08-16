@@ -783,22 +783,80 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
                 int32 LastSourceFace = 0;
                 int32 LastSourceIdx = 0;
 
+                // ============================================================
+                // R2.9 FASE 2 (16-08-2026): CONTEO CON LA MISMA TOLERANCIA QUE LA
+                // RECUPERACION, NO SOLO COMO SU RESCATE.
+                //
+                // El test estricto (celda redondeada por floor()) tiene un margen ciego de
+                // +-0,5 celda: una celda que es de verdad de la placa P puede caer, al
+                // redondear, fuera de su propia region. Hasta hoy eso se corregia SOLO
+                // cuando el conteo estricto ya habia dado 0 reclamantes (recuperacion por
+                // tolerancia, mas abajo) - un parche sobre el sintoma, no la causa. Es la
+                // semilla documentada del peine (ANEXO.md, escalonado de bordes) y de las
+                // celdas atascadas (NoPermanentlyStuckCells, StuckCellsNearEulerPole).
+                //
+                // Aqui se usa la MISMA busqueda -las cuatro celdas alrededor de la posicion
+                // continua exacta, el alcance justo del redondeo- como test PRINCIPAL para
+                // cada placa, no como rescate. No cambia la estructura de tres ramas (0/1/2+
+                // reclamantes) ni la fisica de ninguna: solo mide mejor si esta celda es de
+                // la placa P. Es deliberadamente MAS ESTRICTO que "cualquiera de las 4":
+                // gana la mas cercana a la posicion continua, igual que la recuperacion,
+                // para no repetir el error medido de la submuestreo por mayoria ("con
+                // mayoria de 4 submuestras dos placas pueden reclamar la misma celda a la
+                // vez, las colisiones se triplicaron").
+                // ============================================================
                 for (int32 P = 0; P < NumPlates; ++P)
                 {
                     const FVector PrevDir = InverseRotations[P].RotateVector(Dir);
                     ECSCubeFace PF; float PU, PV;
                     CubeFaceMapping::DirectionToFaceTexUV(PrevDir, PF, PU, PV);
-                    const int32 PX = FMath::Clamp(FMath::FloorToInt(PU * Resolution), 0, Resolution - 1);
-                    const int32 PY = FMath::Clamp(FMath::FloorToInt(PV * Resolution), 0, Resolution - 1);
-                    const int32 PFaceIdx = static_cast<int32>(PF);
-                    const int32 PIdx = PY * Resolution + PX;
 
-                    if (Prev[PFaceIdx].PlateIDData[PIdx] == static_cast<uint8>(P))
+                    const float CellX = PU * Resolution - 0.5f;
+                    const float CellY = PV * Resolution - 0.5f;
+                    const int32 NearX = FMath::Clamp(FMath::RoundToInt(CellX), 0, Resolution - 1);
+                    const int32 NearY = FMath::Clamp(FMath::RoundToInt(CellY), 0, Resolution - 1);
+                    const int32 DirX = (CellX >= static_cast<float>(NearX)) ? 1 : -1;
+                    const int32 DirY = (CellY >= static_cast<float>(NearY)) ? 1 : -1;
+                    const int32 CandidateOffsets[4][2] = { {0, 0}, {DirX, 0}, {0, DirY}, {DirX, DirY} };
+
+                    bool bPlateClaims = false;
+                    int32 BestFace = 0, BestIdx = 0;
+                    float BestDistSqLocal = TNumericLimits<float>::Max();
+
+                    for (int32 C = 0; C < 4; ++C)
+                    {
+                        ECSCubeFace CF; int32 CX, CY;
+                        if (!GetNeighborPixel(PF, NearX, NearY, CandidateOffsets[C][0], CandidateOffsets[C][1], CF, CX, CY))
+                        {
+                            continue;
+                        }
+                        const int32 CFaceIdx = static_cast<int32>(CF);
+                        const int32 CIdx = CY * Resolution + CX;
+
+                        if (Prev[CFaceIdx].PlateIDData[CIdx] != static_cast<uint8>(P))
+                        {
+                            continue;
+                        }
+
+                        const float DX = CellX - static_cast<float>(NearX + CandidateOffsets[C][0]);
+                        const float DY = CellY - static_cast<float>(NearY + CandidateOffsets[C][1]);
+                        const float DistSq = DX * DX + DY * DY;
+
+                        if (DistSq < BestDistSqLocal)
+                        {
+                            BestDistSqLocal = DistSq;
+                            BestFace = CFaceIdx;
+                            BestIdx = CIdx;
+                            bPlateClaims = true;
+                        }
+                    }
+
+                    if (bPlateClaims)
                     {
                         ++Count;
                         LastPlate = P;
-                        LastSourceFace = PFaceIdx;
-                        LastSourceIdx = PIdx;
+                        LastSourceFace = BestFace;
+                        LastSourceIdx = BestIdx;
                     }
                 }
 
@@ -1633,6 +1691,15 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
         ? (PI * 0.5f * RadiusMetres / static_cast<float>(Resolution))
         : 1.0f;
 
+    // R2.12 FASE 2: SegmentID -> indice en BoundarySegments. Se construye una vez por
+    // Step(), no por sub-paso: los segmentos no cambian hasta la proxima adveccion.
+    TMap<int32, int32> SegmentIdToIndex;
+    SegmentIdToIndex.Reserve(BoundarySegments.Num());
+    for (int32 i = 0; i < BoundarySegments.Num(); ++i)
+    {
+        SegmentIdToIndex.Add(BoundarySegments[i].SegmentID, i);
+    }
+
     for (int32 SubStep = 0; SubStep < NumSubSteps; ++SubStep)
     {
         // Procesar cada cara. ParallelFor por cara: cada hilo solo escribe en la suya,
@@ -1667,114 +1734,44 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
                     int32 Offsets[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
 
                     // ============================================================
-                    // R2.13 (16-08-2026): NORMAL DE FRONTERA POR SOBEL, no por eje de
-                    // rejilla.
+                    // R2.12 FASE 2 (16-08-2026): LEER DEL SEGMENTO, NO RECALCULAR POR
+                    // CELDA.
                     //
-                    // Dos intentos anteriores proyectaban la velocidad relativa sobre uno
-                    // de los 4 ejes de la rejilla -la direccion al vecino distinto. Es
-                    // valido solo si la frontera corre paralela a un eje; con placas de
-                    // forma organica la mayoria no lo hace, y el sesgo era sistematico:
-                    // ConvergentBoundaryCells caia un 62% y mas de dos tercios de las
-                    // celdas de frontera salian "transformante" sin que el deslizamiento
-                    // dominara de verdad.
+                    // Hasta aqui esta rama recalculaba un gradiente de Sobel por celda
+                    // cada sub-paso (R2.13, commit anterior) -arreglaba el sesgo de eje de
+                    // los dos intentos previos, pero seguia promediando sobre una celda
+                    // suelta: el ruido de re-cuantizacion de esa celda podia decidir el
+                    // regimen entero, y era ese ruido celda a celda el que producia el
+                    // escalonado ("peine") documentado en ANEXO.md.
                     //
-                    // Aqui se calcula la normal real con el gradiente de Sobel de la
-                    // mascara binaria "es esta celda de MI placa" sobre el vecindario 3x3
-                    // -la tecnica estandar de deteccion de bordes en imagen, que no
-                    // depende de como caiga la frontera sobre los ejes. (Gx,Gy) apunta
-                    // hacia el interior de mi placa; la normal saliente hacia la otra
-                    // placa es -normalize(Gx,Gy).
+                    // ExtractAndTrackBoundarySegments() ya agrupo esta celda, si es de
+                    // frontera, en un segmento -componente conexa de todo el tramo con el
+                    // mismo par de placas- y promedio radial/tangencial sobre TODO el
+                    // segmento CON SIGNO (no en valor absoluto: eso fue el bug del primer
+                    // intento). Aqui solo se lee ese promedio.
                     // ============================================================
-                    static const int32 Off8[8][2] = {
-                        {-1,-1}, {0,-1}, {1,-1},
-                        {-1, 0},         {1, 0},
-                        {-1, 1}, {0, 1}, {1, 1}
-                    };
-                    static const float SobelX[8] = { -1.0f, 0.0f, 1.0f, -2.0f, 2.0f, -1.0f, 0.0f, 1.0f };
-                    static const float SobelY[8] = { -1.0f, -2.0f, -1.0f, 0.0f, 0.0f, 1.0f, 2.0f, 1.0f };
-
-                    float Gx = 0.0f;
-                    float Gy = 0.0f;
-                    bool bAtBoundary = false;
-
-                    // Voto por placa vecina distinta: cual domina esta frontera, para
-                    // saber con quien se compara la velocidad. Como mucho 8 vecinos, como
-                    // mucho 8 placas distintas entre ellos.
-                    uint8 VoteID[8];
-                    int32 VoteCount[8];
-                    FVector2f VoteVelSum[8];
-                    int32 NumVotes = 0;
-
-                    for (int32 k = 0; k < 8; ++k)
-                    {
-                        const int32 NIdx = GetLinearIndex(X + Off8[k][0], Y + Off8[k][1]);
-                        const uint8 NPlate = Face.PlateIDData[NIdx];
-                        const float M = (NPlate == CurrentPlateID) ? 1.0f : 0.0f;
-                        Gx += SobelX[k] * M;
-                        Gy += SobelY[k] * M;
-
-                        if (NPlate != CurrentPlateID)
-                        {
-                            bAtBoundary = true;
-
-                            int32 VoteIdx = INDEX_NONE;
-                            for (int32 v = 0; v < NumVotes; ++v)
-                            {
-                                if (VoteID[v] == NPlate)
-                                {
-                                    VoteIdx = v;
-                                    break;
-                                }
-                            }
-                            if (VoteIdx == INDEX_NONE)
-                            {
-                                VoteIdx = NumVotes++;
-                                VoteID[VoteIdx] = NPlate;
-                                VoteCount[VoteIdx] = 0;
-                                VoteVelSum[VoteIdx] = FVector2f(0.0f, 0.0f);
-                            }
-                            ++VoteCount[VoteIdx];
-                            VoteVelSum[VoteIdx] += Face.VelocityData[NIdx];
-                        }
-                    }
-
-                    if (!bAtBoundary)
+                    if (!BoundarySegmentIdPerFace.IsValidIndex(FaceIdx))
                     {
                         continue;
                     }
-
-                    const float GradMagSq = Gx * Gx + Gy * Gy;
-                    if (GradMagSq < KINDA_SMALL_NUMBER)
+                    const int32 SegID = BoundarySegmentIdPerFace[FaceIdx][Idx];
+                    if (SegID < 0)
                     {
-                        // Mota simetrica sin normal definida (Gx=Gy=0): no se inventa una
-                        // normal de un vector nulo, se salta la clasificacion este paso.
                         continue;
                     }
-
-                    const float InvGradMag = FMath::InvSqrt(GradMagSq);
-                    const FVector2f Normal(-Gx * InvGradMag, -Gy * InvGradMag);
-                    const FVector2f Perp(-Normal.Y, Normal.X);
-
-                    // La placa que mas vecinos distintos aporta es con quien se compara.
-                    int32 BestVote = 0;
-                    for (int32 v = 1; v < NumVotes; ++v)
+                    const int32* SegArrayIdx = SegmentIdToIndex.Find(SegID);
+                    if (!SegArrayIdx)
                     {
-                        if (VoteCount[v] > VoteCount[BestVote])
-                        {
-                            BestVote = v;
-                        }
+                        continue;
                     }
-                    const FVector2f OtherVel = VoteVelSum[BestVote] / static_cast<float>(VoteCount[BestVote]);
-                    const FVector2f RelVel = Face.VelocityData[Idx] - OtherVel;
+                    const FBoundarySegment& Seg = BoundarySegments[*SegArrayIdx];
 
-                    const float ConvergenceSum = -FVector2f::DotProduct(RelVel, Normal);
-                    const float TangentialSum = FMath::Abs(FVector2f::DotProduct(RelVel, Perp));
+                    const float ConvergenceSum = Seg.AverageConvergence;
+                    const float TangentialSum = FMath::Abs(Seg.AverageTangential);
 
-                    // R2.13: si el deslizamiento tangencial domina sobre el acercamiento o
-                    // separacion radial, esto es una falla TRANSFORMANTE: friccion y
-                    // sismicidad, pero ni crea ni destruye corteza. Se comprueba antes que
-                    // las ramas de convergencia/divergencia para que una transformante no
-                    // se cuele como orogenia o rift solo por tener un resto radial pequeno.
+                    // Si el deslizamiento tangencial domina sobre el acercamiento o
+                    // separacion radial DEL SEGMENTO, esto es una falla TRANSFORMANTE:
+                    // friccion y sismicidad, pero ni crea ni destruye corteza.
                     const bool bTransformDominant = TangentialSum > FMath::Abs(ConvergenceSum);
 
                     if (bTransformDominant)
@@ -2246,6 +2243,8 @@ void URasterizedTectonics::ExtractAndTrackBoundarySegments(float DeltaTime)
         bool bBoundary = false;
         int32 OtherPlate = INDEX_NONE;
         FVector WorldNormal = FVector::ZeroVector;
+        float LocalConvergence = 0.0f;
+        float LocalTangential = 0.0f;
     };
 
     TArray<TArray<FCellBoundaryInfo>> Info;
@@ -2279,8 +2278,10 @@ void URasterizedTectonics::ExtractAndTrackBoundarySegments(float DeltaTime)
                 FCellBoundaryInfo& Cell = Info[FaceIdx][Idx];
 
                 // Voto a 4 vecinos: cual otra placa domina esta celda de frontera. Misma
-                // conectividad que el flood-fill de la pasada 2.
-                uint8 VoteID4[4]; int32 VoteCount4[4]; int32 NumVotes4 = 0;
+                // conectividad que el flood-fill de la pasada 2. Se guarda tambien el
+                // indice del vecino ganador: hace falta su VelocityData para el radial y
+                // el tangencial de esta celda.
+                uint8 VoteID4[4]; int32 VoteCount4[4]; int32 VoteNeighborIdx4[4]; int32 NumVotes4 = 0;
                 float Gx = 0.0f, Gy = 0.0f;
 
                 for (int32 k = 0; k < 8; ++k)
@@ -2308,6 +2309,7 @@ void URasterizedTectonics::ExtractAndTrackBoundarySegments(float DeltaTime)
                         V = NumVotes4++;
                         VoteID4[V] = NPlate;
                         VoteCount4[V] = 0;
+                        VoteNeighborIdx4[V] = NIdx;
                     }
                     ++VoteCount4[V];
                 }
@@ -2334,6 +2336,15 @@ void URasterizedTectonics::ExtractAndTrackBoundarySegments(float DeltaTime)
                 const FVector2f Perp2D(-Normal2D.Y, Normal2D.X);
 
                 Cell.WorldNormal = (TU * Normal2D.X + TV * Normal2D.Y).GetSafeNormal();
+
+                // Radial y tangencial CON SIGNO -a diferencia del primer intento de R2.13,
+                // que sumaba el tangencial en valor absoluto y por eso sesgaba hacia
+                // "transformante". Aqui cada celda aporta su signo real, y es el promedio
+                // por SEGMENTO (pasada 2) el que cancela el ruido de una celda suelta en
+                // vez de acumularlo.
+                const FVector2f RelVel = Face.VelocityData[Idx] - Face.VelocityData[VoteNeighborIdx4[Best4]];
+                Cell.LocalConvergence = -FVector2f::DotProduct(RelVel, Normal2D);
+                Cell.LocalTangential = FVector2f::DotProduct(RelVel, Perp2D);
             }
         }
     });
@@ -2350,6 +2361,8 @@ void URasterizedTectonics::ExtractAndTrackBoundarySegments(float DeltaTime)
         int32 PlateB = -1;
         TArray<TPair<int32,int32>> Cells; // (FaceIdx, LinearIdx)
         FVector NormalSum = FVector::ZeroVector;
+        float ConvergenceSum = 0.0f;
+        float TangentialSum = 0.0f;
     };
 
     TArray<TArray<bool>> Visited;
@@ -2397,6 +2410,8 @@ void URasterizedTectonics::ExtractAndTrackBoundarySegments(float DeltaTime)
 
                     Comp.Cells.Add(Cur);
                     Comp.NormalSum += Info[CFace][CIdx].WorldNormal;
+                    Comp.ConvergenceSum += Info[CFace][CIdx].LocalConvergence;
+                    Comp.TangentialSum += Info[CFace][CIdx].LocalTangential;
 
                     const int32 Offsets4[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
                     for (int32 i = 0; i < 4; ++i)
@@ -2493,6 +2508,8 @@ void URasterizedTectonics::ExtractAndTrackBoundarySegments(float DeltaTime)
         Seg.PlateB = Comp.PlateB;
         Seg.CellCount = Comp.Cells.Num();
         Seg.AverageNormal = (Comp.Cells.Num() > 0) ? Comp.NormalSum.GetSafeNormal() : FVector::ZeroVector;
+        Seg.AverageConvergence = (Comp.Cells.Num() > 0) ? Comp.ConvergenceSum / Comp.Cells.Num() : 0.0f;
+        Seg.AverageTangential = (Comp.Cells.Num() > 0) ? Comp.TangentialSum / Comp.Cells.Num() : 0.0f;
 
         for (const TPair<int32,int32>& Cell : Comp.Cells)
         {
