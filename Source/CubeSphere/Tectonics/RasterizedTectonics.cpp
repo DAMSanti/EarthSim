@@ -1793,7 +1793,16 @@ void URasterizedTectonics::WriteBackToReference()
             }
 
             FTectonicFaceTextureData& Ref = ReferenceData[RFaceIdx];
-            Ref.PlateIDData[RIdx]        = Face.PlateIDData[Idx];
+
+            // EL ID DE PLACA NO SE DEVUELVE. En el marco propio de una placa la
+            // pertenencia no cambia: la placa es rigida y su territorio ahi dentro es
+            // fijo; lo que se mueve son las fronteras vistas desde el mundo.
+            //
+            // Devolverlo era lo que rompia el esquema. Como varias celdas del mundo caen
+            // en la misma del referente, las escrituras se pisaban y dejaban el ID
+            // inconsistente; la siguiente lectura exige que el referente diga que esa
+            // celda es de la placa P, no lo encontraba, y la celda salia SIN RESOLVER.
+            // Medido: 18,92% de celdas sin resolver y la corteza destruida disparada.
             Ref.ElevationData[RIdx]      = Face.ElevationData[Idx];
             Ref.CrustAgeData[RIdx]       = Face.CrustAgeData[Idx];
             Ref.CrustTypeData[RIdx]      = Face.CrustTypeData[Idx];
