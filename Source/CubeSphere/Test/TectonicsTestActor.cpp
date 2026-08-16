@@ -972,6 +972,12 @@ void ATectonicsTestActor::RefreshCategoricalFieldCaches()
         {
             AboveSeaLevelFieldCache[FaceIdx][i] = Face->ElevationData[i] - CurrentSeaLevel;
         }
+
+        RecoveryCountFieldCache[FaceIdx].SetNumUninitialized(Face->RecoveryCountData.Num());
+        for (int32 i = 0; i < Face->RecoveryCountData.Num(); ++i)
+        {
+            RecoveryCountFieldCache[FaceIdx][i] = static_cast<float>(Face->RecoveryCountData[i]);
+        }
     }
 }
 
@@ -1201,6 +1207,29 @@ void ATectonicsTestActor::RegisterSimulationFields()
         FieldRegistry->RegisterField(Field);
     }
 
+    // --- Recuperaciones por tolerancia -----------------------------------------
+    // DIAGNOSTICO (16-08-2026): cuantas veces cada celda ha caido en el margen ciego del
+    // conteo estricto y ha tenido que recuperarse buscando en el entorno. Un valor alto y
+    // persistente en el mismo sitio es una celda cronicamente atascada, no un fallo
+    // aislado -es la prueba directa de si "la cinta" y las zonas que no avanzan con su
+    // placa son esto. Rango automatico: el valor tipico es 0, y unas pocas celdas
+    // concentran la mayoria de recuperaciones.
+    {
+        FPlanetScalarField Field;
+        Field.Id = TEXT("RecoveryCount");
+        Field.Label = TEXT("Recuperaciones por tolerancia");
+        Field.Palette = EPlanetFieldPalette::Sequential;
+        Field.Resolution = Res;
+        Field.bAutoRange = true;
+        ATectonicsTestActor* SelfRecovery = this;
+        Field.GetFaceData = [SelfRecovery](ECSCubeFace Face) -> const TArray<float>*
+        {
+            const int32 Idx = static_cast<int32>(Face);
+            return (Idx >= 0 && Idx < 6) ? &SelfRecovery->RecoveryCountFieldCache[Idx] : nullptr;
+        };
+        FieldRegistry->RegisterField(Field);
+    }
+
     FieldRegistry->RefreshRanges();
 
     UE_LOG(LogTemp, Log, TEXT("  - %d campos de diagnostico registrados (F/G para conmutar)"),
@@ -1284,6 +1313,14 @@ void ATectonicsTestActor::DrawScreenDebugInfo()
         RasterizedTectonics->GetContinentalBreakdown(SubmergedContinentalFrac, EmergedContinentalFrac, OceanicFrac);
     }
 
+    // Banner persistente del modo depuracion -canal propio (4), para que no dependa del
+    // mensaje de 3 segundos de HandleInput y se vea mientras el modo siga activo.
+    if (RasterizedTectonics && RasterizedTectonics->IsDebugFakeRotationOnly())
+    {
+        GEngine->AddOnScreenDebugMessage(4, 0.0f, FColor::Magenta,
+            TEXT("=== MODO DEPURACION (T): solo rotacion geometrica, sin fisica ==="));
+    }
+
     // Info básica en pantalla
     FString InfoText = FString::Printf(
         TEXT("=== TECTÓNICA ===\n")
@@ -1292,7 +1329,7 @@ void ATectonicsTestActor::DrawScreenDebugInfo()
         TEXT("Placas: %d | Grid: %d\n")
         TEXT("\n[SPACE] Pausa | [R] Reiniciar\n")
         TEXT("[+/-] Velocidad | [1-8] Placa\n")
-        TEXT("[V] Velocidades | [B] Límites\n")
+        TEXT("[V] Velocidades | [B] Límites | [T] Modo depuracion\n")
         TEXT("DIAG tierra: emergida %.1f%% | continental sumergida %.1f%% | oceanica %.1f%%\n")
         TEXT("R2.12 segmentos: %d activos | edad media %.2f Ma | celdas %d\n")
         TEXT("Corteza: +%d creada / -%d destruida (%d advecciones)\n")
@@ -1479,6 +1516,21 @@ void ATectonicsTestActor::HandleInput()
     if (PC->WasInputKeyJustPressed(EKeys::B))
     {
         bShowPlateBoundaries = !bShowPlateBoundaries;
+    }
+
+    // T - MODO DEPURACION POR CAPAS (17-08-2026): solo rotacion geometrica pura, sin
+    // isostasia, fisica de frontera, ni segmentos. La capa 1 de la prueba por capas.
+    if (PC->WasInputKeyJustPressed(EKeys::T) && RasterizedTectonics)
+    {
+        const bool bNewState = !RasterizedTectonics->IsDebugFakeRotationOnly();
+        RasterizedTectonics->SetDebugFakeRotationOnly(bNewState);
+        if (GEngine)
+        {
+            GEngine->AddOnScreenDebugMessage(-1, 3.0f, bNewState ? FColor::Magenta : FColor::Green,
+                bNewState
+                    ? TEXT("MODO DEPURACION: solo rotacion geometrica pura (sin vecinos, sin fisica)")
+                    : TEXT("Simulacion real reanudada"));
+        }
     }
 
     // 1-8 - Seleccionar placa

@@ -465,9 +465,19 @@ struct CUBESPHERE_API FBoundarySegment
     UPROPERTY(BlueprintReadOnly)
     FVector AverageNormal = FVector::ZeroVector;
 
-    // AverageConvergence/AverageTangential se anaden en la fase 2 (cuando la
-    // clasificacion pase a leer del segmento), no antes: sin consumidor todavia
-    // serian campos que solo dan una falsa sensacion de precision.
+    /**
+     * FASE 2 (16-08-2026): promedio sobre el segmento de lo que antes se leia por celda
+     * suelta (R2.13). Es el reemplazo directo del gradiente de Sobel por celda: la
+     * clasificacion en Step() ya no recalcula nada, lee esto. Promediar sobre el
+     * segmento entero -no sobre una celda- es lo que debe suavizar el escalonado: el
+     * ruido de re-cuantizacion de una celda individual no puede ya decidir el regimen de
+     * todo el tramo de frontera.
+     */
+    UPROPERTY(BlueprintReadOnly)
+    float AverageConvergence = 0.0f;
+
+    UPROPERTY(BlueprintReadOnly)
+    float AverageTangential = 0.0f;
 };
 
 /**
@@ -874,6 +884,37 @@ protected:
 
     /** Rotacion acumulada de cada placa desde el inicio. Solo la usa el material. */
     TArray<FQuat> PlateAccumRotation;
+
+public:
+    // ============================================================
+    // MODO DEPURACION POR CAPAS (17-08-2026)
+    //
+    // Aisla la geometria pura del resto de la maquinaria (conteo de reclamantes,
+    // recuperacion por tolerancia, GetNeighborPixel) para saber si un artefacto viene de
+    // CubeFaceMapping en si o de algo construido encima. Cuando esta activo, Step()
+    // ignora TODO lo demas -isostasia, fisica de frontera, difusion, segmentos- y solo
+    // reescribe PlateIDData retro-rotando cada celda contra el Voronoi original congelado,
+    // sin mirar ni un vecino.
+    // ============================================================
+
+    /** Activa/desactiva el modo. Tecla T en TectonicsTestActor. */
+    UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics|Debug")
+    void SetDebugFakeRotationOnly(bool bEnabled) { bDebugFakeRotationOnly = bEnabled; }
+
+    UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics|Debug")
+    bool IsDebugFakeRotationOnly() const { return bDebugFakeRotationOnly; }
+
+private:
+    bool bDebugFakeRotationOnly = false;
+
+    /** PlateIDData tal como salio del Voronoi, antes de la primera adveccion. Congelado. */
+    TArray<TArray<uint8>> OriginalPlateIDSnapshot;
+
+    /** Rotacion acumulada propia de este modo -independiente de PlateAccumRotation real. */
+    TArray<FQuat> DebugAccumRotation;
+
+    /** El unico paso del modo de depuracion: sin vecinos, sin conteo, sin recuperacion. */
+    void DebugFakeRotateStep(float DeltaTime);
 
     // ============================================================
     // R2.12: FRONTERA COMO OBJETO (16-08-2026)

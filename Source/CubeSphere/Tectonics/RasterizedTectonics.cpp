@@ -317,7 +317,94 @@ void URasterizedTectonics::InitializeFromPlateSystem()
     SeaLevel = 0.0f;
     TargetOceanVolume = ComputeOceanVolume(SeaLevel);
 
+    // MODO DEPURACION POR CAPAS (17-08-2026): congelar el Voronoi tal como salio, antes de
+    // que ninguna adveccion lo toque. Es el "layer 0" contra el que DebugFakeRotateStep
+    // retro-proyecta -sin esto no habria nada estable con lo que comparar.
+    OriginalPlateIDSnapshot.SetNum(6);
+    for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
+    {
+        OriginalPlateIDSnapshot[FaceIdx] = FaceData[FaceIdx].PlateIDData;
+    }
+    DebugAccumRotation.Reset();
+
     UE_LOG(LogRasterizedTectonics, Log, TEXT("Textures initialized from plate system"));
+}
+
+// ============================================================
+// MODO DEPURACION POR CAPAS (17-08-2026)
+//
+// La prueba mas simple posible: cada placa rota, cada celda se resuelve retro-rotando y
+// preguntando directamente al Voronoi original -CubeFaceMapping puro, ni un vecino, ni
+// un conteo, ni una recuperacion por tolerancia. Si un artefacto (bloque de esquina,
+// cinta) sigue apareciendo aqui, esta en la geometria base y no en nada construido
+// encima. Si desaparece, esta en AdvectPlateField/GetNeighborPixel/el pase de propiedad.
+// ============================================================
+void URasterizedTectonics::DebugFakeRotateStep(float DeltaTime)
+{
+    if (!PlateSystem || OriginalPlateIDSnapshot.Num() != 6)
+    {
+        return;
+    }
+
+    const TArray<FTectonicPlate>& Plates = PlateSystem->GetPlates();
+    const int32 NumPlates = Plates.Num();
+    if (NumPlates == 0)
+    {
+        return;
+    }
+
+    if (DebugAccumRotation.Num() != NumPlates)
+    {
+        DebugAccumRotation.Init(FQuat::Identity, NumPlates);
+    }
+
+    // Rotacion propia de este modo: independiente de PlateAccumRotation, para que probar
+    // esto no pueda interferir con el estado de la simulacion real.
+    TArray<FQuat> InverseAccum;
+    InverseAccum.SetNum(NumPlates);
+    for (int32 P = 0; P < NumPlates; ++P)
+    {
+        const FQuat StepRotation = UPlateKinematics::CalculatePlateRotation(Plates[P], DeltaTime);
+        DebugAccumRotation[P] = StepRotation * DebugAccumRotation[P];
+        InverseAccum[P] = DebugAccumRotation[P].Inverse();
+    }
+
+    ParallelFor(6, [&](int32 FaceIdx)
+    {
+        FTectonicFaceTextureData& Face = FaceData[FaceIdx];
+
+        for (int32 Y = 0; Y < Resolution; ++Y)
+        {
+            for (int32 X = 0; X < Resolution; ++X)
+            {
+                const int32 Idx = Y * Resolution + X;
+                const FVector Dir = CubeFaceMapping::PixelToDirection(
+                    static_cast<ECSCubeFace>(FaceIdx), X, Y, Resolution);
+
+                // Para cada placa: donde estaba este punto en el Voronoi original, si la
+                // hubiera movido ella. Primera coincidencia gana -no hace falta contar,
+                // esta prueba no resuelve colisiones, solo pinta.
+                for (int32 P = 0; P < NumPlates; ++P)
+                {
+                    const FVector OriginalDir = InverseAccum[P].RotateVector(Dir);
+
+                    ECSCubeFace OF; float OU, OV;
+                    CubeFaceMapping::DirectionToFaceTexUV(OriginalDir, OF, OU, OV);
+                    const int32 OX = FMath::Clamp(FMath::FloorToInt(OU * Resolution), 0, Resolution - 1);
+                    const int32 OY = FMath::Clamp(FMath::FloorToInt(OV * Resolution), 0, Resolution - 1);
+                    const int32 OIdx = OY * Resolution + OX;
+
+                    if (OriginalPlateIDSnapshot[static_cast<int32>(OF)][OIdx] == static_cast<uint8>(P))
+                    {
+                        Face.PlateIDData[Idx] = static_cast<uint8>(P);
+                        break;
+                    }
+                }
+                // Hueco de redondeo (ninguna placa reclama): se deja el valor del paso
+                // anterior tal cual. No es el foco de esta prueba, solo la geometria.
+            }
+        }
+    });
 }
 
 void URasterizedTectonics::ApplyFractalNoise(const FFractalNoiseParams& Params)
@@ -1575,6 +1662,14 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
     if (!bIsInitialized)
     {
         UE_LOG(LogRasterizedTectonics, Warning, TEXT("Step called but system not initialized"));
+        return;
+    }
+
+    // MODO DEPURACION POR CAPAS (17-08-2026): si esta activo, NADA de lo demas corre -ni
+    // isostasia, ni fisica de frontera, ni segmentos. Solo la rotacion geometrica pura.
+    if (bDebugFakeRotationOnly)
+    {
+        DebugFakeRotateStep(Params.DeltaTime * Params.TimeScale);
         return;
     }
 
