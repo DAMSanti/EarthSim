@@ -136,7 +136,8 @@ Ninguno bloquea, todos están medidos y acotados. Detalle completo en [A6](#a6-d
 | Defecto | Medida | ¿Lo arregla una fase posterior? |
 |---|---|---|
 | Escalonado de bordes de placa | ×2,3 | **No.** Y está bloqueado por falta de métrica válida |
-| Crecimiento del área continental | ×1,3 / 1000 Ma | **No** (la erosión no convierte continente en océano) |
+| Crecimiento del área continental | converge a ×2,27 (21,7 % de la superficie) | **No** (la erosión no convierte continente en océano) |
+| Tierra emergida decae en 1000 Ma | 24,5 % → 17,2 % | Parcialmente: falta el sumidero de la erosión-sedimento (F4) |
 | Celdas sin resolver en la advección | 0,016 % | Residual, vigilado por test |
 
 ## Riesgos vigentes
@@ -215,6 +216,20 @@ Desde F2 lo que engrosa es el **grosor de corteza**, no la elevación, y las mon
 Causa real: en una colisión la continental gana y la celda de destino pasa a ser continental, convirtiendo océano en continente. Lo que debería compensarlo —que el borde trasero de la placa deje sitio— quedó amortiguado al filtrar los huecos de remuestreo.
 
 Acota la gravedad: la **fracción de tierra emergida sí es estable**, así que el exceso es plataforma sumergida, no continentes desbordando el planeta.
+
+### Rift por divergencia y acreción de arco (16-08-2026)
+
+Dos cambios de física en la advección, ambos provocados por la misma observación del usuario: *si acercar el modelo a la realidad rompe nuestra física, el problema es de nuestra física*.
+
+**1. El rift se detecta con divergencia, no con geometría.** Antes: «si dos o más vecinas están sin reclamar, es un rift». Funcionaba con fronteras rectas; al hacer las placas fractales se desmoronó, porque una frontera que serpentea deja más huecos y todos se volvían océano (tierra emergida 24,6 % → 13,5 % solo por cambiar la forma de las placas). Ahora se proyecta la velocidad `ω × r` de la placa dueña de cada vecina sobre la dirección que se aleja de la celda y se suma. Umbral `0,10 × MaxAngularSpeed`, **calibrado por conservación** (creación ≈ destrucción en una esfera cerrada), no por hacer pasar un test: 0,00 → 64018/51200; 0,25 → 29296/53478; 0,10 → 49698/51126. Distingue además un rift de una **falla transformante**, que también deja huecos al discretizar pero no genera fondo oceánico.
+
+**2. Acreción de arco: la fuente que faltaba.** La corteza continental solo podía perderse; nada la reponía. En la Tierra crece por magmatismo en las zonas de subducción (Andes, Japón). La corteza oceánica que converge se engrosa y, al superar ~20 km (`ArcMaturityThickness`), deja de subducir y pasa a continental. Restringida a celdas que tocan continente: sin esa restricción **satura** —con tiempo suficiente cualquier celda convergente supera el umbral— y bajar la tasa a la mitad no cambiaba nada (222 % → 220 %). El límite no era el ritmo sino la superficie afectada.
+
+**Lo que aportó realmente, medido:** en 1000 Ma, tierra emergida 14,4 % (sin acreción) → 17,2 % (con ella); continental 3115 → 3363 celdas. Ayuda, pero **no cierra el problema**: la tierra sigue cayendo desde el 24,5 % inicial.
+
+**Un error propio, corregido:** al reescribir `ContinentsPersist` se iba a justificar el nuevo ratio ×2,26 diciendo que ahora hay una fuente física legítima. El sabotaje (`ArcAccretionFactor = 0`) mostró que sin acreción el ratio ya era ×2,17 —la acreción aporta solo ~9 %—, así que la justificación habría sido falsa y el diagnóstico original (artefacto de remuestreo) sigue siendo el correcto.
+
+**Límite conocido del test de convergencia**, comprobado saboteándolo: con la tasa ×10 el test sigue pasando. El punto de equilibrio lo fija la geometría de los márgenes de subducción, no el ritmo. Esa aserción **no valida la calibración**; eso lo cubre la fracción de tierra emergida de `LongRunStability`.
 
 ## A6. Defectos abiertos en detalle
 

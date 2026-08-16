@@ -141,21 +141,29 @@ FVector USphericalVoronoi::WarpDirection(const FVector& UnitDir, const FPlateSha
         return UnitDir;
     }
 
-    // Tres muestras de ruido independientes para formar un vector de desplazamiento. Se
-    // toman en puntos bien separados del espacio de ruido (los offsets) porque muestrear
-    // el mismo campo tres veces daria las tres componentes iguales, y el desplazamiento
-    // seria siempre en la diagonal (1,1,1): las fronteras se deformarian todas en la misma
-    // direccion en vez de serpentear.
-    const FVector OffsetA(0.0f, 0.0f, 0.0f);
-    const FVector OffsetB(37.2f, 11.7f, -23.4f);
-    const FVector OffsetC(-19.8f, 44.1f, 7.6f);
+    // Tres muestras independientes del campo de ruido para formar un vector de
+    // desplazamiento.
+    //
+    // La primera version desplazaba la DIRECCION antes de normalizar, con offsets de
+    // longitud ~45. Eso era inutil: sumar un vector unitario a uno de longitud 45 y
+    // normalizar devuelve practicamente el offset, asi que dos de las tres componentes
+    // salian CONSTANTES en todo el planeta. El desplazamiento era casi una traslacion
+    // uniforme, que no deforma nada. Medido: las fronteras solo se alargaban un 4%.
+    //
+    // Lo correcto es separar las muestras en el ESPACIO DE RUIDO, despues de escalar por
+    // la frecuencia. Ahi los offsets son coordenadas del campo, no direcciones, y cada
+    // componente recorre una zona distinta del ruido.
+    const float F = Params.WarpFrequency;
+    const float SX = static_cast<float>(UnitDir.X) * F;
+    const float SY = static_cast<float>(UnitDir.Y) * F;
+    const float SZ = static_cast<float>(UnitDir.Z) * F;
 
-    const float NX = FSimplexNoise::SphereFractalNoise(
-        (UnitDir + OffsetA).GetSafeNormal(), Params.WarpFrequency, Params.WarpOctaves, 2.0f, 0.5f);
-    const float NY = FSimplexNoise::SphereFractalNoise(
-        (UnitDir + OffsetB).GetSafeNormal(), Params.WarpFrequency, Params.WarpOctaves, 2.0f, 0.5f);
-    const float NZ = FSimplexNoise::SphereFractalNoise(
-        (UnitDir + OffsetC).GetSafeNormal(), Params.WarpFrequency, Params.WarpOctaves, 2.0f, 0.5f);
+    const float NX = FSimplexNoise::FractalNoise3D(SX, SY, SZ,
+        Params.WarpOctaves, 2.0f, 0.5f);
+    const float NY = FSimplexNoise::FractalNoise3D(SX + 137.3f, SY + 71.9f, SZ + 213.7f,
+        Params.WarpOctaves, 2.0f, 0.5f);
+    const float NZ = FSimplexNoise::FractalNoise3D(SX - 291.1f, SY + 183.4f, SZ - 57.2f,
+        Params.WarpOctaves, 2.0f, 0.5f);
 
     const FVector Displacement(NX, NY, NZ);
 

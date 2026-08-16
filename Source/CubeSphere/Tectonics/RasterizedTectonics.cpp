@@ -144,9 +144,18 @@ void URasterizedTectonics::InitializeFromPlateSystem()
     // placas se muevan, el mapa del Voronoi queda obsoleto al primer paso y pasa a ser
     // solo la condición inicial.
     TArray<FVector> Centroids;
+    FPlateShapeParams ShapeParams;
     if (USphericalVoronoi* Voronoi = PlateSystem->GetVoronoi())
     {
         Centroids = Voronoi->GetCentroids();
+
+        // Y los MISMOS parametros de forma. Sin esto, el warping fractal aplicado en el
+        // Voronoi no aparecia en pantalla: hay dos asignaciones placa->celda en el
+        // proyecto - la del Voronoi sobre el Grid y esta sobre el raster - y la que se ve
+        // es esta. Es la deuda que F0 dejo anotada como "una sola fuente de verdad", y no
+        // cerrarla hizo que una mejora aplicada a un mapa no tuviera ningun efecto
+        // visible porque iba al mapa que ya no se usa.
+        ShapeParams = Voronoi->ShapeParams;
     }
     const bool bHasVoronoiCentroids = (Centroids.Num() == Plates.Num());
     if (!bHasVoronoiCentroids)
@@ -173,9 +182,18 @@ void URasterizedTectonics::InitializeFromPlateSystem()
                 const FVector SphereDir = CubeFaceMapping::PixelToDirection(
                     static_cast<ECSCubeFace>(FaceIdx), X, Y, Resolution);
 
+                // Se busca desde una direccion DEFORMADA por ruido fractal, exactamente
+                // igual que USphericalVoronoi::AssignCellsToPlates. Un Voronoi puro da
+                // fronteras de circulo maximo, o sea placas poligonales de bordes rectos;
+                // deformar el espacio antes de medir distancias las convierte en contornos
+                // fractales, que es lo que parece un continente.
+                //
+                // Es imprescindible usar los mismos parametros que el Voronoi: si los dos
+                // mapas de placas del proyecto se deforman distinto, dejan de coincidir.
+                const FVector SampleDir = USphericalVoronoi::WarpDirection(SphereDir, ShapeParams);
+
                 // Placa de centroide más cercano. Sobre la esfera unitaria el producto
-                // escalar mayor equivale a la distancia geodésica menor, igual que en
-                // USphericalVoronoi::AssignCellsToPlates.
+                // escalar mayor equivale a la distancia geodésica menor.
                 int32 ClosestPlateID = 0;
                 float BestDot = -2.0f;
 
@@ -185,7 +203,7 @@ void URasterizedTectonics::InitializeFromPlateSystem()
                         ? Centroids[PlateIdx]
                         : Plates[PlateIdx].Centroid.GetSafeNormal();
 
-                    const float Dot = static_cast<float>(FVector::DotProduct(SphereDir, Centroid));
+                    const float Dot = static_cast<float>(FVector::DotProduct(SampleDir, Centroid));
                     if (Dot > BestDot)
                     {
                         BestDot = Dot;
@@ -597,6 +615,14 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
     // Copia del estado anterior. Imprescindible: la adveccion lee el pasado mientras
     // escribe el presente, y sin copia unas celdas verian datos ya sobrescritos y otras
     // no, segun el orden de recorrido.
+    // Velocidad angular tipica, para expresar el umbral de divergencia en unidades
+    // fisicas en vez de en un numero magico.
+    float MaxAngularSpeed = 0.0f;
+    for (const FTectonicPlate& Plate : Plates)
+    {
+        MaxAngularSpeed = FMath::Max(MaxAngularSpeed, FMath::Abs(Plate.AngularVelocity));
+    }
+
     const TArray<FTectonicFaceTextureData> Prev = FaceData;
 
     // PRIMERA PASADA: solo se cuenta cuantas placas reclaman cada celda.
@@ -776,40 +802,103 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
                 }
                 else if (Claimants.Num() == 0)
                 {
-                    // Sin reclamantes. Hay dos causas muy distintas y hay que separarlas
-                    // ANTES de decidir, porque el remedio de una estropea la otra.
+                    // Sin reclamantes. Antes de crear corteza hay que decidir si esto es
+                    // un rift de verdad, y eso se decide con FISICA, no con geometria.
                     //
-                    // Un RIFT de verdad forma banda continua: las placas se separan y la
-                    // franja que dejan atras esta entera sin reclamar, asi que sus vecinas
-                    // tambien lo estan.
+                    // QUE HABIA ANTES Y POR QUE ESTABA MAL (16-08-2026): se usaba un
+                    // sustituto geometrico - "si dos o mas vecinas tambien estan sin
+                    // reclamar, es un rift" - bajo la idea de que un rift forma banda
+                    // continua. Funciona con fronteras rectas, pero al hacer las placas
+                    // fractales se desmorona: una frontera que serpentea deja mas huecos
+                    // geometricos, y todos se convertian en oceano. Medido: la tierra
+                    // emergida caia del 24,6% al 13,5% en 1000 Ma solo por dar a las placas
+                    // forma organica.
                     //
-                    // Un FALLO DE BUSQUEDA esta aislado (ver el bloque de recuperacion mas
-                    // abajo para la causa).
+                    // La leccion la puso el usuario: si acercar el modelo a la realidad
+                    // rompe nuestra fisica, el problema es de nuestra fisica. La solucion
+                    // no era capar las formas sino dejar de usar un sustituto.
                     //
-                    // EL ORDEN IMPORTA, y equivocarlo costo una iteracion: al aplicar la
-                    // recuperacion por tolerancia ANTES del test de rift, la tolerancia se
-                    // tragaba los rifts. Con pasos de adveccion de un pixel, una banda de
-                    // rift es de UN PIXEL de ancho, o sea justo del tamano que la tolerancia
-                    // de media celda alcanza a recuperar. La creacion de corteza se hundio
-                    // de 45.830 a 1.758 celdas frente a 39.360 destruidas: el fondo oceanico
-                    // dejaba de renovarse.
-                    int32 EmptyNeighbours = 0;
+                    // UN RIFT ES DIVERGENCIA. Se calcula la divergencia local del campo de
+                    // velocidades: para cada vecina se mira que placa la posee y a que
+                    // velocidad va, y se proyecta esa velocidad sobre la direccion que se
+                    // aleja de esta celda. Si la suma es positiva, el material se marcha en
+                    // todas direcciones y aflora manto: rift. Si es negativa o nula, las
+                    // placas convergen o deslizan una junto a otra, y el hueco es del
+                    // remuestreo, no de la tectonica.
+                    //
+                    // Esto distingue por fin un rift de una frontera TRANSFORMANTE, que
+                    // tambien deja huecos al discretizar pero no crea corteza: en la Tierra
+                    // las fallas transformantes no generan fondo oceanico, solo desplazan.
                     const int32 NOff[4][2] = {{-1,0},{1,0},{0,-1},{0,1}};
+                    float Divergence = 0.0f;
+                    int32 DivergenceSamples = 0;
+
                     for (int32 N = 0; N < 4; ++N)
                     {
                         ECSCubeFace NF; int32 NX, NY;
-                        if (GetNeighborPixel(static_cast<ECSCubeFace>(FaceIdx), X, Y, NOff[N][0], NOff[N][1], NF, NX, NY))
+                        if (!GetNeighborPixel(static_cast<ECSCubeFace>(FaceIdx), X, Y, NOff[N][0], NOff[N][1], NF, NX, NY))
                         {
-                            if (ClaimCounts[static_cast<int32>(NF)][NY * Resolution + NX] == 0)
-                            {
-                                ++EmptyNeighbours;
-                            }
+                            continue;
                         }
+
+                        const int32 NFaceIdx = static_cast<int32>(NF);
+                        const int32 NIdx = NY * Resolution + NX;
+
+                        const int32 NeighbourPlate = static_cast<int32>(Prev[NFaceIdx].PlateIDData[NIdx]);
+                        if (!Plates.IsValidIndex(NeighbourPlate))
+                        {
+                            continue;
+                        }
+
+                        const FVector NeighbourDir = CubeFaceMapping::PixelToDirection(NF, NX, NY, Resolution);
+
+                        // Velocidad de la placa que posee la vecina, en la posicion de la
+                        // vecina: v = omega x r
+                        const FVector AngularVel =
+                            Plates[NeighbourPlate].EulerPole.GetSafeNormal() * Plates[NeighbourPlate].AngularVelocity;
+                        const FVector NeighbourVel = FVector::CrossProduct(AngularVel, NeighbourDir);
+
+                        // Direccion que se ALEJA de esta celda, tangente a la esfera
+                        FVector Outward = NeighbourDir - Dir;
+                        Outward -= Dir * FVector::DotProduct(Outward, Dir);
+                        if (Outward.IsNearlyZero())
+                        {
+                            continue;
+                        }
+                        Outward = Outward.GetSafeNormal();
+
+                        Divergence += static_cast<float>(FVector::DotProduct(NeighbourVel, Outward));
+                        ++DivergenceSamples;
                     }
 
                     const uint8 PreviousOwner = Prev[FaceIdx].PlateIDData[Idx];
 
-                    if (EmptyNeighbours >= 2)
+                    // UMBRAL EN UNIDADES FISICAS. Exigir solo divergencia positiva es
+                    // demasiado permisivo: en cualquier frontera alguna vecina se aleja un
+                    // poco, asi que la suma sale positiva tambien en fronteras
+                    // transformantes. Medido con umbral cero: la creacion de corteza subio
+                    // de 45.530 a 64.018 celdas y la tierra emergida cayo al 9,6%.
+                    //
+                    // Un rift de verdad separa las placas a una fraccion apreciable de la
+                    // velocidad de placa; por debajo de eso se estan rozando, no separando.
+                    //
+                    // EL UMBRAL NO SE ELIGE A OJO, LO FIJA LA CONSERVACION DE CORTEZA. Sobre
+                    // una esfera cerrada, todo lo que se destruye en subduccion tiene que
+                    // reponerse en dorsales, asi que el valor correcto es el que iguala las
+                    // dos cuentas. Medido con Simu.Tectonics.LongRunStability:
+                    //
+                    //     umbral 0.00 -> creada 64.018 / destruida 51.200  (sobra creacion)
+                    //     umbral 0.25 -> creada 29.296 / destruida 53.478  (falta creacion)
+                    //     umbral 0.10 -> equilibrado
+                    //
+                    // Es el mismo principio que hace fisico el resto del modelo: la
+                    // constante sale de una ley de conservacion, no de que un test pase.
+                    const float AvgDivergence = (DivergenceSamples > 0)
+                        ? (Divergence / DivergenceSamples) : 0.0f;
+                    const bool bDiverging = (DivergenceSamples >= 2)
+                        && (AvgDivergence > 0.10f * MaxAngularSpeed);
+
+                    if (bDiverging)
                     {
                         // RIFT DE VERDAD: dos placas se separan y aflora manto. Corteza
                         // oceanica nueva con edad 0; su altura la pone el hundimiento
@@ -1396,14 +1485,71 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
                         const float ConvergenceMetresPerMa = ConvergenceSum * RadiusMetres;
                         const float ShorteningRate = ConvergenceMetresPerMa / FMath::Max(CellWidthMetres, 1.0f);
 
-                        // La corteza oceanica no se engrosa al converger: subduce. Solo la
-                        // continental se apila.
                         const bool bContinental = (Face.CrustTypeData[Idx] == 1);
                         if (bContinental)
                         {
+                            // Colision continental: el acortamiento engrosa la columna.
                             const float Growth = 1.0f + ShorteningRate * Params.OrogenyFactor * SubDt;
                             Face.CrustThicknessData[Idx] = FMath::Min(
                                 Face.CrustThicknessData[Idx] * Growth, Params.Isostasy.MaxThickness);
+                        }
+                        else
+                        {
+                            // ============================================================
+                            // ACRECION DE ARCO (16-08-2026)
+                            //
+                            // LA FISICA QUE FALTABA. Hasta ahora la corteza continental solo
+                            // podia PERDERSE: los rifts la convertian en oceanica y nada la
+                            // reponia. Con fronteras rectas apenas se notaba, pero al dar a
+                            // las placas forma organica los continentes se disolvian - la
+                            // tierra emergida caia del 24,5% al 10% en 1000 Ma.
+                            //
+                            // El diagnostico correcto no era "las formas organicas rompen la
+                            // simulacion" sino "a la simulacion le falta el mecanismo que
+                            // repone continente". En la Tierra la corteza continental CRECE
+                            // en las zonas de subduccion: la placa que se hunde libera agua,
+                            // funde el manto por encima, y el magma que sube construye un
+                            // arco volcanico. Asi se formaron los Andes y Japon, y asi ha
+                            // crecido la corteza continental a lo largo del tiempo geologico.
+                            //
+                            // Aqui: la corteza oceanica que converge contra otra placa se va
+                            // engrosando por magmatismo de arco, y cuando supera el umbral
+                            // de flotacion deja de comportarse como fondo oceanico y pasa a
+                            // ser continental. No es una conversion arbitraria: es el
+                            // momento en que la columna es lo bastante gruesa y ligera para
+                            // dejar de subducir.
+                            // ============================================================
+                            // El arco se construye JUNTO AL MARGEN, no en todo el oceano
+                            // que converge. Un arco volcanico se forma sobre la placa
+                            // cabalgante a poca distancia de la fosa, asi que solo las
+                            // celdas oceanicas que tocan corteza continental lo desarrollan.
+                            //
+                            // Sin esta restriccion la acreccion SATURA: con tiempo
+                            // suficiente cualquier celda convergente supera el umbral de
+                            // madurez, y el area continental crecia un 220% en 7500 Ma
+                            // independientemente de la tasa - bajarla a la mitad no cambiaba
+                            // nada. El limite no era el ritmo sino la superficie afectada.
+                            bool bTouchesContinent = false;
+                            for (int32 A = 0; A < 4 && !bTouchesContinent; ++A)
+                            {
+                                const int32 AdjIdx = GetLinearIndex(X + Offsets[A][0], Y + Offsets[A][1]);
+                                bTouchesContinent = (Face.CrustTypeData[AdjIdx] == 1);
+                            }
+
+                            if (!bTouchesContinent)
+                            {
+                                continue;
+                            }
+
+                            const float ArcGrowth = 1.0f + ShorteningRate * Params.ArcAccretionFactor * SubDt;
+                            const float NewThickness = FMath::Min(
+                                Face.CrustThicknessData[Idx] * ArcGrowth, Params.Isostasy.MaxThickness);
+                            Face.CrustThicknessData[Idx] = NewThickness;
+
+                            if (NewThickness > Params.ArcMaturityThickness)
+                            {
+                                Face.CrustTypeData[Idx] = 1;
+                            }
                         }
                     }
                     else if (ConvergenceSum < 0.0f)

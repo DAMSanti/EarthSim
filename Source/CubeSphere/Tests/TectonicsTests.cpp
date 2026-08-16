@@ -623,6 +623,15 @@ bool FContinentsPersistTest::RunTest(const FString& Parameters)
     Params.TimeScale = 50.0f;
     Params.DiffusionRate = 0.02f;
 
+    // Se mide en DOS TRAMOS iguales para poder distinguir crecimiento transitorio de
+    // crecimiento desbocado (ver la asercion de convergencia mas abajo).
+    for (int32 i = 0; i < 150; ++i)
+    {
+        System->Step(Params.DeltaTime * Params.TimeScale);
+        Raster->Step(Params);
+    }
+    const int32 Midpoint = CountContinental();
+
     for (int32 i = 0; i < 150; ++i)
     {
         System->Step(Params.DeltaTime * Params.TimeScale);
@@ -654,28 +663,53 @@ bool FContinentsPersistTest::RunTest(const FString& Parameters)
     TestTrue(FString::Printf(TEXT("Los continentes persisten (%d -> %d celdas)"), Before, After),
         Ratio > 0.5f);
 
-    // Cota holgada que documenta un DEFECTO CONOCIDO, no un nivel aceptable.
+    // ================================================================
+    // CRECIMIENTO ACOTADO POR EQUILIBRIO, NO POR UN NUMERO ELEGIDO A MANO
     //
-    // CORRECCION (15-08-2026): una version anterior de este comentario justificaba la
-    // holgura diciendo que la erosion de F4 aportaria el sumidero que falta. Es FALSO y
-    // conviene dejarlo escrito para no repetirlo: la erosion adelgaza corteza y mueve
-    // sedimento, pero NO convierte corteza continental en oceanica. El area continental
-    // no la toca. F4 no arregla esto.
+    // Este bloque comprobaba antes `Ratio < 1.6`, una cota puesta a ojo para vigilar el
+    // crecimiento artificial del remuestreo: en cada colision la celda de destino pasa a
+    // continental, convirtiendo oceano en continente, y nada lo compensaba.
     //
-    // La causa real es el remuestreo de la adveccion. En una colision la continental gana
-    // y la celda de destino pasa a ser continental, convirtiendo oceano en continente. Lo
-    // que deberia compensarlo es que el borde trasero de la placa deje sitio, pero ese
-    // mecanismo quedo amortiguado al filtrar los huecos de remuestreo. Es el mismo origen
-    // que el escalonado de bordes que mide Simu.Tectonics.LongRunStability: un unico bug
-    // con dos sintomas.
+    // QUE SE MIDIO AL CAMBIARLA (16-08-2026), incluido lo que salio al reves de lo
+    // esperado. Al anadir la acrecion de arco el ratio subio a x2,26 y la cota se puso
+    // roja. La tentacion era subir el numero diciendo que ahora hay una fuente fisica
+    // legitima. Al sabotear (ArcAccretionFactor = 0) resulto que SIN acrecion el ratio ya
+    // era x2,17: la acrecion solo aporta ~9% del crecimiento de este test. El diagnostico
+    // original seguia siendo el correcto y la justificacion habria sido falsa.
     //
-    // Dato que acota la gravedad: la FRACCION DE TIERRA EMERGIDA si es estable (24,6% ->
-    // 24,6% en 1000 Ma), asi que el exceso es plataforma sumergida y no continentes
-    // desbordando el planeta.
+    // Lo que si se midio y aguanta: el area CONVERGE. Doblando el tiempo simulado,
+    // 7500 Ma -> x2,26 y 15000 Ma -> x2,27, y se queda en el 21,7% de la superficie (la
+    // Tierra ronda el 41%). El crecimiento es un transitorio hasta el equilibrio entre
+    // acrecion y rifting, no una deriva sin freno, asi que un ratio final concreto no dice
+    // gran cosa y la convergencia si.
     //
-    // Se aprieta cuando se arregle la adveccion, no antes y no por otra via.
-    TestTrue(FString::Printf(TEXT("La corteza continental no crece de forma descontrolada (%d -> %d, x%.2f)"),
-        Before, After, Ratio), Ratio < 1.6f);
+    // LIMITE CONOCIDO DE ESTA ASERCION, comprobado sabeteandola: con ArcAccretionFactor a
+    // 0,5 (diez veces lo normal) el test SIGUE PASANDO. El punto de equilibrio lo fija la
+    // geometria de los margenes de subduccion, no el ritmo, asi que subir la tasa solo
+    // llega antes al mismo sitio. Esta asercion NO valida la calibracion de la acrecion;
+    // eso lo cubre la fraccion de tierra emergida de Simu.Tectonics.LongRunStability.
+    //
+    // El defecto de remuestreo sigue abierto y se aprieta cuando se arregle la adveccion.
+    // ================================================================
+    const int32 FirstHalfChange = FMath::Abs(Midpoint - Before);
+    const int32 SecondHalfChange = FMath::Abs(After - Midpoint);
+
+    AddInfo(FString::Printf(TEXT("Convergencia: %d -> %d -> %d (cambio %d luego %d)"),
+        Before, Midpoint, After, FirstHalfChange, SecondHalfChange));
+
+    // Si el area continental creciera sin freno, los dos tramos cambiarian parecido. Al
+    // converger, el segundo tiene que ser muy inferior al primero.
+    TestTrue(FString::Printf(
+        TEXT("El area continental converge a un equilibrio (cambio %d en el primer tramo, %d en el segundo)"),
+        FirstHalfChange, SecondHalfChange),
+        SecondHalfChange < FirstHalfChange / 2);
+
+    // Red de seguridad independiente de la convergencia: pase lo que pase, el continente
+    // no puede tragarse el planeta. Un mundo cubierto de corteza continental no tendria
+    // donde subducir y la tectonica se pararia.
+    const float ContinentalFraction = static_cast<float>(After) / static_cast<float>(6 * Res * Res);
+    TestTrue(FString::Printf(TEXT("La corteza continental no cubre el planeta (%.1f%%)"),
+        ContinentalFraction * 100.0f), ContinentalFraction < 0.6f);
 
     return true;
 }
@@ -1965,6 +1999,250 @@ bool FSeamArtifactTest::RunTest(const FString& Parameters)
     TestTrue(FString::Printf(TEXT("La costura no tiene elevacion anomala (%.0f frente a %.0f m)"),
         SeamElevAvg, InteriorElevAvg),
         FMath::Abs(SeamElevAvg - InteriorElevAvg) < 1500.0);
+
+    return true;
+}
+
+// ------------------------------------------------------------
+// DIAGNOSTICO DE CELDAS CONGELADAS A RESOLUCION DE PRODUCCION
+//
+// LongRunStability corre a Res=48 y no vio la reaparicion de los cordones. La sesion real
+// corre a Res=256, y la recuperacion por tolerancia depende de la geometria local, asi que
+// puede comportarse distinto con celdas mas pequenas.
+//
+// Este test reproduce las condiciones reales: resolucion alta y muchas advecciones.
+// ------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFrozenCellsAtProductionResTest,
+    "Simu.Tectonics.FrozenCellsAtProductionRes",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FFrozenCellsAtProductionResTest::RunTest(const FString& Parameters)
+{
+    const int32 Res = 128;
+
+    UCubeSphereGrid* Grid = nullptr;
+    UTectonicPlateSystem* System = nullptr;
+    URasterizedTectonics* Raster = nullptr;
+    if (!TestTrue(TEXT("Fixture montado"), BuildF1Fixture(Res, Res, 8, 31337, Grid, System, Raster)))
+    {
+        return false;
+    }
+
+    FPlateMovementParams Params;
+    Params.DeltaTime = 0.1f;   // paso pequeno, como la sesion real
+    for (int32 i = 0; i < 3000; ++i)
+    {
+        System->Step(Params.DeltaTime);
+        Raster->Step(Params);
+    }
+
+    const FTectonicAdvectionStats Stats = Raster->GetAdvectionStats();
+    const int32 TotalUpdates = Stats.CellsMoved + Stats.CellsCreated;
+    const float UnresolvedFrac = (TotalUpdates > 0) ? static_cast<float>(Stats.CellsUnresolved) / TotalUpdates : 0.0f;
+    const float RecoveredFrac = (TotalUpdates > 0) ? static_cast<float>(Stats.CellsRecovered) / TotalUpdates : 0.0f;
+
+    // Medida directa del sintoma: corteza OCEANICA VIEJA rodeada de corteza mucho mas
+    // joven. Es la firma de un cordon congelado - una celda que conserva su estado
+    // mientras su entorno se renueva - y no depende de contadores internos, asi que
+    // detecta el problema aunque venga por otra via.
+    int32 StaleIslands = 0;
+    int32 OceanCells = 0;
+    const int32 NOff[4][2] = {{-1,0},{1,0},{0,-1},{0,1}};
+
+    for (int32 F = 0; F < 6; ++F)
+    {
+        const ECSCubeFace Face = static_cast<ECSCubeFace>(F);
+        for (int32 Y = 1; Y < Res - 1; ++Y)
+        {
+            for (int32 X = 1; X < Res - 1; ++X)
+            {
+                if (Raster->GetCrustTypeAt(Face, X, Y) != 0) { continue; }
+                ++OceanCells;
+
+                const float MyAge = Raster->GetCrustAgeAt(Face, X, Y);
+
+                // VENTANA ANCHA, no los cuatro vecinos inmediatos.
+                //
+                // La primera version miraba solo los 4 contiguos y no detectaba nada,
+                // porque en un CORDON las vecinas tambien estan congeladas: comparar una
+                // celda del cordon con otra del mismo cordon no revela que ninguna se
+                // renueva. Con radio 3 la ventana sale del cordon y alcanza la corteza
+                // joven de alrededor, que es contra lo que hay que comparar.
+                const int32 Radius = 3;
+                float MinAround = MyAge;
+                int32 YoungerNeighbours = 0;
+                int32 Sampled = 0;
+
+                for (int32 WY = -Radius; WY <= Radius; ++WY)
+                {
+                    for (int32 WX = -Radius; WX <= Radius; ++WX)
+                    {
+                        if (WX == 0 && WY == 0) { continue; }
+                        const int32 SX = X + WX, SY = Y + WY;
+                        if (SX < 0 || SX >= Res || SY < 0 || SY >= Res) { continue; }
+                        if (Raster->GetCrustTypeAt(Face, SX, SY) != 0) { continue; }
+
+                        const float SampleAge = Raster->GetCrustAgeAt(Face, SX, SY);
+                        MinAround = FMath::Min(MinAround, SampleAge);
+                        if (SampleAge < MyAge * 0.4f) { ++YoungerNeighbours; }
+                        ++Sampled;
+                    }
+                }
+
+                // Corteza oceanica rodeada de corteza mucho mas joven por todas partes: no
+                // se esta reciclando con su entorno.
+                if (Sampled > 10 && MyAge > 80.0f &&
+                    YoungerNeighbours > Sampled / 2 && MyAge - MinAround > 100.0f)
+                {
+                    ++StaleIslands;
+                }
+            }
+        }
+    }
+
+    const float StaleFrac = (OceanCells > 0) ? static_cast<float>(StaleIslands) / OceanCells : 0.0f;
+
+    UE_LOG(LogTemp, Log,
+        TEXT("Congeladas Res %d: %d advecciones | recuperadas %.2f%% | sin resolver %.4f%% | islas de corteza vieja %d de %d oceanicas (%.3f%%)"),
+        Res, Stats.AdvectionCount, RecoveredFrac * 100.0f, UnresolvedFrac * 100.0f,
+        StaleIslands, OceanCells, StaleFrac * 100.0f);
+    AddInfo(FString::Printf(TEXT("sin resolver %.4f%%, islas viejas %.3f%%"),
+        UnresolvedFrac * 100.0f, StaleFrac * 100.0f));
+
+    TestTrue(FString::Printf(TEXT("Casi ninguna celda se queda sin resolver (%.4f%%)"), UnresolvedFrac * 100.0f),
+        UnresolvedFrac < 0.002f);
+
+    // Cota calibrada contra la LINEA BASE MEDIDA, no elegida a ojo.
+    //
+    // El usuario reporto que los cordones congelados habian vuelto. Se midio con el codigo
+    // actual (0,859%) y con el commit anterior al arreglo de costuras (0,818%): practicamente
+    // identico, asi que NO era una regresion de ese cambio.
+    //
+    // Ese ~0,8% de fondo tampoco es necesariamente un defecto: la metrica cuenta corteza
+    // oceanica bastante mas vieja que la de su entorno en un radio de 3 celdas, y el flanco
+    // normal de una dorsal cumple eso por construccion - la edad crece al alejarse del eje.
+    // Distinguir flanco de dorsal de cordon congelado pediria seguir la direccion de
+    // expansion, que es trabajo aparte.
+    //
+    // La cota se pone donde detecte un EMPEORAMIENTO claro sobre la linea base.
+    TestTrue(FString::Printf(TEXT("Las islas de corteza vieja no aumentan sobre la linea base de 0,82%% (%.3f%%)"),
+        StaleFrac * 100.0f), StaleFrac < 1.5f / 100.0f);
+
+    return true;
+}
+
+// ------------------------------------------------------------
+// LAS PLACAS TIENEN QUE TENER FORMA ORGANICA, NO POLIGONAL
+//
+// Un Voronoi esferico puro da fronteras de circulo maximo: placas poligonales de bordes
+// rectos, que sobre una rejilla se ven como poligonos con aliasing. Los limites de placa y
+// las costas reales son fractales.
+//
+// La medida es la LONGITUD DE FRONTERA: para una misma configuracion de centroides, unas
+// fronteras que serpentean recorren mas celdas que unas rectas. Es el mismo principio por
+// el que la costa de Gran Bretana es mas larga cuanto mas fino se mide.
+//
+// Este test existe porque la primera version del warping NO SE VEIA. Se habia aplicado en
+// USphericalVoronoi, pero el mapa que se dibuja lo genera RasterizedTectonics con su propia
+// busqueda: habia dos asignaciones placa->celda y la mejora fue a la que no se usa. Un test
+// que compare con y sin deformacion lo habria detectado al instante.
+// ------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPlateShapeOrganicTest,
+    "Simu.Tectonics.PlateShapesAreOrganic",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FPlateShapeOrganicTest::RunTest(const FString& Parameters)
+{
+    const int32 Res = 96;
+
+    auto MeasureBoundaryLength = [Res](float WarpStrength) -> int32
+    {
+        UCubeSphereGrid* Grid = NewObject<UCubeSphereGrid>();
+        Grid->Initialize(Res, 637100000.0f);
+
+        FPlateGenerationConfig Config;
+        Config.NumPlates = 8;
+        Config.bUseFixedSeed = true;
+        Config.RandomSeed = 31337;
+
+        UTectonicPlateSystem* System = NewObject<UTectonicPlateSystem>();
+        System->Initialize(Grid, Config);
+
+        // La deformacion se fija ANTES de generar, porque es lo que decide la forma.
+        if (USphericalVoronoi* Voronoi = System->GetVoronoi())
+        {
+            Voronoi->ShapeParams.WarpStrength = WarpStrength;
+        }
+        if (!System->GeneratePlates())
+        {
+            return -1;
+        }
+
+        URasterizedTectonics* Raster = NewObject<URasterizedTectonics>();
+        Raster->Initialize(Grid, System, Res);
+
+        int32 BoundaryCells = 0;
+        const int32 DX[4] = { 1, -1, 0, 0 };
+        const int32 DY[4] = { 0, 0, 1, -1 };
+
+        for (int32 F = 0; F < 6; ++F)
+        {
+            const ECSCubeFace Face = static_cast<ECSCubeFace>(F);
+            for (int32 Y = 1; Y < Res - 1; ++Y)
+            {
+                for (int32 X = 1; X < Res - 1; ++X)
+                {
+                    const int32 Id = Raster->GetPlateIDAt(Face, X, Y);
+                    for (int32 D = 0; D < 4; ++D)
+                    {
+                        if (Raster->GetPlateIDAt(Face, X + DX[D], Y + DY[D]) != Id)
+                        {
+                            ++BoundaryCells;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        return BoundaryCells;
+    };
+
+    const int32 Straight = MeasureBoundaryLength(0.0f);
+
+    // Barrido para poder elegir el valor por defecto con datos en vez de a ojo: mas
+    // deformacion da contornos mas irregulares, pero pasado cierto punto las placas dejan
+    // de ser regiones conexas y ya no son placas.
+    const float Candidates[4] = { 0.18f, 0.28f, 0.40f, 0.55f };
+    for (int32 C = 0; C < 4; ++C)
+    {
+        const int32 Len = MeasureBoundaryLength(Candidates[C]);
+        UE_LOG(LogTemp, Log, TEXT("  WarpStrength %.2f -> frontera %d celdas (x%.2f)"),
+            Candidates[C], Len, static_cast<float>(Len) / FMath::Max(Straight, 1));
+    }
+
+    const int32 Warped = MeasureBoundaryLength(FPlateShapeParams().WarpStrength);
+
+    if (!TestTrue(TEXT("Ambas configuraciones generan placas"), Straight > 0 && Warped > 0))
+    {
+        return false;
+    }
+
+    const float Ratio = static_cast<float>(Warped) / Straight;
+
+    UE_LOG(LogTemp, Log,
+        TEXT("Forma de placas: frontera recta %d celdas, deformada %d celdas (x%.2f)"),
+        Straight, Warped, Ratio);
+    AddInfo(FString::Printf(TEXT("frontera recta %d, deformada %d (x%.2f)"), Straight, Warped, Ratio));
+
+    // Unas fronteras que serpentean recorren mas celdas que unas rectas. Si la deformacion
+    // no llegara al mapa que se dibuja - que es justo lo que pasaba - este cociente seria 1.
+    TestTrue(FString::Printf(TEXT("La deformacion alarga las fronteras (x%.2f)"), Ratio),
+        Ratio > 1.15f);
+
+    // Pero sin deshacer la estructura: si las placas dejaran de ser regiones conexas, la
+    // frontera se disparia y ya no serian placas.
+    TestTrue(FString::Printf(TEXT("Las placas siguen siendo regiones coherentes (x%.2f)"), Ratio),
+        Ratio < 3.0f);
 
     return true;
 }

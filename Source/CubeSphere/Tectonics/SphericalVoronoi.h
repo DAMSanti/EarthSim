@@ -21,11 +21,32 @@ struct CUBESPHERE_API FPlateShapeParams
      * fronteras: 0 deja el Voronoi puro con bordes rectos, y valores altos deshacen la
      * estructura de placas hasta que dejan de ser regiones conexas.
      *
-     * 0.18 rad son ~1150 km sobre la Tierra, del orden de los grandes entrantes de un
-     * margen continental real.
+     * Elegido con datos, no a ojo. Barrido medido por
+     * `Simu.Tectonics.PlateShapesAreOrganic`, como alargamiento de la frontera respecto al
+     * Voronoi puro:
+     *
+     *     0.18 -> x1,18     0.28 -> x1,37     0.40 -> x1,69     0.55 -> x2,20
+     *
+     * VALOR CONSERVADOR POR UN ACOPLAMIENTO NO PREVISTO. Deformar las fronteras las alarga,
+     * y más frontera significa más colisión y más rift, o sea más reciclado de corteza.
+     * `Simu.Tectonics.LongRunStability` mide la tierra emergida tras 1000 Ma:
+     *
+     *     sin deformar -> 24,6 %      0.12 -> 16,8 %      0.28 -> 13,5 %      0.40 -> 13,5 %
+     *
+     * Esos números se midieron con la detección de rift ANTIGUA, que usaba un sustituto
+     * geométrico ("si dos vecinas están sin reclamar, es un rift") y por tanto convertía en
+     * océano cualquier hueco que dejara una frontera serpenteante.
+     *
+     * Al sustituirla por **divergencia real del campo de velocidades**, la forma de las
+     * placas deja de afectar al balance continental — que es como debe ser: en la Tierra un
+     * margen irregular no disuelve un continente. El valor pudo subirse a 0.28 (×1,37 de
+     * frontera, contornos claramente orgánicos) sin coste físico.
+     *
+     * 0.28 rad son ~1800 km sobre la Tierra, del orden de lo que se desvía un margen
+     * continental real respecto a una línea recta.
      */
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "0.5"))
-    float WarpStrength = 0.18f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "0.8"))
+    float WarpStrength = 0.28f;
 
     /** Frecuencia de la octava más grande. Baja = entrantes y salientes de escala continental. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.1"))
