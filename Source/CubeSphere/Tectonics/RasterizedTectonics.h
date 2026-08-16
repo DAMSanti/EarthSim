@@ -31,6 +31,14 @@ struct FTectonicFaceTextureData
     TArray<float> CrustAgeData;      // Edad de la corteza
     TArray<uint8> CrustTypeData;     // Tipo (oceÃ¡nica/continental)
     TArray<float> CrustThicknessData; // Grosor de corteza (m) - estado primario desde F2
+    TArray<int32> RecoveryCountData;
+
+    // DIAGNOSTICO: cuantas advecciones ha resuelto esta celda por el camino de
+    // recuperacion. Una celda que recupera casi siempre es una celda CONGELADA: la
+    // busqueda estricta falla en ella de forma sistematica por su geometria local, no por
+    // azar. Es la medida directa del sintoma que se ve en pantalla (una peninsula parada
+    // mientras el resto deriva), y hace falta porque las metricas anteriores no lo veian:
+    // median islas de corteza OCEANICA vieja y el sintoma es CONTINENTAL.
     
     bool bIsValid = false;
 };
@@ -487,6 +495,10 @@ public:
     /** Edad de la corteza (Ma) de una celda. */
     UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics")
     float GetCrustAgeAt(ECSCubeFace Face, int32 X, int32 Y) const;
+
+    /** Cuantas veces esta celda se resolvio por recuperacion (diagnostico de congelacion). */
+    UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics")
+    int32 GetRecoveryCountAt(ECSCubeFace Face, int32 X, int32 Y) const;
 
     /** Tipo de corteza: 0 = oceÃ¡nica, 1 = continental. */
     UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics")

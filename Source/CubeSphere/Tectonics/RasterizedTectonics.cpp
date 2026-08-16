@@ -52,6 +52,7 @@ void URasterizedTectonics::Initialize(UCubeSphereGrid* InGrid, UTectonicPlateSys
         Face.ElevationData.SetNumZeroed(PixelsPerFace);
         Face.VelocityData.SetNum(PixelsPerFace);
         Face.CrustAgeData.SetNumZeroed(PixelsPerFace);
+        Face.RecoveryCountData.SetNumZeroed(PixelsPerFace);
         Face.CrustTypeData.SetNumZeroed(PixelsPerFace);
         Face.CrustThicknessData.SetNumZeroed(PixelsPerFace);
 
@@ -547,6 +548,16 @@ float URasterizedTectonics::GetPixelAngularSize() const
     return (Resolution > 0) ? (PI * 0.5f / static_cast<float>(Resolution)) : 0.0f;
 }
 
+int32 URasterizedTectonics::GetRecoveryCountAt(ECSCubeFace Face, int32 X, int32 Y) const
+{
+    const int32 FaceIdx = static_cast<int32>(Face);
+    if (!bIsInitialized || FaceIdx < 0 || FaceIdx >= 6 || !IsValidCoord(X, Y))
+    {
+        return 0;
+    }
+    return FaceData[FaceIdx].RecoveryCountData[GetLinearIndex(X, Y)];
+}
+
 float URasterizedTectonics::GetCrustAgeAt(ECSCubeFace Face, int32 X, int32 Y) const
 {
     const int32 FaceIdx = static_cast<int32>(Face);
@@ -944,16 +955,42 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
                     // reclamar la misma celda y el algoritmo entero se apoya en cuantas
                     // placas reclaman.
                     // ====================================================================
+                    // COMO SE ELIGE ENTRE VARIOS CANDIDATOS (16-08-2026)
+                    //
+                    // Antes se prefiria "la placa que ya ocupaba esta celda", con un break
+                    // que cortaba en cuanto la encontraba. Se justificaba como continuidad
+                    // del campo, pero es un SESGO A NO MOVERSE, y tenia dos sintomas que
+                    // el usuario vio en pantalla:
+                    //
+                    //   - Una peninsula parada mientras el resto del continente derivaba.
+                    //     En una frontera con orientacion desfavorable la busqueda estricta
+                    //     falla siempre en las mismas celdas; la recuperacion se las
+                    //     devolvia a su dueno anterior una y otra vez y no advectaban nunca.
+                    //   - "Puentes" rectos de tierra entre continentes. Es la misma celda
+                    //     congelada: al recuperar copia tambien el CrustType, asi que la
+                    //     franja conservaba su corteza continental mientras el entorno se
+                    //     renovaba a oceano.
+                    //
+                    // Salian alineados con los ejes porque los candidatos son {+-1,0} y
+                    // {0,+-1}: la rejilla, no la tectonica.
+                    //
+                    // Ahora se elige por DISTANCIA. El retrotrazado cae en un punto
+                    // continuo (CellX, CellY) y el material de ese punto pertenece a quien
+                    // de verdad lo contiene, asi que entre los candidatos que coinciden se
+                    // toma el mas cercano a esa posicion. Es un criterio geometrico y
+                    // deterministico: no depende de quien estuviera antes, con lo que
+                    // desaparece el punto fijo que congelaba las celdas.
                     int32 RecoveredPlate = INDEX_NONE;
                     int32 RecoveredFace = 0;
                     int32 RecoveredIdx = 0;
-                    const uint8 OwnerBefore = Prev[FaceIdx].PlateIDData[Idx];
+                    float BestDistSq = TNumericLimits<float>::Max();
 
                     for (int32 P = 0; P < NumPlates; ++P)
                     {
                         const FVector PrevDir = InverseRotations[P].RotateVector(Dir);
                         ECSCubeFace PF; float PU, PV;
                         CubeFaceMapping::DirectionToFaceTexUV(PrevDir, PF, PU, PV);
+
                         // Posicion continua en coordenadas de celda, y celda mas cercana.
                         const float CellX = PU * Resolution - 0.5f;
                         const float CellY = PV * Resolution - 0.5f;
@@ -974,8 +1011,7 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
                         // tienen ninguna relacion con el punto. Como el error dependia solo
                         // de la geometria de la arista, fallaba siempre en las mismas
                         // celdas y se veia en pantalla como una franja recta de tierra que
-                        // no cambiaba nunca - una peninsula inmutable con bordes
-                        // escalonados siguiendo la costura.
+                        // no cambiaba nunca.
                         //
                         // Es el mismo error que F0 elimino de todo el proyecto: tratar una
                         // cara como si fuera una imagen aislada.
@@ -993,24 +1029,26 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
                             const int32 CFaceIdx = static_cast<int32>(CF);
                             const int32 CIdx = CY * Resolution + CX;
 
-                            if (Prev[CFaceIdx].PlateIDData[CIdx] == static_cast<uint8>(P))
+                            if (Prev[CFaceIdx].PlateIDData[CIdx] != static_cast<uint8>(P))
                             {
-                                // Se prefiere la placa que ya ocupaba esta celda: el
-                                // material que estaba aqui sigue aqui salvo que otro lo
-                                // desplace, y eso mantiene la continuidad del campo.
-                                if (RecoveredPlate == INDEX_NONE || P == static_cast<int32>(OwnerBefore))
-                                {
-                                    RecoveredPlate = P;
-                                    RecoveredFace = CFaceIdx;
-                                    RecoveredIdx = CIdx;
-                                }
-                                break;
+                                continue;
                             }
-                        }
 
-                        if (RecoveredPlate == static_cast<int32>(OwnerBefore))
-                        {
-                            break;
+                            // Distancia del punto retrotrazado al centro del candidato. Se
+                            // mide en la cara de origen, antes de cruzar: los desfases son
+                            // de una celda, asi que la aproximacion es local y basta para
+                            // ordenar candidatos.
+                            const float DX = CellX - static_cast<float>(NearX + Offsets[C][0]);
+                            const float DY = CellY - static_cast<float>(NearY + Offsets[C][1]);
+                            const float DistSq = DX * DX + DY * DY;
+
+                            if (DistSq < BestDistSq)
+                            {
+                                BestDistSq = DistSq;
+                                RecoveredPlate = P;
+                                RecoveredFace = CFaceIdx;
+                                RecoveredIdx = CIdx;
+                            }
                         }
                     }
 
@@ -1024,6 +1062,7 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
                         Face.CrustThicknessData[Idx] = Prev[RecoveredFace].CrustThicknessData[RecoveredIdx];
                         ++Count.Moved;
                         ++Count.Recovered;
+                        ++Face.RecoveryCountData[Idx];
 
                         // Se recalcula la velocidad igual que en el resto de ramas.
                         const int32 RecOwner = static_cast<int32>(Face.PlateIDData[Idx]);

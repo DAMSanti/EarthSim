@@ -2012,6 +2012,262 @@ bool FSeamArtifactTest::RunTest(const FString& Parameters)
 //
 // Este test reproduce las condiciones reales: resolucion alta y muchas advecciones.
 // ------------------------------------------------------------
+// ------------------------------------------------------------
+// CELDAS QUE NUNCA ADVECTAN (16-08-2026)
+//
+// El usuario reporto dos cosas en pantalla que las metricas existentes NO VEIAN:
+//   - una peninsula parada mientras el resto del continente derivaba,
+//   - "puentes" rectos de tierra entre continentes.
+//
+// Son el mismo fallo. Una celda cuya geometria local hace fallar siempre la busqueda
+// estricta se resuelve por recuperacion en TODAS las advecciones; si ademas la
+// recuperacion la devuelve a su dueno anterior, la celda no se mueve nunca y conserva su
+// corteza continental mientras el entorno se renueva a oceano.
+//
+// POR QUE HACIA FALTA ESTE TEST: el que ya existia mide islas de corteza OCEANICA vieja,
+// asi que una peninsula CONTINENTAL congelada le es invisible por construccion. Paso el
+// fallo entero sin inmutarse (0,433% -> 0,408%). Aqui se mide el MECANISMO, no un sintoma
+// indirecto: cuantas veces cada celda se resolvio por recuperacion.
+//
+// Recuperar de vez en cuando es normal y sano. Recuperar SIEMPRE es la firma del bug.
+// ------------------------------------------------------------
+// ------------------------------------------------------------
+// DONDE ESTAN LAS CELDAS CONGELADAS (16-08-2026)
+//
+// El usuario reporto una peninsula parada mientras el resto del continente derivaba, y
+// "puentes" rectos de tierra entre continentes.
+//
+// PRIMERA HIPOTESIS, FALSIFICADA. Se penso que el culpable era el ritmo de adveccion: se
+// dispara cuando la placa MAS RAPIDA recorre un pixel y todas se advectan con ese dt, asi
+// que una placa lenta se desplazaria menos de medio pixel y, como el retrotrazado parte
+// del centro de la celda (i+0,5), floor(i+0,5-d) seguiria siendo i. Al medir, velocidad y
+// desplazamiento resultaron NO CORRELACIONAR: la placa mas rapida movio su centroide
+// 0,45 grados y una al 39% de esa velocidad movio 17,66. El confusor era el polo de Euler
+// (una placa que rota sobre un polo interior gira sobre si misma sin trasladarse), asi que
+// aquella metrica medida traslacion, no congelacion.
+//
+// HIPOTESIS REFINADA, la que mide este test. El argumento del medio pixel es correcto pero
+// se aplica CELDA A CELDA, no placa a placa. La velocidad local es |omega x r|, que vale
+// CERO en el polo de Euler y crece con la distancia a el. Las celdas cercanas al polo se
+// desplazan menos de medio pixel por adveccion y no se mueven NUNCA, mientras el resto de
+// su propia placa si deriva. Eso es exactamente el sintoma descrito.
+//
+// Prediccion falsable: las celdas que se resuelven por recuperacion en TODAS las
+// advecciones estaran mucho mas cerca del polo de Euler de su placa que una celda tipica.
+// ------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FStuckCellsNearEulerPoleTest,
+    "Simu.Tectonics.StuckCellsNearEulerPole",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FStuckCellsNearEulerPoleTest::RunTest(const FString& Parameters)
+{
+    const int32 Res = 128;
+
+    UCubeSphereGrid* Grid = nullptr;
+    UTectonicPlateSystem* System = nullptr;
+    URasterizedTectonics* Raster = nullptr;
+    if (!TestTrue(TEXT("Fixture montado"), BuildF1Fixture(Res, Res, 8, 31337, Grid, System, Raster)))
+    {
+        return false;
+    }
+
+    FPlateMovementParams Params;
+    Params.DeltaTime = 0.1f;
+    for (int32 i = 0; i < 3000; ++i)
+    {
+        System->Step(Params.DeltaTime);
+        Raster->Step(Params);
+    }
+
+    float MaxSpeed = 0.0f;
+    for (const FTectonicPlate& Plate : System->GetPlates())
+    {
+        MaxSpeed = FMath::Max(MaxSpeed, FMath::Abs(Plate.AngularVelocity));
+    }
+
+    const int32 Advections = Raster->GetAdvectionStats().AdvectionCount;
+    if (!TestTrue(TEXT("Hubo advecciones suficientes"), Advections > 50))
+    {
+        return false;
+    }
+
+    // Angulo hasta el polo de Euler, plegado a [0,90]: el polo y su antipoda son el mismo
+    // eje de rotacion y en ambos la velocidad local es cero.
+    auto AngleToPole = [](const FVector& CellDir, const FVector& Pole)
+    {
+        const float Dot = FMath::Abs(static_cast<float>(FVector::DotProduct(CellDir, Pole.GetSafeNormal())));
+        return FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(Dot, 0.0f, 1.0f)));
+    };
+
+    const int32 StuckThreshold = FMath::CeilToInt(Advections * 0.95f);
+
+    // Se mide POR PLACA. Promediar todas juntas fue el error de la primera version: cada
+    // placa tiene su banda lenta a una distancia distinta de SU polo, y la media global las
+    // borra (64,0 vs 63,2 grados, indistinguibles). Lo que delata el mecanismo es que
+    // dentro de una placa las atascadas ocupen un rango angular ESTRECHO y BAJO: la
+    // velocidad local va como sin(angulo al polo), asi que las celdas mas lentas de cada
+    // placa son las mas cercanas a su propio polo.
+    const int32 NumPlates = System->GetPlates().Num();
+    TArray<float> StuckMin, StuckMax, AllMin, AllMax;
+    TArray<int32> StuckPerPlate;
+    StuckMin.Init(1e9f, NumPlates);  StuckMax.Init(-1e9f, NumPlates);
+    AllMin.Init(1e9f, NumPlates);    AllMax.Init(-1e9f, NumPlates);
+    StuckPerPlate.Init(0, NumPlates);
+
+    int32 StuckCount = 0;
+    int32 StuckBoundary = 0;
+    int32 AllBoundary = 0;
+    int32 AllCells = 0;
+
+    for (int32 F = 0; F < 6; ++F)
+    {
+        const ECSCubeFace Face = static_cast<ECSCubeFace>(F);
+        for (int32 Y = 0; Y < Res; ++Y)
+        {
+            for (int32 X = 0; X < Res; ++X)
+            {
+                const int32 P = Raster->GetPlateIDAt(Face, X, Y);
+                if (!System->GetPlates().IsValidIndex(P)) { continue; }
+
+                const FVector CellDir = CubeFaceMapping::PixelToDirection(Face, X, Y, Res);
+                const float Angle = AngleToPole(CellDir, System->GetPlates()[P].EulerPole);
+
+                ++AllCells;
+                AllMin[P] = FMath::Min(AllMin[P], Angle);
+                AllMax[P] = FMath::Max(AllMax[P], Angle);
+
+                // Frontera: alguna de las 4 vecinas pertenece a otra placa.
+                bool bBoundary = false;
+                const int32 NOff[4][2] = {{-1,0},{1,0},{0,-1},{0,1}};
+                for (int32 N = 0; N < 4 && !bBoundary; ++N)
+                {
+                    const int32 NX = X + NOff[N][0];
+                    const int32 NY = Y + NOff[N][1];
+                    if (NX < 0 || NY < 0 || NX >= Res || NY >= Res) { continue; }
+                    bBoundary = (Raster->GetPlateIDAt(Face, NX, NY) != P);
+                }
+                if (bBoundary) { ++AllBoundary; }
+
+                if (Raster->GetRecoveryCountAt(Face, X, Y) >= StuckThreshold)
+                {
+                    ++StuckCount;
+                    ++StuckPerPlate[P];
+                    if (bBoundary) { ++StuckBoundary; }
+                    StuckMin[P] = FMath::Min(StuckMin[P], Angle);
+                    StuckMax[P] = FMath::Max(StuckMax[P], Angle);
+                }
+            }
+        }
+    }
+
+    for (int32 P = 0; P < NumPlates; ++P)
+    {
+        if (StuckPerPlate[P] == 0) { continue; }
+
+        // Desplazamiento, en pixeles por adveccion, de la celda mas lenta atascada. Si la
+        // hipotesis es correcta tiene que salir por debajo de 0,5: el retrotrazado parte
+        // del centro de la celda (i+0,5) y por debajo de medio pixel floor() devuelve la
+        // misma celda, asi que la celda se reclama a si misma para siempre.
+        const float Speed = FMath::Abs(System->GetPlates()[P].AngularVelocity);
+        const float SlowestSin = FMath::Sin(FMath::DegreesToRadians(StuckMin[P]));
+        const float PixelsPerAdvection = (MaxSpeed > 0.0f) ? (Speed * SlowestSin / MaxSpeed) : 0.0f;
+
+        UE_LOG(LogTemp, Log,
+            TEXT("  placa %d: %d atascadas en %.1f-%.1f grados del polo (la placa ocupa %.1f-%.1f) | la mas lenta se desplaza %.2f px/adveccion"),
+            P, StuckPerPlate[P], StuckMin[P], StuckMax[P], AllMin[P], AllMax[P], PixelsPerAdvection);
+    }
+
+    const float StuckBoundaryFrac = (StuckCount > 0) ? static_cast<float>(StuckBoundary) / StuckCount : 0.0f;
+    const float AllBoundaryFrac = (AllCells > 0) ? static_cast<float>(AllBoundary) / AllCells : 0.0f;
+    UE_LOG(LogTemp, Log,
+        TEXT("Atascadas totales: %d | en frontera de placa: %.1f%% de las atascadas vs %.1f%% del planeta"),
+        StuckCount, StuckBoundaryFrac * 100.0f, AllBoundaryFrac * 100.0f);
+    AddInfo(FString::Printf(TEXT("atascadas %d"), StuckCount));
+
+    // Este test esta para MEDIR la hipotesis, no para dar por buena la implementacion
+    // actual: mientras haya celdas atascadas seguira rojo. Si la prediccion falla (angulo
+    // medio parecido al general), la causa es otra y hay que volver a buscarla.
+    TestTrue(FString::Printf(TEXT("No quedan celdas permanentemente atascadas (%d)"), StuckCount),
+        StuckCount == 0);
+
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FNoPermanentlyStuckCellsTest,
+    "Simu.Tectonics.NoPermanentlyStuckCells",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FNoPermanentlyStuckCellsTest::RunTest(const FString& Parameters)
+{
+    const int32 Res = 128;
+
+    UCubeSphereGrid* Grid = nullptr;
+    UTectonicPlateSystem* System = nullptr;
+    URasterizedTectonics* Raster = nullptr;
+    if (!TestTrue(TEXT("Fixture montado"), BuildF1Fixture(Res, Res, 8, 31337, Grid, System, Raster)))
+    {
+        return false;
+    }
+
+    FPlateMovementParams Params;
+    Params.DeltaTime = 0.1f;
+
+    const int32 NumSteps = 3000;
+    for (int32 i = 0; i < NumSteps; ++i)
+    {
+        System->Step(Params.DeltaTime);
+        Raster->Step(Params);
+    }
+
+    const int32 Advections = Raster->GetAdvectionStats().AdvectionCount;
+    if (!TestTrue(TEXT("Hubo advecciones (si no, este test no prueba nada)"), Advections > 20))
+    {
+        return false;
+    }
+
+    // Umbral deliberadamente alto: no se persigue "recupera mucho" sino "no advecta
+    // JAMAS". Con el 80% de las advecciones resueltas por recuperacion, una celda ha
+    // dejado de participar en la tectonica.
+    const int32 StuckThreshold = FMath::CeilToInt(Advections * 0.8f);
+
+    int32 StuckCells = 0;
+    int32 MaxCount = 0;
+    int32 TotalCells = 0;
+
+    for (int32 F = 0; F < 6; ++F)
+    {
+        const ECSCubeFace Face = static_cast<ECSCubeFace>(F);
+        for (int32 Y = 0; Y < Res; ++Y)
+        {
+            for (int32 X = 0; X < Res; ++X)
+            {
+                const int32 C = Raster->GetRecoveryCountAt(Face, X, Y);
+                MaxCount = FMath::Max(MaxCount, C);
+                ++TotalCells;
+                if (C >= StuckThreshold)
+                {
+                    ++StuckCells;
+                }
+            }
+        }
+    }
+
+    const float StuckFrac = static_cast<float>(StuckCells) / static_cast<float>(TotalCells);
+
+    UE_LOG(LogTemp, Log,
+        TEXT("Atascadas: %d advecciones | umbral %d | %d celdas atascadas de %d (%.4f%%) | maximo %d recuperaciones"),
+        Advections, StuckThreshold, StuckCells, TotalCells, StuckFrac * 100.0f, MaxCount);
+    AddInfo(FString::Printf(TEXT("atascadas %.4f%%, maximo %d de %d advecciones"),
+        StuckFrac * 100.0f, MaxCount, Advections));
+
+    TestTrue(FString::Printf(
+        TEXT("Ninguna celda queda fuera de la tectonica (%d atascadas, %.4f%%)"),
+        StuckCells, StuckFrac * 100.0f),
+        StuckFrac < 0.0005f);
+
+    return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FFrozenCellsAtProductionResTest,
     "Simu.Tectonics.FrozenCellsAtProductionRes",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
