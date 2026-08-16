@@ -904,6 +904,18 @@ public:
     UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics|Debug")
     bool IsDebugFakeRotationOnly() const { return bDebugFakeRotationOnly; }
 
+    /**
+     * DIAGNOSTICO: angulo acumulado (grados) de la placa 0 en este modo. Para saber si
+     * "no se mueve nada" es porque la rotacion no se acumula, o porque se acumula pero la
+     * resolucion no lo refleja -son bugs muy distintos y esto los separa sin adivinar.
+     */
+    UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics|Debug")
+    float GetDebugAccumAngleDegrees(int32 PlateIdx = 0) const
+    {
+        if (!DebugAccumRotation.IsValidIndex(PlateIdx)) { return 0.0f; }
+        return FMath::RadiansToDegrees(DebugAccumRotation[PlateIdx].GetAngle());
+    }
+
 private:
     bool bDebugFakeRotationOnly = false;
 

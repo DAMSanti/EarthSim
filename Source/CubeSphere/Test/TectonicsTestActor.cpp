@@ -1318,7 +1318,8 @@ void ATectonicsTestActor::DrawScreenDebugInfo()
     if (RasterizedTectonics && RasterizedTectonics->IsDebugFakeRotationOnly())
     {
         GEngine->AddOnScreenDebugMessage(4, 0.0f, FColor::Magenta,
-            TEXT("=== MODO DEPURACION (T): solo rotacion geometrica, sin fisica ==="));
+            FString::Printf(TEXT("=== MODO DEPURACION (T): angulo acumulado placa 0 = %.4f grados ==="),
+                RasterizedTectonics->GetDebugAccumAngleDegrees(0)));
     }
 
     // Info básica en pantalla
