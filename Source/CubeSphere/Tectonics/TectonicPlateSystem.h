@@ -149,6 +149,22 @@ public:
      */
     void SetTotalSimulationTime(float InTime) { TotalSimulationTime = InTime; }
 
+    /**
+     * F1E (17-08-2026): nacimiento por fragmentacion -una placa existente queda partida
+     * en componentes conexas disjuntas (otra placa avanzo por en medio) y cada trozo
+     * aparte se convierte en placa propia, con su propia cinematica desde entonces.
+     * RestorePlateState() no sirve para esto: solo sobreescribe indices que YA existen,
+     * nunca crece el array.
+     *
+     * @return El indice (PlateID) que ocupa la placa nueva.
+     */
+    int32 AddPlate(const FTectonicPlate& NewPlate)
+    {
+        const int32 NewIndex = Plates.Num();
+        Plates.Add(NewPlate);
+        return NewIndex;
+    }
+
     // --- Debug y visualización ---
 
     /**

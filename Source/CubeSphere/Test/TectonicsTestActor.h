@@ -370,6 +370,25 @@ protected:
     /** Actualizar colores de la malla según placas */
     void UpdateMeshColors();
 
+    /**
+     * Posicion y color de las 4 esquinas de la celda (X,Y) de Face -mismo orden que usan
+     * CreatePlanetMesh()/UpdateMeshColors(): 0=(X,Y) 1=(X+1,Y) 2=(X,Y+1) 3=(X+1,Y+1).
+     *
+     * Estas dos funciones ya NO comparten vertices entre celdas vecinas (17-08-2026): antes
+     * la rejilla de (Resolution+1)^2 vertices compartidos hacia que el rasterizador
+     * interpolara el color entre placas distintas a lo largo de cualquier frontera -un
+     * degradado que no existe en el dato categorico de origen (mezclar el ID 2 con el 4 no
+     * da "la placa 3"). Con vertices propios por celda, un campo categorico puede pintar
+     * los 4 iguales -bCategoricalColor, muestreado una vez en el CENTRO de la celda para no
+     * depender de que celda vecina "gana" una esquina compartida geometricamente- y queda
+     * plano de verdad. Un campo continuo sigue muestreando cada esquina por su cuenta -la
+     * costura entre celdas vecinas sigue siendo invisible porque ambas evaluan la misma
+     * formula en la misma posicion del mundo-. La posicion (y por tanto la elevacion del
+     * terreno) se muestrea siempre por esquina, categorico o no: solo el color se aplana.
+     */
+    void SampleMeshCell(ECSCubeFace Face, int32 X, int32 Y, int32 Resolution, float Radius,
+                         bool bCategoricalColor, FVector OutPosition[4], FLinearColor OutColor[4]) const;
+
     /** Dibujar debug de velocidades */
     void DrawVelocityDebug();
 
@@ -378,6 +397,27 @@ protected:
 
     /** Dibujar info en pantalla */
     void DrawScreenDebugInfo();
+
+public:
+    // ============================================================
+    // TEXTO DEL HUD, SEPARADO POR ZONA (17-08-2026)
+    //
+    // ASimuHUD (modulo Simu) dibuja estos tres bloques posicionados -depuracion arriba
+    // izquierda, teclas arriba derecha, coste una sola linea abajo centrada-. No se puede
+    // hacer al reves (que este actor dibuje directamente en el Canvas de la HUD) porque
+    // CubeSphere no depende de Simu; en cambio Simu SI depende de CubeSphere, asi que
+    // ASimuHUD busca este actor y lee estos getters. AddOnScreenDebugMessage no sirve para
+    // esto: solo apila arriba a la izquierda, sin control de posicion.
+    // ============================================================
+    const FString& GetHUDDebugText() const { return HUDDebugText; }
+    const FString& GetHUDKeyLegendText() const { return HUDKeyLegendText; }
+    const FString& GetHUDCostText() const { return HUDCostText; }
+
+private:
+    FString HUDDebugText;
+    FString HUDKeyLegendText;
+    FString HUDCostText;
+    FString BoundaryLimitsText;
 
     /** Manejar input */
     void HandleInput();
@@ -435,6 +475,14 @@ protected:
     /** Grosor de corteza en km y altura sobre el nivel del mar actual, para el visor. */
     TArray<float> CrustThicknessFieldCache[6];
     TArray<float> AboveSeaLevelFieldCache[6];
+
+    /**
+     * DIAGNOSTICO (16-08-2026): cuantas veces cada celda ha tenido que recuperarse por
+     * tolerancia de media celda -RecoveryCountData en espejo float. Es la prueba directa
+     * de si una celda esta cronicamente atascada (valor alto y persistente) o si fue un
+     * fallo aislado de una adveccion concreta (valor bajo). Ver ANEXO.md sobre "la cinta".
+     */
+    TArray<float> RecoveryCountFieldCache[6];
 
     /** Actualizar rotación del sol */
     void UpdateSunOrbit(float DeltaTime);

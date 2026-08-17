@@ -365,7 +365,14 @@ void ATectonicsTestActor::StepSimulation(float DeltaTime)
         // solo si el visor esta mostrando uno de esos dos campos, para no pagar el
         // recorrido cuando no se esta mirando.
         const int32 AdvectionCount = RasterizedTectonics->GetAdvectionStats().AdvectionCount;
-        bool bNeedsRefresh = (AdvectionCount != LastSeenAdvectionCount);
+
+        // El modo depuracion (T) devuelve antes de tocar AdvectionCount -no pasa por
+        // AdvectPlateField-, asi que esa condicion nunca dispara aqui y el visor se
+        // quedaria congelado en el reparto inicial aunque PlateIDData si este cambiando.
+        // Al ser una prueba de geometria pura (sin fisica real detras) no hay coste que
+        // cuidar: se refresca en cada paso mientras el modo este activo.
+        bool bNeedsRefresh = (AdvectionCount != LastSeenAdvectionCount)
+                           || RasterizedTectonics->IsDebugFakeRotationOnly();
 
         if (!bNeedsRefresh && FieldRegistry)
         {
@@ -417,7 +424,7 @@ FString ATectonicsTestActor::GetPlateInfo(int32 PlateIndex) const
 
     FTectonicPlate Plate = PlateSystem->GetPlate(PlateIndex);
 
-    return FString::Printf(
+    FString Info = FString::Printf(
         TEXT("Placa %d:\n")
         TEXT("  Tipo: %s\n")
         TEXT("  Celdas: %d\n")
@@ -426,7 +433,7 @@ FString ATectonicsTestActor::GetPlateInfo(int32 PlateIndex) const
         TEXT("  Densidad: %.0f kg/m³\n")
         TEXT("  Espesor: %.1f km"),
         PlateIndex,
-        Plate.CrustType == ECrustType::Continental ? TEXT("Continental") : 
+        Plate.CrustType == ECrustType::Continental ? TEXT("Continental") :
             (Plate.CrustType == ECrustType::Oceanic ? TEXT("Oceánica") : TEXT("Transicional")),
         Plate.CellCount,
         Plate.AngularVelocity,
@@ -434,6 +441,30 @@ FString ATectonicsTestActor::GetPlateInfo(int32 PlateIndex) const
         Plate.Density,
         Plate.Thickness
     );
+
+    // F1F Fase A (17-08-2026): solo diagnostico, no mueve nada -ver ANEXO.md. Par de
+    // empuje de dorsal y de tiron de losa de esta placa, sin calibrar en escala absoluta
+    // todavia: lo que se comprueba aqui es la PROPORCION entre placas (Forsyth & Uyeda
+    // 1975 - las que tienen mas margen convergente deben salir con mas tiron de losa).
+    if (RasterizedTectonics)
+    {
+        TArray<FVector> RidgePush, SlabPull;
+        TArray<int32> ConvTouching, ConvSubducting;
+        RasterizedTectonics->ComputePlateDrivingTorques(RidgePush, SlabPull, ConvTouching, ConvSubducting);
+        if (RidgePush.IsValidIndex(PlateIndex) && SlabPull.IsValidIndex(PlateIndex))
+        {
+            Info += FString::Printf(
+                TEXT("\n  F1F empuje dorsal: %.3e (eje %s)\n")
+                TEXT("  F1F tiron de losa: %.3e (eje %s)\n")
+                TEXT("  F1F convergentes: %d tocan, %d subduce esta placa"),
+                RidgePush[PlateIndex].Size(), *RidgePush[PlateIndex].GetSafeNormal().ToCompactString(),
+                SlabPull[PlateIndex].Size(), *SlabPull[PlateIndex].GetSafeNormal().ToCompactString(),
+                ConvTouching[PlateIndex], ConvSubducting[PlateIndex]
+            );
+        }
+    }
+
+    return Info;
 }
 
 FString ATectonicsTestActor::GetGlobalStats() const
@@ -634,94 +665,61 @@ void ATectonicsTestActor::CreatePlanetMesh()
     const int32 Resolution = GridResolution;
     const float Radius = VisualRadius;
 
-    // Generar vértices para cada cara del cubo usando proyección directa
+    bool bCategoricalColor = true;
+    if (FieldRegistry && FieldRegistry->GetActiveField())
+    {
+        bCategoricalColor = (FieldRegistry->GetActiveField()->Palette == EPlanetFieldPalette::Categorical);
+    }
+
+    // ============================================================
+    // VERTICES PROPIOS POR CELDA, SIN COMPARTIR CON LA VECINA (17-08-2026)
+    //
+    // Antes esto era una rejilla de (Resolution+1)^2 vertices COMPARTIDOS entre hasta 4
+    // celdas, con un solo color cada uno. El rasterizador interpola ese color entre los 3
+    // vertices de cada triangulo de todas formas -asi que en cualquier frontera de placa,
+    // un triangulo con una esquina en la placa 2 y otra en la placa 4 pintaba un degradado
+    // suave entre medias, con un tono intermedio que no representa ninguna placa real.
+    // Reportado por el usuario viendo el campo "ID de placa" en el visor.
+    //
+    // Arreglo: cada celda tiene sus 4 vertices propios. Ver SampleMeshCell() para el porque
+    // eso basta para que un campo categorico salga plano sin perder el aspecto suave de los
+    // campos continuos (elevacion, temperatura...).
+    // ============================================================
     for (int32 Face = 0; Face < 6; ++Face)
     {
-        const int32 BaseVertex = MeshVertices.Num();
         ECSCubeFace CubeFace = static_cast<ECSCubeFace>(Face);
 
-        // Generar vértices de esta cara
-        for (int32 Y = 0; Y <= Resolution; ++Y)
-        {
-            for (int32 X = 0; X <= Resolution; ++X)
-            {
-                // Coordenadas UV normalizadas [-1, 1]
-                float U = (static_cast<float>(X) / Resolution) * 2.0f - 1.0f;
-                float V = (static_cast<float>(Y) / Resolution) * 2.0f - 1.0f;
-
-                // Proyección del cubo a esfera (DEBE coincidir exactamente con RasterizedTectonics)
-                FVector CubePos = CubeFaceMapping::FaceUVToCubePoint(CubeFace, U, V);
-                
-                // Normalizar para proyectar a esfera
-                FVector Normal = CubePos.GetSafeNormal();
-                
-                // Obtener elevación si está disponible
-                float Elevation = 0.0f;
-                if (bShowElevation && RasterizedTectonics && RasterizedTectonics->IsInitialized())
-                {
-                    // Para garantizar continuidad en los bordes, usar la cara dominante
-                    // basada en la posición esférica, no la cara actual del loop
-                    // Conversión unificada, ver CubeFaceMapping.h (ROADMAP.md F0).
-                    ECSCubeFace DominantFace;
-                    float TexU, TexV;
-                    CubeFaceMapping::DirectionToFaceTexUV(Normal, DominantFace, TexU, TexV);
-                    Elevation = RasterizedTectonics->GetElevationBilinear(DominantFace, TexU, TexV);
-                }
-                
-                // Elevación en metros reales -> cm (unidades de Unreal), con exageración
-                // directa. Independiente del radio del planeta (antes escalaba con
-                // Radius, lo que rompía la exageración al usar el radio real de la Tierra).
-                float ElevationOffset = Elevation * 100.0f * ElevationScale;
-                FVector Position = Normal * (Radius + ElevationOffset);
-
-                MeshVertices.Add(Position);
-                MeshNormals.Add(FVector::ZeroVector);  // Se calculará después
-                MeshUVs.Add(FVector2D((U + 1.0f) * 0.5f, (V + 1.0f) * 0.5f));
-
-                // Color basado en placa - usar coordenadas de celda válidas
-                int32 CellX = FMath::Clamp(X, 0, Resolution - 1);
-                int32 CellY = FMath::Clamp(Y, 0, Resolution - 1);
-                int32 PlateID = PlateSystem->GetPlateIDAt(CubeFace, CellX, CellY);
-                FLinearColor Color = GetPlateColor(PlateID);
-                MeshColors.Add(Color.ToFColor(true));
-            }
-        }
-
-        // Generar triángulos de esta cara.
-        //
-        // ANTES habia aqui un bFlipWinding para PositiveZ y NegativeZ. Existia como
-        // parche del bug de F0: el convenio de caras antiguo era LEVOGIRO justo en esas
-        // dos (AxisU x AxisV = -Normal), asi que sus triangulos salian mirando hacia
-        // dentro y habia que invertirlos para compensar.
-        //
-        // Al unificar el convenio en CubeFaceMapping.h las 6 caras pasaron a ser
-        // dextrogiras (invariante que verifica Simu.CubeSphere.FaceMappingHandedness),
-        // asi que el parche dejo de compensar nada y paso a romper: las dos caras
-        // polares quedaron generadas al reves, con las normales hacia dentro. El
-        // sintoma eran muescas en forma de V en la silueta del planeta (donde una cara
-        // invertida se junta con una correcta) y un reborde extrano en el limbo
-        // inferior, ademas de que segun el angulo desaparecia media esfera - se estaba
-        // viendo el interior de la cascara por culling de caras traseras.
-        //
-        // Con un convenio dextrogiro uniforme el winding correcto es el mismo en las 6
-        // caras y no hay nada que invertir.
-        
         for (int32 Y = 0; Y < Resolution; ++Y)
         {
             for (int32 X = 0; X < Resolution; ++X)
             {
-                int32 V0 = BaseVertex + Y * (Resolution + 1) + X;
-                int32 V1 = V0 + 1;
-                int32 V2 = V0 + (Resolution + 1);
-                int32 V3 = V2 + 1;
+                FVector CellPos[4];
+                FLinearColor CellColor[4];
+                SampleMeshCell(CubeFace, X, Y, Resolution, Radius, bCategoricalColor, CellPos, CellColor);
 
-                MeshTriangles.Add(V0);
-                MeshTriangles.Add(V2);
-                MeshTriangles.Add(V1);
+                const int32 BaseVertex = MeshVertices.Num();
+                for (int32 C = 0; C < 4; ++C)
+                {
+                    MeshVertices.Add(CellPos[C]);
+                    MeshNormals.Add(FVector::ZeroVector);  // Se calculará después
+                    MeshColors.Add(CellColor[C].ToFColor(true));
+                }
 
-                MeshTriangles.Add(V1);
-                MeshTriangles.Add(V2);
-                MeshTriangles.Add(V3);
+                MeshUVs.Add(FVector2D(static_cast<float>(X) / Resolution, static_cast<float>(Y) / Resolution));
+                MeshUVs.Add(FVector2D(static_cast<float>(X + 1) / Resolution, static_cast<float>(Y) / Resolution));
+                MeshUVs.Add(FVector2D(static_cast<float>(X) / Resolution, static_cast<float>(Y + 1) / Resolution));
+                MeshUVs.Add(FVector2D(static_cast<float>(X + 1) / Resolution, static_cast<float>(Y + 1) / Resolution));
+
+                // Winding dextrogiro uniforme en las 6 caras (ver CubeFaceMapping.h,
+                // ROADMAP.md F0) -mismo orden V0,V2,V1 / V1,V2,V3 que tenia la rejilla
+                // compartida, ahora sobre los 4 vertices propios de esta celda.
+                MeshTriangles.Add(BaseVertex + 0);
+                MeshTriangles.Add(BaseVertex + 2);
+                MeshTriangles.Add(BaseVertex + 1);
+
+                MeshTriangles.Add(BaseVertex + 1);
+                MeshTriangles.Add(BaseVertex + 2);
+                MeshTriangles.Add(BaseVertex + 3);
             }
         }
     }
@@ -806,98 +804,47 @@ void ATectonicsTestActor::UpdateMeshColors()
 
     const int32 Resolution = GridResolution;
     const float Radius = VisualRadius;
+
+    bool bCategoricalColor = true;
+    if (FieldRegistry && FieldRegistry->GetActiveField())
+    {
+        bCategoricalColor = (FieldRegistry->GetActiveField()->Palette == EPlanetFieldPalette::Categorical);
+    }
+
+    // Mismo orden de celdas que CreatePlanetMesh() -4 vertices propios por celda, ver
+    // SampleMeshCell()-, asi que VertexIndex avanza en pasos de 4 y cae siempre en el
+    // primer vertice de la celda que le toca.
     int32 VertexIndex = 0;
 
     for (int32 Face = 0; Face < 6; ++Face)
     {
         ECSCubeFace CubeFace = static_cast<ECSCubeFace>(Face);
 
-        for (int32 Y = 0; Y <= Resolution; ++Y)
+        for (int32 Y = 0; Y < Resolution; ++Y)
         {
-            for (int32 X = 0; X <= Resolution; ++X)
+            for (int32 X = 0; X < Resolution; ++X)
             {
-                if (VertexIndex >= MeshColors.Num())
+                if (VertexIndex + 4 > MeshVertices.Num())
                 {
                     break;
                 }
 
-                int32 CellX = FMath::Min(X, Resolution - 1);
-                int32 CellY = FMath::Min(Y, Resolution - 1);
+                FVector CellPos[4];
+                FLinearColor CellColor[4];
+                SampleMeshCell(CubeFace, X, Y, Resolution, Radius, bCategoricalColor, CellPos, CellColor);
 
-                int32 PlateID = 0;
-                float Elevation = 0.0f;
-
-                // Declaradas fuera del if: el coloreado por campo de mas abajo las usa
-                ECSCubeFace DominantFace = CubeFace;
-                float TexU = 0.0f;
-                float TexV = 0.0f;
-
-                // Calcular posición esférica para este vértice
-                float U = (static_cast<float>(X) / Resolution) * 2.0f - 1.0f;
-                float V = (static_cast<float>(Y) / Resolution) * 2.0f - 1.0f;
-                
-                FVector CubePos = CubeFaceMapping::FaceUVToCubePoint(CubeFace, U, V);
-                FVector Normal = CubePos.GetSafeNormal();
-
-                if (RasterizedTectonics && RasterizedTectonics->IsInitialized())
+                for (int32 C = 0; C < 4; ++C)
                 {
-                    // Conversion unificada (CubeFaceMapping.h). Este bloque y el switch
-                    // directo de arriba se quedaron sin migrar en la primera pasada de F0
-                    // porque su texto no coincidia exactamente con el de las otras copias
-                    // - justo la razon por la que el mapeo no debe estar duplicado.
-                    CubeFaceMapping::DirectionToFaceTexUV(Normal, DominantFace, TexU, TexV);
-
-                    const int32 TexX = FMath::Clamp(FMath::FloorToInt(TexU * RasterResolution), 0, RasterResolution - 1);
-                    const int32 TexY = FMath::Clamp(FMath::FloorToInt(TexV * RasterResolution), 0, RasterResolution - 1);
-                    PlateID = RasterizedTectonics->GetPlateIDAt(DominantFace, TexX, TexY);
-
-                    Elevation = RasterizedTectonics->GetElevationBilinear(DominantFace, TexU, TexV);
-                }
-                else if (PlateSystem)
-                {
-                    PlateID = PlateSystem->GetPlateIDAt(CubeFace, CellX, CellY);
-                }
-
-                // Actualizar posición del vértice con la elevación
-                if (bShowElevation && VertexIndex < MeshVertices.Num())
-                {
-                    // Ver comentario equivalente en CreatePlanetMesh(): metros reales -> cm,
-                    // exageración directa, independiente del radio del planeta.
-                    float ElevationOffset = Elevation * 100.0f * ElevationScale;
-                    MeshVertices[VertexIndex] = Normal * (Radius + ElevationOffset);
-                }
-
-                // Color desde el campo de diagnóstico activo (ROADMAP.md F0.5). Antes esto
-                // era fijo: color de placa modulado por elevación. Ahora cualquier campo
-                // registrado se pinta aquí sin tocar este código.
-                FLinearColor Color;
-                float FieldValue = 0.0f;
-                if (FieldRegistry && FieldRegistry->GetActiveField() &&
-                    FieldRegistry->SampleActiveBilinear(DominantFace, TexU, TexV, FieldValue))
-                {
-                    Color = FieldRegistry->ColorForValue(FieldValue);
-                }
-                else
-                {
-                    // Sin campo disponible: se cae al coloreado por placa de siempre
-                    Color = GetPlateColor(PlateID);
-                }
-
-                // Resaltar placa seleccionada
-                if (HighlightedPlate >= 0)
-                {
-                    if (PlateID == HighlightedPlate)
+                    // Ver comentario equivalente en CreatePlanetMesh(): solo se toca la
+                    // posición si hay elevación activa, igual que antes.
+                    if (bShowElevation)
                     {
-                        Color = FLinearColor::White;
+                        MeshVertices[VertexIndex + C] = CellPos[C];
                     }
-                    else
-                    {
-                        Color *= 0.3f;
-                    }
+                    MeshColors[VertexIndex + C] = CellColor[C].ToFColor(true);
                 }
 
-                MeshColors[VertexIndex] = Color.ToFColor(true);
-                VertexIndex++;
+                VertexIndex += 4;
             }
         }
     }
@@ -922,6 +869,96 @@ void ATectonicsTestActor::UpdateMeshColors()
             MeshColors,
             TArray<FProcMeshTangent>()
         );
+    }
+}
+
+void ATectonicsTestActor::SampleMeshCell(ECSCubeFace CubeFace, int32 X, int32 Y, int32 Resolution,
+                                          float Radius, bool bCategoricalColor,
+                                          FVector OutPosition[4], FLinearColor OutColor[4]) const
+{
+    // Orden de esquinas: 0=(X,Y) 1=(X+1,Y) 2=(X,Y+1) 3=(X+1,Y+1) -coincide con el orden de
+    // triangulos V0,V2,V1 / V1,V2,V3 que arman CreatePlanetMesh()/UpdateMeshColors().
+    const int32 CornerGX[4] = { X, X + 1, X, X + 1 };
+    const int32 CornerGY[4] = { Y, Y, Y + 1, Y + 1 };
+
+    // Centro de la celda: el unico punto de muestreo si el color es categorico, para no
+    // depender de que celda vecina "gana" una esquina que geometricamente comparten.
+    const float CenterU = ((static_cast<float>(X) + 0.5f) / Resolution) * 2.0f - 1.0f;
+    const float CenterV = ((static_cast<float>(Y) + 0.5f) / Resolution) * 2.0f - 1.0f;
+
+    for (int32 C = 0; C < 4; ++C)
+    {
+        const float CornerU = (static_cast<float>(CornerGX[C]) / Resolution) * 2.0f - 1.0f;
+        const float CornerV = (static_cast<float>(CornerGY[C]) / Resolution) * 2.0f - 1.0f;
+
+        // Proyección del cubo a esfera (DEBE coincidir exactamente con RasterizedTectonics)
+        const FVector CornerCubePos = CubeFaceMapping::FaceUVToCubePoint(CubeFace, CornerU, CornerV);
+        const FVector CornerNormal = CornerCubePos.GetSafeNormal();
+
+        // La posicion -y por tanto la elevacion del terreno- se muestrea SIEMPRE por
+        // esquina, categorico o no: solo el color se aplana, la forma se queda suave.
+        float Elevation = 0.0f;
+        if (bShowElevation && RasterizedTectonics && RasterizedTectonics->IsInitialized())
+        {
+            ECSCubeFace ElevFace; float ElevU, ElevV;
+            CubeFaceMapping::DirectionToFaceTexUV(CornerNormal, ElevFace, ElevU, ElevV);
+            Elevation = RasterizedTectonics->GetElevationBilinear(ElevFace, ElevU, ElevV);
+        }
+
+        // Elevación en metros reales -> cm (unidades de Unreal), con exageración directa.
+        // Independiente del radio del planeta.
+        OutPosition[C] = CornerNormal * (Radius + Elevation * 100.0f * ElevationScale);
+
+        // El color muestrea el centro de la celda si es categorico -las 4 esquinas caen
+        // en el mismo punto del mundo y salen identicas, sin degradado posible- o la
+        // propia esquina si es continuo -la costura con la celda vecina sigue siendo
+        // invisible porque ambas evaluan la misma formula en la misma posicion del mundo-.
+        const FVector ColorNormal = bCategoricalColor
+            ? CubeFaceMapping::FaceUVToCubePoint(CubeFace, CenterU, CenterV).GetSafeNormal()
+            : CornerNormal;
+
+        int32 PlateID = 0;
+        FLinearColor Color = FLinearColor::Black;
+        bool bHaveFieldColor = false;
+
+        if (RasterizedTectonics && RasterizedTectonics->IsInitialized())
+        {
+            // Conversion unificada (CubeFaceMapping.h, ROADMAP.md F0).
+            ECSCubeFace DominantFace; float TexU, TexV;
+            CubeFaceMapping::DirectionToFaceTexUV(ColorNormal, DominantFace, TexU, TexV);
+
+            const int32 TexX = FMath::Clamp(FMath::FloorToInt(TexU * RasterResolution), 0, RasterResolution - 1);
+            const int32 TexY = FMath::Clamp(FMath::FloorToInt(TexV * RasterResolution), 0, RasterResolution - 1);
+            PlateID = RasterizedTectonics->GetPlateIDAt(DominantFace, TexX, TexY);
+
+            float FieldValue = 0.0f;
+            if (FieldRegistry && FieldRegistry->GetActiveField() &&
+                FieldRegistry->SampleActiveBilinear(DominantFace, TexU, TexV, FieldValue))
+            {
+                Color = FieldRegistry->ColorForValue(FieldValue);
+                bHaveFieldColor = true;
+            }
+        }
+        else if (PlateSystem)
+        {
+            const int32 CellX = FMath::Clamp(CornerGX[C], 0, Resolution - 1);
+            const int32 CellY = FMath::Clamp(CornerGY[C], 0, Resolution - 1);
+            PlateID = PlateSystem->GetPlateIDAt(CubeFace, CellX, CellY);
+        }
+
+        if (!bHaveFieldColor)
+        {
+            // Sin campo disponible: se cae al coloreado por placa de siempre.
+            Color = GetPlateColor(PlateID);
+        }
+
+        // Resaltar placa seleccionada.
+        if (HighlightedPlate >= 0)
+        {
+            Color = (PlateID == HighlightedPlate) ? FLinearColor::White : Color * 0.3f;
+        }
+
+        OutColor[C] = Color;
     }
 }
 
@@ -1207,17 +1244,17 @@ void ATectonicsTestActor::RegisterSimulationFields()
         FieldRegistry->RegisterField(Field);
     }
 
-    // --- Recuperaciones por tolerancia -----------------------------------------
-    // DIAGNOSTICO (16-08-2026): cuantas veces cada celda ha caido en el margen ciego del
-    // conteo estricto y ha tenido que recuperarse buscando en el entorno. Un valor alto y
-    // persistente en el mismo sitio es una celda cronicamente atascada, no un fallo
-    // aislado -es la prueba directa de si "la cinta" y las zonas que no avanzan con su
-    // placa son esto. Rango automatico: el valor tipico es 0, y unas pocas celdas
-    // concentran la mayoria de recuperaciones.
+    // --- Celdas congeladas (residuo real) ---------------------------------------
+    // DIAGNOSTICO: cuantas veces cada celda ha caido en el residuo real de
+    // AdvectPlateField -ni reclamante ni con tolerancia, ni rift- y se le ha conservado el
+    // estado anterior. Desde R2.9 Fase 4 (ANEXO.md A14) ya no mide recuperaciones por
+    // tolerancia -ese mecanismo se quito-, sino el trilema documentado, sobre todo en
+    // fronteras transformantes. Un valor alto y persistente en el mismo sitio es una celda
+    // cronicamente congelada. Rango automatico: el valor tipico es 0.
     {
         FPlanetScalarField Field;
         Field.Id = TEXT("RecoveryCount");
-        Field.Label = TEXT("Recuperaciones por tolerancia");
+        Field.Label = TEXT("Celdas congeladas (residuo)");
         Field.Palette = EPlanetFieldPalette::Sequential;
         Field.Resolution = Res;
         Field.bAutoRange = true;
@@ -1292,16 +1329,22 @@ void ATectonicsTestActor::DrawBoundaryDebug()
         }
     }
     
-    GEngine->AddOnScreenDebugMessage(3, 0.0f, FColor::Yellow,
-        FString::Printf(TEXT("Límites: Conv=%d Div=%d Trans=%d"), Convergent, Divergent, Transform));
+    BoundaryLimitsText = FString::Printf(TEXT("Límites: Conv=%d Div=%d Trans=%d"), Convergent, Divergent, Transform);
 }
 
 void ATectonicsTestActor::DrawScreenDebugInfo()
 {
-    if (!GEngine)
-    {
-        return;
-    }
+    // ============================================================
+    // TRES BLOQUES, TRES SITIOS (17-08-2026)
+    //
+    // Antes todo esto eran varios canales de GEngine->AddOnScreenDebugMessage, que solo
+    // sabe apilar arriba a la izquierda -con la pantalla cada vez mas llena, dejo de
+    // leerse. Ahora se rellenan tres miembros (HUDDebugText, HUDKeyLegendText,
+    // HUDCostText) que ASimuHUD::DrawHUD() dibuja posicionados: depuracion arriba
+    // izquierda, teclas arriba derecha, coste una sola linea abajo centrada. Ver el
+    // comentario junto a los getters en el .h para por que lo dibuja la HUD y no este
+    // actor directamente.
+    // ============================================================
 
     // DIAGNOSTICO (16-08-2026): desglose continental sumergido vs emergido, para verificar
     // en vivo si la acrecion de arco fabrica plataforma sumergida (~20 km -> ~-1.660 m por
@@ -1313,34 +1356,28 @@ void ATectonicsTestActor::DrawScreenDebugInfo()
         RasterizedTectonics->GetContinentalBreakdown(SubmergedContinentalFrac, EmergedContinentalFrac, OceanicFrac);
     }
 
-    // Banner persistente del modo depuracion -canal propio (4), para que no dependa del
-    // mensaje de 3 segundos de HandleInput y se vea mientras el modo siga activo.
-    if (RasterizedTectonics && RasterizedTectonics->IsDebugFakeRotationOnly())
+    // DIAGNOSTICO (17-08-2026): ver comentario junto a GetFrozenCellDiagnostics() en
+    // RasterizedTectonics.h -- distingue residuo cronico (acotado) de residuo que se
+    // extiende, sin tocar la logica de resolucion.
+    int32 DistinctFrozenCells = 0, MaxRecoveryCount = 0;
+    if (RasterizedTectonics)
     {
-        GEngine->AddOnScreenDebugMessage(4, 0.0f, FColor::Magenta,
-            FString::Printf(TEXT("=== MODO DEPURACION (T): angulo acumulado placa 0 = %.4f grados ==="),
-                RasterizedTectonics->GetDebugAccumAngleDegrees(0)));
+        RasterizedTectonics->GetFrozenCellDiagnostics(DistinctFrozenCells, MaxRecoveryCount);
     }
 
-    // Info básica en pantalla
-    FString InfoText = FString::Printf(
+    HUDDebugText = FString::Printf(
         TEXT("=== TECTÓNICA ===\n")
         TEXT("Tiempo: %.2f Ma | Pasos: %d\n")
         TEXT("Estado: %s | Escala: %.1fx\n")
         TEXT("Placas: %d | Grid: %d\n")
-        TEXT("\n[SPACE] Pausa | [R] Reiniciar\n")
-        TEXT("[+/-] Velocidad | [1-8] Placa\n")
-        TEXT("[V] Velocidades | [B] Límites | [T] Modo depuracion\n")
         TEXT("DIAG tierra: emergida %.1f%% | continental sumergida %.1f%% | oceanica %.1f%%\n")
         TEXT("R2.12 segmentos: %d activos | edad media %.2f Ma | celdas %d\n")
         TEXT("Corteza: +%d creada / -%d destruida (%d advecciones)\n")
         TEXT("AUDIT reloj: sim %.2f Ma / advectado %.2f Ma (pendiente %.1f%%)\n")
         TEXT("AUDIT tiempo TIRADO: %.2f Ma en %d veces\n")
         TEXT("AUDIT respaldo material: %d de %d (%.2f%%)\n")
+        TEXT("AUDIT huecos: %d recuperados por tolerancia | %d CONGELADOS acumulado (trilema) | %d distintas, max %d fallos | %d ESTA adveccion (%d convergen, %d cerca de cero) | %d resueltas por vecino cercano\n")
         TEXT("Drenaje: %d celdas de cauce | %d lagos\n")
-        TEXT("Coste: sim %.1f ms @%.0f Hz | malla %.1f ms @%.0f Hz\n")
-        TEXT("  adv %.1f (motas %.1f) front %.1f dif %.1f iso %.1f ms\n")
-        TEXT("[F/G] Campo | [U] %s\n")
         TEXT("%s"),
         SimulationTime,
         SimulationSteps,
@@ -1391,29 +1428,103 @@ void ATectonicsTestActor::DrawScreenDebugInfo()
             ? 100.0f * RasterizedTectonics->GetAdvectionStats().MaterialFallbacks
                      / RasterizedTectonics->GetAdvectionStats().MaterialReads
             : 0.0f,
+        // R2.9 FASE 4 (17-08-2026): ya no cuenta recuperaciones por tolerancia -ese
+        // mecanismo se quito, ver ANEXO.md A14- sino el trilema real: ni reclamante, ni
+        // rift. Sobre todo fronteras transformantes.
+        RasterizedTectonics ? RasterizedTectonics->GetAdvectionStats().CellsRecovered : 0,
+        RasterizedTectonics ? RasterizedTectonics->GetAdvectionStats().CellsUnresolved : 0,
+        // DIAGNOSTICO (17-08-2026): CellsUnresolved de arriba es un contador ACUMULADO que
+        // nunca baja -crece aunque el area afectada este parada-. DistinctFrozenCells y
+        // MaxRecoveryCount (calculados arriba) dicen si el residuo es cronico (acotado) o
+        // se esta extendiendo, sin tocar la logica de resolucion.
+        DistinctFrozenCells,
+        MaxRecoveryCount,
+        // DIAGNOSTICO (17-08-2026): las dos anteriores resultaron enganosas -tanto la
+        // acumulada como "distintas" solo pueden crecer, porque cuentan historia (¿ha
+        // fallado esta celda ALGUNA VEZ?), no estado actual, y una frontera que simplemente
+        // se desplaza sobre el planeta barre celdas nuevas sin parar aunque el ritmo real no
+        // empeore. Esta, en cambio, se SOBREESCRIBE cada adveccion -cuantas celdas fallaron
+        // en la MAS RECIENTE, nada mas-, la unica de las tres que puede bajar si el ritmo
+        // real mejora.
+        RasterizedTectonics ? RasterizedTectonics->GetAdvectionStats().LastUnresolvedCells : 0,
+        // DIAGNOSTICO (17-08-2026): desglose para distinguir residuo "convergente sin
+        // reclamar" (posible fallo real de la busqueda) de "cerca de cero" (candidato a
+        // frontera transformante, ya documentada sin modelar en ROADMAP.md F1D).
+        RasterizedTectonics ? RasterizedTectonics->GetAdvectionStats().LastUnresolvedConverging : 0,
+        RasterizedTectonics ? RasterizedTectonics->GetAdvectionStats().LastUnresolvedNearZero : 0,
+        // Arreglo (18-08-2026): costuras transformantes completadas por vecino mas cercano
+        // en vez de quedar en el residuo. Ver FindNearestOwnerWide.
+        RasterizedTectonics ? RasterizedTectonics->GetAdvectionStats().LastResolvedByWideSearch : 0,
         Hydrology ? Hydrology->GetStats().ChannelCells : 0,
         Hydrology ? Hydrology->GetStats().SinkCells : 0,
+        FieldRegistry ? *FieldRegistry->GetLegendText() : TEXT("(sin visor)")
+    );
+
+    // Banner del modo de depuracion, límites (si estan activos) e info de la placa
+    // resaltada: se anexan al mismo bloque en vez de canales aparte.
+    if (RasterizedTectonics && RasterizedTectonics->IsDebugFakeRotationOnly())
+    {
+        HUDDebugText += FString::Printf(
+            TEXT("\n=== MODO DEPURACION CAPA 1 (T): angulo acumulado placa 0 = %.4f grados ==="),
+            RasterizedTectonics->GetDebugAccumAngleDegrees(0));
+    }
+    else if (RasterizedTectonics && RasterizedTectonics->IsDebugAdvectionOnly())
+    {
+        HUDDebugText += TEXT("\n=== MODO DEPURACION CAPA 2a (Y): adveccion real, sin frontera ni isostasia ===");
+    }
+
+    if (RasterizedTectonics && RasterizedTectonics->IsUsingDynamicKinematics())
+    {
+        HUDDebugText += TEXT("\n=== F1F (D): cinematica DINAMICA -balance de pares, no aleatoria fija ===");
+    }
+
+    if (RasterizedTectonics && RasterizedTectonics->IsDebugAssimilationDisabled())
+    {
+        HUDDebugText += TEXT("\n=== F1E (I): asimilacion de islas DESACTIVADA -comparando desgaste de frontera ===");
+    }
+
+    if (bShowPlateBoundaries && !BoundaryLimitsText.IsEmpty())
+    {
+        HUDDebugText += TEXT("\n") + BoundaryLimitsText;
+    }
+
+    if (HighlightedPlate >= 0)
+    {
+        HUDDebugText += TEXT("\n") + GetPlateInfo(HighlightedPlate);
+    }
+
+    HUDKeyLegendText = FString::Printf(
+        TEXT("=== TECLAS ===\n")
+        TEXT("SPACE   Pausa\n")
+        TEXT("R       Reiniciar\n")
+        TEXT("+ / -   Velocidad\n")
+        TEXT("1-8     Placa\n")
+        TEXT("V       Velocidades\n")
+        TEXT("B       Límites\n")
+        TEXT("T       Depuracion capa 1\n")
+        TEXT("Y       Depuracion capa 2a\n")
+        TEXT("D       F1F cinematica dinamica\n")
+        TEXT("I       F1E asimilacion on/off\n")
+        TEXT("F / G   Campo\n")
+        TEXT("U       %s"),
+        bUnlitFieldView ? TEXT("Iluminado") : TEXT("Unlit")
+    );
+
+    HUDCostText = FString::Printf(
+        TEXT("Coste: sim %.1fms@%.0fHz | malla %.1fms@%.0fHz | adv %.1f (motas %.1f) frag %.1f seg %.1f wb %.1f front %.1f dif %.1f iso %.1f ms"),
         AvgSimStepMs,
         SimulationStepsPerSecond,
         AvgMeshUpdateMs,
         MeshUpdateHz,
         RasterizedTectonics ? RasterizedTectonics->GetStepTimings().AdvectionMs : 0.0f,
         RasterizedTectonics ? RasterizedTectonics->GetStepTimings().DespeckleMs : 0.0f,
+        RasterizedTectonics ? RasterizedTectonics->GetStepTimings().FragmentationMs : 0.0f,
+        RasterizedTectonics ? RasterizedTectonics->GetStepTimings().SegmentsMs : 0.0f,
+        RasterizedTectonics ? RasterizedTectonics->GetStepTimings().WriteBackMs : 0.0f,
         RasterizedTectonics ? RasterizedTectonics->GetStepTimings().BoundaryMs : 0.0f,
         RasterizedTectonics ? RasterizedTectonics->GetStepTimings().DiffusionMs : 0.0f,
-        RasterizedTectonics ? RasterizedTectonics->GetStepTimings().IsostasyMs : 0.0f,
-        bUnlitFieldView ? TEXT("unlit") : TEXT("iluminado"),
-        FieldRegistry ? *FieldRegistry->GetLegendText() : TEXT("(sin visor)")
+        RasterizedTectonics ? RasterizedTectonics->GetStepTimings().IsostasyMs : 0.0f
     );
-
-    GEngine->AddOnScreenDebugMessage(1, 0.0f, FColor::White, InfoText);
-
-    // Info de placa resaltada
-    if (HighlightedPlate >= 0)
-    {
-        FString PlateInfo = GetPlateInfo(HighlightedPlate);
-        GEngine->AddOnScreenDebugMessage(2, 0.0f, FColor::Cyan, PlateInfo);
-    }
 }
 
 void ATectonicsTestActor::HandleInput()
@@ -1525,12 +1636,71 @@ void ATectonicsTestActor::HandleInput()
     {
         const bool bNewState = !RasterizedTectonics->IsDebugFakeRotationOnly();
         RasterizedTectonics->SetDebugFakeRotationOnly(bNewState);
+        if (bNewState)
+        {
+            // Las dos capas son mutuamente excluyentes: activar una apaga la otra, para
+            // no tener Step() decidiendo entre ellas por orden de comprobacion.
+            RasterizedTectonics->SetDebugAdvectionOnly(false);
+        }
         if (GEngine)
         {
             GEngine->AddOnScreenDebugMessage(-1, 3.0f, bNewState ? FColor::Magenta : FColor::Green,
                 bNewState
-                    ? TEXT("MODO DEPURACION: solo rotacion geometrica pura (sin vecinos, sin fisica)")
+                    ? TEXT("MODO DEPURACION CAPA 1: solo rotacion geometrica pura (sin vecinos, sin fisica)")
                     : TEXT("Simulacion real reanudada"));
+        }
+    }
+
+    // Y - MODO DEPURACION POR CAPAS: Capa 2a, adveccion real (AdvectPlateField) sin
+    // fisica de frontera ni isostasia. Ver RasterizedTectonics.h.
+    if (PC->WasInputKeyJustPressed(EKeys::Y) && RasterizedTectonics)
+    {
+        const bool bNewState = !RasterizedTectonics->IsDebugAdvectionOnly();
+        RasterizedTectonics->SetDebugAdvectionOnly(bNewState);
+        if (bNewState)
+        {
+            RasterizedTectonics->SetDebugFakeRotationOnly(false);
+        }
+        if (GEngine)
+        {
+            GEngine->AddOnScreenDebugMessage(-1, 3.0f, bNewState ? FColor::Magenta : FColor::Green,
+                bNewState
+                    ? TEXT("MODO DEPURACION CAPA 2a: adveccion real, sin frontera ni isostasia")
+                    : TEXT("Simulacion real reanudada"));
+        }
+    }
+
+    // D - F1F FASE B (17-08-2026): cinematica dinamica, EulerPole/AngularVelocity desde
+    // el balance de pares en vez de la asignacion aleatoria fija de siempre. Interruptor
+    // independiente de T/Y -esto cambia FISICA de placas, no que capa de la advecion
+    // corre, asi que puede combinarse con la simulacion real o con la Capa 2a.
+    if (PC->WasInputKeyJustPressed(EKeys::D) && RasterizedTectonics)
+    {
+        const bool bNewState = !RasterizedTectonics->IsUsingDynamicKinematics();
+        RasterizedTectonics->SetUseDynamicKinematics(bNewState);
+        if (GEngine)
+        {
+            GEngine->AddOnScreenDebugMessage(-1, 3.0f, bNewState ? FColor::Magenta : FColor::Green,
+                bNewState
+                    ? TEXT("F1F: cinematica DINAMICA (balance de pares) activada")
+                    : TEXT("F1F: cinematica fija de siempre restaurada"));
+        }
+    }
+
+    // I - F1E FASE A.1 (17-08-2026): asimilacion de islas huerfanas, SOLO para comparar en
+    // vivo si es la causante del desgaste progresivo de frontera visto en una corrida larga
+    // (segmentos R2.12 de 44 a 107 con las mismas 8 placas -ver ANEXO.md). No toca el resto
+    // de F1E: las fragmentaciones por encima del umbral siguen naciendo como placa nueva.
+    if (PC->WasInputKeyJustPressed(EKeys::I) && RasterizedTectonics)
+    {
+        const bool bNewState = !RasterizedTectonics->IsDebugAssimilationDisabled();
+        RasterizedTectonics->SetDebugDisableAssimilation(bNewState);
+        if (GEngine)
+        {
+            GEngine->AddOnScreenDebugMessage(-1, 3.0f, bNewState ? FColor::Magenta : FColor::Green,
+                bNewState
+                    ? TEXT("F1E: asimilacion de islas DESACTIVADA (comparacion)")
+                    : TEXT("F1E: asimilacion de islas reactivada"));
         }
     }
 

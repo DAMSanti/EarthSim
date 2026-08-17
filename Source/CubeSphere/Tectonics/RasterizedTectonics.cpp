@@ -73,6 +73,7 @@ void URasterizedTectonics::Initialize(UCubeSphereGrid* InGrid, UTectonicPlateSys
     // Cada placa se lleva a su marco propio el material que le toca del estado inicial, y
     // arranca sin rotacion acumulada.
     InitializePlateMaterialFrames();
+    InitializePlateTerritory();
     for (int32 F = 0; F < 6; ++F)
     {
         for (int32 C = 0; C < FaceData[F].RefSourceIdxData.Num(); ++C)
@@ -703,6 +704,29 @@ int32 URasterizedTectonics::GetRecoveryCountAt(ECSCubeFace Face, int32 X, int32 
     return FaceData[FaceIdx].RecoveryCountData[GetLinearIndex(X, Y)];
 }
 
+void URasterizedTectonics::GetFrozenCellDiagnostics(int32& OutDistinctFrozenCells, int32& OutMaxRecoveryCount) const
+{
+    OutDistinctFrozenCells = 0;
+    OutMaxRecoveryCount = 0;
+
+    if (!bIsInitialized)
+    {
+        return;
+    }
+
+    for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
+    {
+        for (const int32 Count : FaceData[FaceIdx].RecoveryCountData)
+        {
+            if (Count > 0)
+            {
+                ++OutDistinctFrozenCells;
+            }
+            OutMaxRecoveryCount = FMath::Max(OutMaxRecoveryCount, Count);
+        }
+    }
+}
+
 float URasterizedTectonics::GetCrustAgeAt(ECSCubeFace Face, int32 X, int32 Y) const
 {
     const int32 FaceIdx = static_cast<int32>(Face);
@@ -759,18 +783,6 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
         return;
     }
 
-    // Rotacion INVERSA de cada placa: lleva un punto de "ahora" al lugar que ocupaba
-    // hace DeltaTime.
-    TArray<FQuat> InverseRotations;
-    InverseRotations.Reserve(NumPlates);
-    for (const FTectonicPlate& Plate : Plates)
-    {
-        InverseRotations.Add(FQuat::Identity);   // se rellena abajo con la acumulada
-    }
-
-    // Copia del estado anterior. Imprescindible: la adveccion lee el pasado mientras
-    // escribe el presente, y sin copia unas celdas verian datos ya sobrescritos y otras
-    // no, segun el orden de recorrido.
     // Velocidad angular tipica, para expresar el umbral de divergencia en unidades
     // fisicas en vez de en un numero magico.
     float MaxAngularSpeed = 0.0f;
@@ -779,185 +791,204 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
         MaxAngularSpeed = FMath::Max(MaxAngularSpeed, FMath::Abs(Plate.AngularVelocity));
     }
 
-    // DOS ROTACIONES DISTINTAS, PORQUE SON DOS PROBLEMAS DISTINTOS (16-08-2026).
+    // ============================================================
+    // R2.9 FASE 4 (17-08-2026): LA PROPIEDAD SE DECIDE CONTRA EL MARCO PROPIO DE LA
+    // PLACA (PlateTerritory), NO CONTRA EL MUNDO DE HACE UN PASO.
     //
-    // La PROPIEDAD usa la rotacion INCREMENTAL de esta adveccion, y se pregunta contra el
-    // mundo de AHORA. El mundo siempre es una particion por construccion - una celda, un
-    // dueno - asi que preguntarle a el mantiene la particion apretada: el borde entre dos
-    // placas se mueve ~1 celda por adveccion y no mas. Deducirla de una foto vieja es lo
-    // que disolvia las placas en ruido.
+    // Motivo, medido en vivo (Capa 2a del modo de depuracion): decidir contra
+    // Prev.PlateIDData con la rotacion incremental de esta adveccion (R2.9 tal como se
+    // escribio el 16-08) es remuestrear un campo categorico contra si mismo cada paso, y
+    // eso pierde el movimiento sub-celda de forma irreversible en cualquier region que se
+    // mueva por debajo de ~1 celda/adveccion (Simu.Tectonics.StuckCellsNearEulerPole).
+    // Peor: si la placa vecina se retira de verdad (divergencia real), el autorreclamo de
+    // la placa lenta -que redondea a su propia celda por fase, no porque haya avanzado- le
+    // gana la carrera a la comprobacion de rift, que solo se dispara con 0 reclamantes. El
+    // resultado no es una celda congelada: es territorio que crece sin limite donde
+    // deberia nacer oceano nuevo.
     //
-    // El MATERIAL usa la rotacion ACUMULADA contra el marco propio de cada placa, y de eso
-    // se encarga ReadPlateMaterial(). Un solo remuestreo por muchas advecciones que pasen,
-    // que es lo que evita que se deshilache.
-    //
-    // Antes las dos salian del mismo sitio con la misma rotacion, y por eso arreglar una
-    // rompia la otra. Ver ROADMAP.md A10.
-    if (PlateAccumRotation.Num() != NumPlates)
+    // PlateTerritory[P] es exactamente lo que ya es PlateMaterial[P] para el material: un
+    // rater en el marco propio de la placa, transportado por rotacion ACUMULADA exacta,
+    // sin ningun error de integracion por pequeno que sea el paso. La diferencia con el
+    // material: el territorio NUNCA se reescribe por completo -eso reintroduciria el mismo
+    // problema disfrazado de "write-back". Se actualiza con escrituras puntuales, solo en
+    // el instante del evento tectonico que cambia la propiedad de una celda (rift o
+    // colision), nunca por remuestreo masivo. Diseno completo en ANEXO.md A14.
+    // ============================================================
+    if (PlateAccumRotation.Num() != NumPlates || PlateTerritory.Num() != NumPlates)
     {
-        PlateAccumRotation.Init(FQuat::Identity, NumPlates);
+        // F1E (ciclo de vida de placas) hace crecer estos arrays el mismo instante en que
+        // nace una placa (HandlePlateFragmentation -> EnsurePlateFrameCapacity), asi que
+        // en marcha normal este bloque no deberia dispararse. Si de todos modos los tamanos
+        // no cuadran, reiniciar el territorio desde el mundo actual es mas seguro que operar
+        // sobre un array del tamano equivocado -aunque eso pierda el historial de rotacion
+        // acumulada de las placas ya existentes, igual que antes de F1E.
+        if (PlateAccumRotation.Num() != NumPlates)
+        {
+            PlateAccumRotation.Init(FQuat::Identity, NumPlates);
+        }
+        InitializePlateTerritory();
     }
+
+    TArray<FQuat> InverseAccum;
+    InverseAccum.SetNum(NumPlates);
     for (int32 P = 0; P < NumPlates; ++P)
     {
         const FQuat StepRotation = UPlateKinematics::CalculatePlateRotation(Plates[P], DeltaTime);
-
-        // Inversa del paso: lleva un punto de "ahora" a donde estaba hace DeltaTime.
-        InverseRotations[P] = StepRotation.Inverse();
-
-        // Y la acumulada avanza, para que el material siga sabiendo llegar a su marco.
         PlateAccumRotation[P] = StepRotation * PlateAccumRotation[P];
+        InverseAccum[P] = PlateAccumRotation[P].Inverse();
     }
 
-    // Copia del mundo anterior. Imprescindible: la adveccion lee el pasado mientras escribe
-    // el presente, y sin copia unas celdas verian datos ya sobrescritos y otras no, segun
-    // el orden de recorrido.
-    //
-    // Sirve para dos cosas: el test de propiedad (quien mandaba aqui hace un paso) y como
-    // RESPALDO de material cuando el marco de la placa no tiene nada guardado en ese punto
-    // - que pasa en el territorio recien ganado, antes de que el write-back lo rellene.
+    // Copia del mundo anterior. Ya no decide propiedad -eso lo hace PlateTerritory-, pero
+    // sigue haciendo falta para el respaldo de material sin remuestrear, y para saber quien
+    // "se veia" como dueno de esta celda el paso anterior (PreviousOwner: a quien se suelda
+    // la corteza nueva de un rift, o a quien se le conserva el estado en el residuo).
     const TArray<FTectonicFaceTextureData> Prev = FaceData;
 
-    // PRIMERA PASADA: solo se cuenta cuantas placas reclaman cada celda.
-    //
-    // Hace falta porque una celda sin reclamantes puede ser dos cosas muy distintas:
-    //   - un RIFT de verdad: las placas se separan y aflora manto. Forma una banda
-    //     continua, asi que sus vecinas tambien estan sin reclamar.
-    //   - un HUECO DE REMUESTREO: la adveccion usa vecino mas cercano (obligatorio, un
-    //     ID de placa no se puede interpolar), y al rotar el campo algunos pixeles origen
-    //     acaban reclamados dos veces y otros ninguna. Son huecos AISLADOS.
-    //
-    // Tratar los dos igual es lo que degeneraba la simulacion a largo plazo: cada hueco
-    // espurio dentro de un continente lo convertia en oceano, y esa conversion es
-    // irreversible. Medido en Simu.Tectonics.LongRunStability: la tierra emergida caia
-    // del 24,6% al 8,9% en 1000 Ma, con los continentes disolviendose desde dentro.
-    // La pasada de conteo y la de resolucion hacian EXACTAMENTE el mismo trabajo caro: una
-    // rotacion de cuaternion y una reproyeccion por placa y por celda, o sea 2 x 6 x Res^2
-    // x NumPlates operaciones para calcular dos veces lo mismo. Ahora la primera guarda lo
-    // que encuentra y la segunda lo reutiliza.
-    //
-    // La gran mayoria de las celdas tienen exactamente un reclamante (estan en el interior
-    // de una placa), asi que basta con cachear ese caso: se guarda la placa y el pixel de
-    // origen. Las celdas con cero o con varios reclamantes son las de frontera, un pequeno
-    // porcentaje, y esas si se recalculan.
-    TArray<TArray<uint8>> ClaimCounts;
-    TArray<TArray<uint8>> CachedPlate;
-    TArray<TArray<uint8>> CachedSourceFace;
-    TArray<TArray<int32>> CachedSourceIdx;
-    ClaimCounts.SetNum(6);
-    CachedPlate.SetNum(6);
-    CachedSourceFace.SetNum(6);
-    CachedSourceIdx.SetNum(6);
-    for (int32 F = 0; F < 6; ++F)
+    // Busqueda tolerante de 4 candidatos, EN EL MARCO DE LA PLACA P -no en el mundo-. Misma
+    // forma que la busqueda de la Fase 3 (R2.9), pero contra PlateTerritory[P] con la
+    // rotacion ACUMULADA de P, no contra Prev.PlateIDData con la rotacion incremental de
+    // este paso. OutFrameIdx es el indice (GetFrameIndex) de la celda del marco que gano,
+    // para poder liberarla si esta celda cambia de dueno.
+    auto TryTerritoryTolerant = [&](int32 P, const FVector& Dir, int32& OutFrameIdx, float& OutDistSq) -> bool
     {
-        ClaimCounts[F].SetNumZeroed(Resolution * Resolution);
-        CachedPlate[F].SetNumZeroed(Resolution * Resolution);
-        CachedSourceFace[F].SetNumZeroed(Resolution * Resolution);
-        CachedSourceIdx[F].SetNumZeroed(Resolution * Resolution);
-    }
+        const FVector FrameDir = InverseAccum[P].RotateVector(Dir);
+        ECSCubeFace PF; float PU, PV;
+        CubeFaceMapping::DirectionToFaceTexUV(FrameDir, PF, PU, PV);
 
+        const float CellX = PU * Resolution - 0.5f;
+        const float CellY = PV * Resolution - 0.5f;
+        const int32 NearX = FMath::Clamp(FMath::RoundToInt(CellX), 0, Resolution - 1);
+        const int32 NearY = FMath::Clamp(FMath::RoundToInt(CellY), 0, Resolution - 1);
+        const int32 DirX = (CellX >= static_cast<float>(NearX)) ? 1 : -1;
+        const int32 DirY = (CellY >= static_cast<float>(NearY)) ? 1 : -1;
+        const int32 Offsets[4][2] = { {0, 0}, {DirX, 0}, {0, DirY}, {DirX, DirY} };
 
-    ParallelFor(6, [&](int32 FaceIdx)
-    {
-        for (int32 Y = 0; Y < Resolution; ++Y)
+        bool bFound = false;
+        OutDistSq = TNumericLimits<float>::Max();
+
+        for (int32 C = 0; C < 4; ++C)
         {
-            for (int32 X = 0; X < Resolution; ++X)
+            ECSCubeFace CF; int32 CX, CY;
+            if (!GetNeighborPixel(PF, NearX, NearY, Offsets[C][0], Offsets[C][1], CF, CX, CY))
             {
-                const FVector Dir = CubeFaceMapping::PixelToDirection(
-                    static_cast<ECSCubeFace>(FaceIdx), X, Y, Resolution);
+                continue;
+            }
+            const int32 CFrameIdx = GetFrameIndex(static_cast<int32>(CF), CX, CY);
+            if (PlateTerritory[P][CFrameIdx] == 0)
+            {
+                continue;
+            }
+            const float DX = CellX - static_cast<float>(NearX + Offsets[C][0]);
+            const float DY = CellY - static_cast<float>(NearY + Offsets[C][1]);
+            const float DistSq = DX * DX + DY * DY;
+            if (DistSq < OutDistSq)
+            {
+                OutDistSq = DistSq;
+                OutFrameIdx = CFrameIdx;
+                bFound = true;
+            }
+        }
+        return bFound;
+    };
 
-                int32 Count = 0;
-                int32 LastPlate = 0;
-                int32 LastSourceFace = 0;
-                int32 LastSourceIdx = 0;
+    // ============================================================
+    // COMPLETAR LA PARTICION EN LA COSTURA TRANSFORMANTE (18-08-2026)
+    //
+    // TryTerritoryTolerant resuelve bien la convergencia/divergencia radial: ahi la
+    // ambiguedad geometrica de que dos territorios independientes no encajen pixel a pixel
+    // no importa, porque hay un suceso fisico real (colision o rift) que decide. Para
+    // deslizamiento TANGENCIAL no hay tal suceso -el comentario de la comprobacion de rift,
+    // unas lineas mas abajo, ya distinguia "transformante, no crea corteza" del rift real-,
+    // pero nunca se le dio una resolucion de verdad: la celda simplemente se quedaba
+    // congelada con el dueño de siempre para siempre, porque cada placa lleva su propio
+    // territorio (marker-in-cell, R2.9 Fase 4) rotado con total independencia de sus
+    // vecinas, y nada en el diseño garantiza que dos territorios vecinos encajen exactos en
+    // la costura -sobre todo cuando el movimiento relativo es lateral, no radial.
+    //
+    // Medido en una corrida de 200+ advecciones (ver ANEXO.md): el 96% del residuo de la
+    // celda sin reclamante-ni-rift tenia divergencia radial practicamente nula -exactamente
+    // el perfil de una frontera transformante-, y los segmentos de R2.12 pasaban de 44 a
+    // 107 con las mismas 8 placas: la costura se iba fragmentando adveccion a adveccion, sin
+    // ningun mecanismo que la recompusiera.
+    //
+    // Solucion, no parche: cuando NINGUNA placa reclama la celda con la busqueda estricta y
+    // no es un rift de verdad, se completa la particion por VECINO MAS CERCANO -una
+    // teselacion de Voronoi discreta, el mismo principio con el que GPlates y el resto del
+    // software de reconstruccion de placas deciden a que placa pertenece un punto cuando no
+    // hay un borde vectorial exacto que lo diga-. Radio de busqueda ampliado a 5x5 celdas en
+    // vez de las 4 candidatas de la busqueda normal: un hueco por deslizamiento tangencial
+    // no puede ser mayor de ~1 celda por el propio diseño de MaxAdvectionDt (la adveccion se
+    // trocea para que la placa mas rapida recorra como mucho ~1 pixel por adveccion), asi que
+    // 5x5 tiene margen de sobra sin alcanzar territorio de una placa no relacionada. No crea
+    // ni destruye corteza -se hereda el material de quien gana, igual que un movimiento
+    // limpio cualquiera-, solo completa la propiedad que la busqueda estricta dejo sin decidir.
+    // ============================================================
+    auto FindNearestOwnerWide = [&](int32 P, const FVector& Dir, int32& OutFrameIdx, float& OutDistSq) -> bool
+    {
+        const FVector FrameDir = InverseAccum[P].RotateVector(Dir);
+        ECSCubeFace PF; float PU, PV;
+        CubeFaceMapping::DirectionToFaceTexUV(FrameDir, PF, PU, PV);
 
-                // ============================================================
-                // R2.9 FASE 2 (16-08-2026): CONTEO CON LA MISMA TOLERANCIA QUE LA
-                // RECUPERACION, NO SOLO COMO SU RESCATE.
-                //
-                // El test estricto (celda redondeada por floor()) tiene un margen ciego de
-                // +-0,5 celda: una celda que es de verdad de la placa P puede caer, al
-                // redondear, fuera de su propia region. Hasta hoy eso se corregia SOLO
-                // cuando el conteo estricto ya habia dado 0 reclamantes (recuperacion por
-                // tolerancia, mas abajo) - un parche sobre el sintoma, no la causa. Es la
-                // semilla documentada del peine (ANEXO.md, escalonado de bordes) y de las
-                // celdas atascadas (NoPermanentlyStuckCells, StuckCellsNearEulerPole).
-                //
-                // Aqui se usa la MISMA busqueda -las cuatro celdas alrededor de la posicion
-                // continua exacta, el alcance justo del redondeo- como test PRINCIPAL para
-                // cada placa, no como rescate. No cambia la estructura de tres ramas (0/1/2+
-                // reclamantes) ni la fisica de ninguna: solo mide mejor si esta celda es de
-                // la placa P. Es deliberadamente MAS ESTRICTO que "cualquiera de las 4":
-                // gana la mas cercana a la posicion continua, igual que la recuperacion,
-                // para no repetir el error medido de la submuestreo por mayoria ("con
-                // mayoria de 4 submuestras dos placas pueden reclamar la misma celda a la
-                // vez, las colisiones se triplicaron").
-                // ============================================================
-                for (int32 P = 0; P < NumPlates; ++P)
+        const float CellX = PU * Resolution - 0.5f;
+        const float CellY = PV * Resolution - 0.5f;
+        const int32 NearX = FMath::Clamp(FMath::RoundToInt(CellX), 0, Resolution - 1);
+        const int32 NearY = FMath::Clamp(FMath::RoundToInt(CellY), 0, Resolution - 1);
+
+        bool bFound = false;
+        OutDistSq = TNumericLimits<float>::Max();
+
+        for (int32 OY = -2; OY <= 2; ++OY)
+        {
+            for (int32 OX = -2; OX <= 2; ++OX)
+            {
+                ECSCubeFace CF; int32 CX, CY;
+                if (!GetNeighborPixel(PF, NearX, NearY, OX, OY, CF, CX, CY))
                 {
-                    const FVector PrevDir = InverseRotations[P].RotateVector(Dir);
-                    ECSCubeFace PF; float PU, PV;
-                    CubeFaceMapping::DirectionToFaceTexUV(PrevDir, PF, PU, PV);
-
-                    const float CellX = PU * Resolution - 0.5f;
-                    const float CellY = PV * Resolution - 0.5f;
-                    const int32 NearX = FMath::Clamp(FMath::RoundToInt(CellX), 0, Resolution - 1);
-                    const int32 NearY = FMath::Clamp(FMath::RoundToInt(CellY), 0, Resolution - 1);
-                    const int32 DirX = (CellX >= static_cast<float>(NearX)) ? 1 : -1;
-                    const int32 DirY = (CellY >= static_cast<float>(NearY)) ? 1 : -1;
-                    const int32 CandidateOffsets[4][2] = { {0, 0}, {DirX, 0}, {0, DirY}, {DirX, DirY} };
-
-                    bool bPlateClaims = false;
-                    int32 BestFace = 0, BestIdx = 0;
-                    float BestDistSqLocal = TNumericLimits<float>::Max();
-
-                    for (int32 C = 0; C < 4; ++C)
-                    {
-                        ECSCubeFace CF; int32 CX, CY;
-                        if (!GetNeighborPixel(PF, NearX, NearY, CandidateOffsets[C][0], CandidateOffsets[C][1], CF, CX, CY))
-                        {
-                            continue;
-                        }
-                        const int32 CFaceIdx = static_cast<int32>(CF);
-                        const int32 CIdx = CY * Resolution + CX;
-
-                        if (Prev[CFaceIdx].PlateIDData[CIdx] != static_cast<uint8>(P))
-                        {
-                            continue;
-                        }
-
-                        const float DX = CellX - static_cast<float>(NearX + CandidateOffsets[C][0]);
-                        const float DY = CellY - static_cast<float>(NearY + CandidateOffsets[C][1]);
-                        const float DistSq = DX * DX + DY * DY;
-
-                        if (DistSq < BestDistSqLocal)
-                        {
-                            BestDistSqLocal = DistSq;
-                            BestFace = CFaceIdx;
-                            BestIdx = CIdx;
-                            bPlateClaims = true;
-                        }
-                    }
-
-                    if (bPlateClaims)
-                    {
-                        ++Count;
-                        LastPlate = P;
-                        LastSourceFace = BestFace;
-                        LastSourceIdx = BestIdx;
-                    }
+                    continue;
                 }
-
-                const int32 CellIdx = Y * Resolution + X;
-                ClaimCounts[FaceIdx][CellIdx] = static_cast<uint8>(FMath::Min(Count, 255));
-                if (Count == 1)
+                const int32 CFrameIdx = GetFrameIndex(static_cast<int32>(CF), CX, CY);
+                if (PlateTerritory[P][CFrameIdx] == 0)
                 {
-                    CachedPlate[FaceIdx][CellIdx] = static_cast<uint8>(LastPlate);
-                    CachedSourceFace[FaceIdx][CellIdx] = static_cast<uint8>(LastSourceFace);
-                    CachedSourceIdx[FaceIdx][CellIdx] = LastSourceIdx;
+                    continue;
+                }
+                const float DX = CellX - static_cast<float>(NearX + OX);
+                const float DY = CellY - static_cast<float>(NearY + OY);
+                const float DistSq = DX * DX + DY * DY;
+                if (DistSq < OutDistSq)
+                {
+                    OutDistSq = DistSq;
+                    OutFrameIdx = CFrameIdx;
+                    bFound = true;
                 }
             }
         }
-    });
+        return bFound;
+    };
+
+    // Indice de marco EXACTO (sin tolerancia) para una placa y una direccion mundial: para
+    // CONCEDER territorio (evento de rift o colision), no para preguntar si ya lo tiene.
+    auto GetTerritoryFrameIndex = [&](int32 P, const FVector& Dir) -> int32
+    {
+        const FVector FrameDir = InverseAccum[P].RotateVector(Dir);
+        ECSCubeFace PF; float PU, PV;
+        CubeFaceMapping::DirectionToFaceTexUV(FrameDir, PF, PU, PV);
+        const int32 PX = FMath::Clamp(FMath::FloorToInt(PU * Resolution), 0, Resolution - 1);
+        const int32 PY = FMath::Clamp(FMath::FloorToInt(PV * Resolution), 0, Resolution - 1);
+        return GetFrameIndex(static_cast<int32>(PF), PX, PY);
+    };
+
+    // Los cambios de territorio se recogen por hilo (uno por cara del mundo) y se aplican
+    // en una pasada secuencial al final: dos caras del mundo distintas pueden mapear al
+    // mismo indice del marco de una placa, asi que escribir PlateTerritory directamente
+    // desde dentro del ParallelFor de abajo seria una carrera de datos.
+    struct FTerritoryEvent
+    {
+        int32 PlateIdx;
+        int32 FrameIdx;
+        uint8 NewValue;
+    };
+    TArray<TArray<FTerritoryEvent>> TerritoryEventsPerFace;
+    TerritoryEventsPerFace.SetNum(6);
 
     struct FFaceCounters
     {
@@ -969,6 +1000,24 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
         int32 Unresolved = 0;
         int32 MaterialReads = 0;
         int32 MaterialFallbacks = 0;
+        // DIAGNOSTICO (17-08-2026): desglose de Unresolved, ver comentario junto a donde se
+        // incrementan.
+        int32 UnresolvedConverging = 0;
+        int32 UnresolvedNearZero = 0;
+        // Resuelto por la busqueda ampliada de vecino mas cercano (18-08-2026), en vez de
+        // quedar en Unresolved. Ver FindNearestOwnerWide.
+        int32 ResolvedByWideSearch = 0;
+        // DIAGNOSTICO (18-08-2026): de los rifts (Created), cuantos convertian una celda
+        // que YA era continental. Ver el comentario junto a donde se incrementa.
+        int32 RiftFromContinental = 0;
+        // DIAGNOSTICO (18-08-2026): de los traspasos por vecino mas cercano (transformante),
+        // cuantos convertian una celda continental a oceanica via material guardado
+        // desactualizado del nuevo dueño. Ver el comentario junto a donde se incrementa.
+        int32 HandoffFromContinental = 0;
+        // DIAGNOSTICO (18-08-2026): de las colisiones, cuantas convertian una celda YA
+        // continental a oceanica porque la dueña continental original ya no era una de
+        // las reclamantes. Ver el comentario junto a donde se incrementa.
+        int32 CollisionFromContinental = 0;
     };
     TArray<FFaceCounters> Counters;
     Counters.SetNum(6);
@@ -977,13 +1026,109 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
     {
         FTectonicFaceTextureData& Face = FaceData[FaceIdx];
         FFaceCounters& Count = Counters[FaceIdx];
+        TArray<FTerritoryEvent>& Events = TerritoryEventsPerFace[FaceIdx];
+
+        // Movimiento limpio -un unico dueno, ya sea porque solo el sigue reclamando su
+        // propio territorio (camino rapido de interior) o porque solo el gano la busqueda
+        // completa (camino de frontera). El material sale SIEMPRE del marco propio de la
+        // placa; ya no hay "de donde vino" que valga la pena rastrear, el marco se
+        // transporta exacto.
+        auto AssignCleanMove = [&](int32 Owner, const FVector& Dir, int32 Idx)
+        {
+            float MAge; uint8 MType; float MThick; float MElev;
+            ++Count.MaterialReads;
+            if (!ReadPlateMaterial(Owner, Dir, MAge, MType, MThick, MElev))
+            {
+                ++Count.MaterialFallbacks;
+                // Sin material guardado en el marco -territorio recien ganado-: se hereda
+                // lo que YA HABIA en este mismo punto del mundo. El write-back de este paso
+                // deja el marco al dia para la proxima adveccion.
+                MAge = Prev[FaceIdx].CrustAgeData[Idx];
+                MThick = Prev[FaceIdx].CrustThicknessData[Idx];
+                MElev = Prev[FaceIdx].ElevationData[Idx];
+            }
+            Face.PlateIDData[Idx]        = static_cast<uint8>(Owner);
+            Face.ElevationData[Idx]      = MElev;
+            Face.CrustAgeData[Idx]       = MAge;
+            Face.CrustThicknessData[Idx] = MThick;
+            Face.RefSourceFaceData[Idx]  = static_cast<uint8>(FaceIdx);
+            Face.RefSourceIdxData[Idx]   = Idx;
+
+            // PROBADO Y DESCARTADO (18-08-2026): forzar tambien la elevacion desde Prev, con
+            // el mismo razonamiento que el tipo (abajo). Resultado medido: CERO cambio en la
+            // fraccion de tierra emergida de Simu.Tectonics.LongRunStability/F1EF1FLongRun,
+            // digito a digito identico con y sin el cambio. El alias mundo<->marco no esta
+            // corrompiendo elevacion de forma apreciable -el campo es continuo y el ruido de
+            // un pixel se diluye en la media, al contrario que el tipo, que es categorico y
+            // un solo volteo es permanente-. La caida de tierra emergida es un fenomeno
+            // distinto y no investigado aqui: revertido para no cargar codigo sin beneficio
+            // medido. Hipotesis mas probable, sin confirmar: con el continente ya no
+            // destruido en cuanto nace (ver el arreglo del tipo), hay mas corteza continental
+            // JOVEN que isostasia todavia no ha tenido tiempo de levantar por encima del
+            // nivel del mar dentro de la ventana del test -no una fuga, un transitorio.
+
+            // TIPO DE CORTEZA SIEMPRE DE PREV, NUNCA DEL MARCO (18-08-2026): este camino solo
+            // se usa cuando Owner == CurrentOwner -continuacion, no traspaso-, asi que el tipo
+            // fisico de este punto no ha cambiado y Prev ya lo tiene exacto, sin pasar por el
+            // redondeo de ida y vuelta mundo<->marco rotado.
+            //
+            // MEDIDO: leer el tipo del marco (via ReadPlateMaterial, como Edad/Grosor/
+            // Elevacion de arriba, que si necesitan viajar por el marco para advectar
+            // correctamente con la placa) provocaba miles de volteos continental->oceanico
+            // por avance, incluso en celdas de interior donde Owner nunca cambia -Simu.
+            // Tectonics.ContinentsPersist llegaba a extincion total (1321->0) con
+            // handoff=8463 en 300 pasos-. La conversion Dir->marco (ReadPlateMaterial) y
+            // marco->mundo (WriteBackToPlateFrames) no son inversas exactas: cuantizan cada
+            // una por su lado con floor(), y una rotacion no preserva alineacion de rejilla,
+            // asi que el redondeo de ida y vuelta ocasionalmente lee la celda de marco VECINA
+            // en vez de la propia -invisible en la inmensa mayoria del interior, donde vecina
+            // significa "mismo tipo", pero catastrofico justo en la costa de un continente,
+            // que es exactamente donde el tipo SI puede diferir de un pixel de marco a otro.
+            // Edad/Grosor/Elevacion son continuos -ese mismo ruido de un pixel no los
+            // desestabiliza-, pero el tipo es categorico y un solo volteo es permanente
+            // hasta el proximo rift o colision que lo toque.
+            Face.CrustTypeData[Idx] = Prev[FaceIdx].CrustTypeData[Idx];
+
+            ++Count.Moved;
+        };
+
+        // TRASPASO (18-08-2026): entrega de un punto que esta placa NO poseia el paso
+        // anterior -costura transformante o vecino mas cercano-, sin rift ni colision. El
+        // punto fisico no cambia de material, solo de dueño, asi que el material tiene que
+        // salir de lo que YA HABIA aqui (Prev), nunca del marco propio del nuevo dueño.
+        //
+        // MEDIDO (medicion "handoff" del diagnostico, ver ANEXO.md): usar AssignCleanMove
+        // aqui -leer el marco de Owner, con Prev solo como respaldo si esta vacio- convertia
+        // continente en oceano miles de veces en una corrida de 300 pasos, incluso con el
+        // write-back corriendo en cada adveccion. La causa no era la cadencia del write-back
+        // -eso ya se arreglo-, sino que un traspaso es por definicion territorio que la placa
+        // NO poseia hasta este instante: FrameIdx se calcula rotando la direccion mundial por
+        // la rotacion acumulada del NUEVO dueño, y esa rotacion cambia con el tiempo, asi que
+        // el mismo indice discreto de marco puede corresponder a un punto del mundo
+        // COMPLETAMENTE DISTINTO segun cuanto haya girado la placa desde la ultima vez que
+        // ese hueco del marco tuvo dato. El respaldo a Prev solo saltaba si el marco estaba
+        // vacio (Occupied == 0); si por coincidencia de redondeo ese hueco SI tenia dato -de
+        // otro momento de la historia de la placa, en otro punto del mundo-, se leia como si
+        // fuera valido. Mas grosero cuanto mas baja la resolucion (menos celdas de marco,
+        // mas facil que dos puntos distintos caigan en el mismo indice discreto) -coincide
+        // con que Simu.Tectonics.ContinentsPersist (Res 32) llegaba a extincion total
+        // mientras Simu.Tectonics.LongRunStability (Res 128) solo colapsaba severamente.
+        auto AssignHandoff = [&](int32 Owner, int32 Idx)
+        {
+            Face.PlateIDData[Idx]        = static_cast<uint8>(Owner);
+            Face.ElevationData[Idx]      = Prev[FaceIdx].ElevationData[Idx];
+            Face.CrustAgeData[Idx]       = Prev[FaceIdx].CrustAgeData[Idx];
+            Face.CrustTypeData[Idx]      = Prev[FaceIdx].CrustTypeData[Idx];
+            Face.CrustThicknessData[Idx] = Prev[FaceIdx].CrustThicknessData[Idx];
+            Face.RefSourceFaceData[Idx]  = static_cast<uint8>(FaceIdx);
+            Face.RefSourceIdxData[Idx]   = Idx;
+            ++Count.Moved;
+        };
 
         TArray<int32> Claimants;
-        TArray<int32> SourceFace;
-        TArray<int32> SourceIdx;
+        TArray<int32> ClaimFrameIdx;
         Claimants.Reserve(NumPlates);
-        SourceFace.Reserve(NumPlates);
-        SourceIdx.Reserve(NumPlates);
+        ClaimFrameIdx.Reserve(NumPlates);
 
         for (int32 Y = 0; Y < Resolution; ++Y)
         {
@@ -993,535 +1138,440 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
                 const FVector Dir = CubeFaceMapping::PixelToDirection(
                     static_cast<ECSCubeFace>(FaceIdx), X, Y, Resolution);
 
-                Claimants.Reset();
-                SourceFace.Reset();
-                SourceIdx.Reset();
+                const int32 CurrentOwner = static_cast<int32>(Prev[FaceIdx].PlateIDData[Idx]);
+                const int32 NOff[4][2] = {{-1,0},{1,0},{0,-1},{0,1}};
 
-                // Caso mayoritario: un unico reclamante, ya resuelto en la pasada de
-                // conteo. Se evita repetir NumPlates rotaciones y reproyecciones.
-                const uint8 CachedCount = ClaimCounts[FaceIdx][Idx];
-                if (CachedCount == 1)
+                // Adyacencia de frontera: alguna de las 4 vecinas en Prev tiene otro dueno.
+                bool bBoundary = false;
+                for (int32 N = 0; N < 4 && !bBoundary; ++N)
                 {
-                    Claimants.Add(CachedPlate[FaceIdx][Idx]);
-                    SourceFace.Add(CachedSourceFace[FaceIdx][Idx]);
-                    SourceIdx.Add(CachedSourceIdx[FaceIdx][Idx]);
-                }
-                else
-
-                // NOTA (15-08-2026): aqui se probo submuestreo 4x en las celdas de
-                // frontera, para situar el borde con precision de media celda y frenar la
-                // acumulacion de escalonado. Empeoro todo y se revirtio: con mayoria de 4
-                // submuestras DOS placas pueden reclamar la misma celda a la vez, asi que
-                // las colisiones se triplicaron (7.348 -> 20.348), la continental gano
-                // muchas mas veces y la tierra emergida se disparo del 25% al 48,5%. El
-                // escalonado tambien subio (x2,02 -> x3,10). Un test de reclamante unico
-                // no admite un criterio de mayoria sin repensar la resolucion de empates.
-                for (int32 P = 0; P < NumPlates; ++P)
-                {
-                    const FVector PrevDir = InverseRotations[P].RotateVector(Dir);
-
-                    ECSCubeFace PF;
-                    float PU, PV;
-                    CubeFaceMapping::DirectionToFaceTexUV(PrevDir, PF, PU, PV);
-
-                    const int32 PFaceIdx = static_cast<int32>(PF);
-                    const int32 PX = FMath::Clamp(FMath::FloorToInt(PU * Resolution), 0, Resolution - 1);
-                    const int32 PY = FMath::Clamp(FMath::FloorToInt(PV * Resolution), 0, Resolution - 1);
-                    const int32 PIdx = PY * Resolution + PX;
-
-                    if (Prev[PFaceIdx].PlateIDData[PIdx] == static_cast<uint8>(P))
+                    ECSCubeFace NF; int32 NX, NY;
+                    if (!GetNeighborPixel(static_cast<ECSCubeFace>(FaceIdx), X, Y, NOff[N][0], NOff[N][1], NF, NX, NY))
                     {
-                        Claimants.Add(P);
-                        SourceFace.Add(PFaceIdx);
-                        SourceIdx.Add(PIdx);
+                        continue;
                     }
+                    const int32 NIdx = NY * Resolution + NX;
+                    bBoundary = (static_cast<int32>(Prev[static_cast<int32>(NF)].PlateIDData[NIdx]) != CurrentOwner);
                 }
 
-                if (Claimants.Num() == 1)
+                bool bResolved = false;
+
+                // CAMINO RAPIDO: celda de interior, lejos de cualquier frontera. Le basta
+                // preguntar a SU PROPIO territorio, ya rotado exacto -no hace falta
+                // competir contra NumPlates candidatos para una celda que nadie disputa.
+                if (!bBoundary && Plates.IsValidIndex(CurrentOwner))
                 {
-                    // Movimiento limpio: se arrastra todo el estado desde el origen. Si no
-                    // se arrastrara el tipo de corteza, un continente cambiaria de tipo al
-                    // desplazarse y se disolveria en el oceano.
-                    const int32 SF = SourceFace[0];
-                    const int32 SI = SourceIdx[0];
-                    const int32 Owner = Claimants[0];
-
-                    // El material NO sale de aqui al lado: sale del marco propio de la
-                    // placa, con la rotacion acumulada. Un solo remuestreo desde el inicio,
-                    // en vez de encadenar uno por adveccion.
-                    float MAge; uint8 MType; float MThick; float MElev;
-                    ++Count.MaterialReads;
-                    if (!ReadPlateMaterial(Owner, Dir, MAge, MType, MThick, MElev))
+                    int32 OwnFrameIdx; float OwnDistSq;
+                    if (TryTerritoryTolerant(CurrentOwner, Dir, OwnFrameIdx, OwnDistSq))
                     {
-                        ++Count.MaterialFallbacks;
-                        // Territorio recien ganado: el marco aun no tiene material ahi.
-                        // Se hereda lo que habia en el mundo, y el write-back de este paso
-                        // ya lo deja guardado en el marco.
-                        MAge = Prev[SF].CrustAgeData[SI];
-                        MType = Prev[SF].CrustTypeData[SI];
-                        MThick = Prev[SF].CrustThicknessData[SI];
-                        MElev = Prev[SF].ElevationData[SI];
-                    }
+                        // DIAGNOSTICO (18-08-2026): aqui Owner==CurrentOwner, no hay cambio
+                        // de dueño -pero si el marco de material de la propia placa esta
+                        // desincronizado del mundo (WriteBackToPlateFrames() solo corre una
+                        // vez por Step(), no una vez por adveccion, ver ANEXO A14
+                        // "pendiente"), hasta leer el material de UNO MISMO puede volcar un
+                        // tipo desactualizado. El interior es ~97% del planeta -hasta una
+                        // probabilidad minima por celda pesaria mucho en numeros absolutos.
+                        const uint8 TypeBeforeOwnRead = Prev[FaceIdx].CrustTypeData[Idx];
 
-                    Face.PlateIDData[Idx]   = static_cast<uint8>(Owner);
-                    Face.ElevationData[Idx] = MElev;
-                    Face.CrustAgeData[Idx]  = MAge;
-                    Face.CrustTypeData[Idx] = MType;
-                    Face.CrustThicknessData[Idx] = MThick;
-                    Face.RefSourceFaceData[Idx] = static_cast<uint8>(SF);
-                    Face.RefSourceIdxData[Idx] = SI;
-                    ++Count.Moved;
+                        AssignCleanMove(CurrentOwner, Dir, Idx);
+                        bResolved = true;
+
+                        if (TypeBeforeOwnRead == 1 && Face.CrustTypeData[Idx] == 0)
+                        {
+                            ++Count.HandoffFromContinental;
+                        }
+                    }
+                    // Si esto falla para una celda marcada interior es un caso raro de
+                    // precision -no se descarta, cae al camino completo como red de
+                    // seguridad.
                 }
-                else if (Claimants.Num() == 0)
+
+                if (!bResolved)
                 {
-                    // Sin reclamantes. Antes de crear corteza hay que decidir si esto es
-                    // un rift de verdad, y eso se decide con FISICA, no con geometria.
+                    // ARBITRO UNICO DE VECINO MAS CERCANO (18-08-2026), reemplaza el conteo
+                    // de reclamantes independientes.
                     //
-                    // QUE HABIA ANTES Y POR QUE ESTABA MAL (16-08-2026): se usaba un
-                    // sustituto geometrico - "si dos o mas vecinas tambien estan sin
-                    // reclamar, es un rift" - bajo la idea de que un rift forma banda
-                    // continua. Funciona con fronteras rectas, pero al hacer las placas
-                    // fractales se desmorona: una frontera que serpentea deja mas huecos
-                    // geometricos, y todos se convertian en oceano. Medido: la tierra
-                    // emergida caia del 24,6% al 13,5% en 1000 Ma solo por dar a las placas
-                    // forma organica.
+                    // Antes, cada placa decidia por su cuenta -con su propia busqueda
+                    // tolerante, aislada de las demas- si "reclamaba" esta celda: una prueba
+                    // SI/NO por placa. Eso es estructuralmente asimetrico. Reclamar es una
+                    // condicion OR (basta que UNA de las N placas diga que si). No reclamar
+                    // es una condicion AND (tienen que fallar las N a la vez). Con
+                    // territorios independientes y algo de margen de tolerancia en cada uno,
+                    // los solapes (colision) son mecanicamente mas faciles de producir que
+                    // los huecos limpios (candidato a rift) -no por ningun umbral mal puesto,
+                    // por la propia forma del mecanismo de decision-.
                     //
-                    // La leccion la puso el usuario: si acercar el modelo a la realidad
-                    // rompe nuestra fisica, el problema es de nuestra fisica. La solucion
-                    // no era capar las formas sino dejar de usar un sustituto.
+                    // Medido (Simu.Tectonics.F1EF1FLongRun, ver ANEXO.md): el ratio de celdas
+                    // con 0 reclamantes frente a celdas con 2+ crecia sin parar, de 1,1 a 4,5
+                    // en 1000 Ma, mientras que el ratio de corteza creada/destruida se quedaba
+                    // plano en ~0,45 -la asimetria no se corrige sola ni se explica por un
+                    // umbral, es del propio diseño de "N jueces independientes".
                     //
-                    // UN RIFT ES DIVERGENCIA. Se calcula la divergencia local del campo de
-                    // velocidades: para cada vecina se mira que placa la posee y a que
-                    // velocidad va, y se proyecta esa velocidad sobre la direccion que se
-                    // aleja de esta celda. Si la suma es positiva, el material se marcha en
-                    // todas direcciones y aflora manto: rift. Si es negativa o nula, las
-                    // placas convergen o deslizan una junto a otra, y el hueco es del
-                    // remuestreo, no de la tectonica.
-                    //
-                    // Esto distingue por fin un rift de una frontera TRANSFORMANTE, que
-                    // tambien deja huecos al discretizar pero no crea corteza: en la Tierra
-                    // las fallas transformantes no generan fondo oceanico, solo desplazan.
-                    const int32 NOff[4][2] = {{-1,0},{1,0},{0,-1},{0,1}};
-                    float Divergence = 0.0f;
-                    int32 DivergenceSamples = 0;
-
-                    for (int32 N = 0; N < 4; ++N)
+                    // Arreglo de raiz, no un parche sobre el conteo: un UNICO arbitro de
+                    // distancia, el mismo principio que usa GPlates y el resto del software
+                    // de reconstruccion de placas -primero se decide la particion (que placa
+                    // tiene el territorio mas cercano de verdad, sin ambiguedad posible,
+                    // porque solo puede haber un minimo), y colision/traspaso limpio se
+                    // DERIVAN de esa particion comparando margenes, con la MISMA vara de medir
+                    // para los dos casos, en vez de contarse por separado con pruebas de
+                    // distinta exigencia.
+                    struct FOwnerCandidate { int32 Plate; int32 FrameIdx; float DistSq; };
+                    TArray<FOwnerCandidate, TInlineAllocator<8>> Candidates;
+                    for (int32 P = 0; P < NumPlates; ++P)
                     {
-                        ECSCubeFace NF; int32 NX, NY;
-                        if (!GetNeighborPixel(static_cast<ECSCubeFace>(FaceIdx), X, Y, NOff[N][0], NOff[N][1], NF, NX, NY))
+                        int32 FrameIdx; float DistSq;
+                        if (FindNearestOwnerWide(P, Dir, FrameIdx, DistSq))
                         {
-                            continue;
+                            Candidates.Add({ P, FrameIdx, DistSq });
                         }
+                    }
+                    Candidates.Sort([](const FOwnerCandidate& A, const FOwnerCandidate& B) { return A.DistSq < B.DistSq; });
 
-                        const int32 NFaceIdx = static_cast<int32>(NF);
-                        const int32 NIdx = NY * Resolution + NX;
+                    // Radio de contienda: el mismo alcance que tenia la busqueda estricta de
+                    // siempre (un candidato a lo sumo a ~1 celda del punto redondeado, con
+                    // desempate) -asi que las celdas que antes resolvia el conteo de
+                    // reclamantes se siguen resolviendo igual. Lo que cambia es que la
+                    // frontera entre "dueño claro" y "disputada" se mide con la MISMA vara
+                    // para todas las placas, no con N pruebas independientes de exigencia
+                    // distinta segun cuantas casualmente coincidan.
+                    // CALIBRACION EN CURSO (18-08-2026): 2.5 (pensado para igualar el
+                    // alcance peor-caso de la vieja busqueda de 4 candidatos) disparo las
+                    // colisiones por encima del sistema viejo (56207 vs 40405 en el primer
+                    // tramo) y empeoro el ratio creado/destruido (0.21-0.30 vs 0.42-0.50).
+                    // Probando 1.0 -mas cerca de "un solo vecino inmediato"- para ver si
+                    // acerca las colisiones a la linea base sin reintroducir la asimetria.
+                    static constexpr float ContestRadiusSq = 1.0f;
 
-                        const int32 NeighbourPlate = static_cast<int32>(Prev[NFaceIdx].PlateIDData[NIdx]);
-                        if (!Plates.IsValidIndex(NeighbourPlate))
+                    Claimants.Reset();
+                    ClaimFrameIdx.Reset();
+                    if (Candidates.Num() > 0 && Candidates[0].DistSq <= ContestRadiusSq)
+                    {
+                        for (const FOwnerCandidate& C : Candidates)
                         {
-                            continue;
+                            if (C.DistSq > ContestRadiusSq)
+                            {
+                                break; // ordenado ascendente: el resto tambien se sale
+                            }
+                            Claimants.Add(C.Plate);
+                            ClaimFrameIdx.Add(C.FrameIdx);
                         }
-
-                        const FVector NeighbourDir = CubeFaceMapping::PixelToDirection(NF, NX, NY, Resolution);
-
-                        // Velocidad de la placa que posee la vecina, en la posicion de la
-                        // vecina: v = omega x r
-                        const FVector AngularVel =
-                            Plates[NeighbourPlate].EulerPole.GetSafeNormal() * Plates[NeighbourPlate].AngularVelocity;
-                        const FVector NeighbourVel = FVector::CrossProduct(AngularVel, NeighbourDir);
-
-                        // Direccion que se ALEJA de esta celda, tangente a la esfera
-                        FVector Outward = NeighbourDir - Dir;
-                        Outward -= Dir * FVector::DotProduct(Outward, Dir);
-                        if (Outward.IsNearlyZero())
-                        {
-                            continue;
-                        }
-                        Outward = Outward.GetSafeNormal();
-
-                        Divergence += static_cast<float>(FVector::DotProduct(NeighbourVel, Outward));
-                        ++DivergenceSamples;
                     }
 
-                    const uint8 PreviousOwner = Prev[FaceIdx].PlateIDData[Idx];
-
-                    // UMBRAL EN UNIDADES FISICAS. Exigir solo divergencia positiva es
-                    // demasiado permisivo: en cualquier frontera alguna vecina se aleja un
-                    // poco, asi que la suma sale positiva tambien en fronteras
-                    // transformantes. Medido con umbral cero: la creacion de corteza subio
-                    // de 45.530 a 64.018 celdas y la tierra emergida cayo al 9,6%.
-                    //
-                    // Un rift de verdad separa las placas a una fraccion apreciable de la
-                    // velocidad de placa; por debajo de eso se estan rozando, no separando.
-                    //
-                    // EL UMBRAL NO SE ELIGE A OJO, LO FIJA LA CONSERVACION DE CORTEZA. Sobre
-                    // una esfera cerrada, todo lo que se destruye en subduccion tiene que
-                    // reponerse en dorsales, asi que el valor correcto es el que iguala las
-                    // dos cuentas. Medido con Simu.Tectonics.LongRunStability:
-                    //
-                    //     umbral 0.00 -> creada 64.018 / destruida 51.200  (sobra creacion)
-                    //     umbral 0.25 -> creada 29.296 / destruida 53.478  (falta creacion)
-                    //     umbral 0.10 -> equilibrado
-                    //
-                    // Es el mismo principio que hace fisico el resto del modelo: la
-                    // constante sale de una ley de conservacion, no de que un test pase.
-                    const float AvgDivergence = (DivergenceSamples > 0)
-                        ? (Divergence / DivergenceSamples) : 0.0f;
-                    const bool bDiverging = (DivergenceSamples >= 2)
-                        && (AvgDivergence > 0.10f * MaxAngularSpeed);
-
-                    if (bDiverging)
+                    if (Claimants.Num() == 1)
                     {
-                        // RIFT DE VERDAD: dos placas se separan y aflora manto. Corteza
-                        // oceanica nueva con edad 0; su altura la pone el hundimiento
-                        // termico, que a edad 0 da la profundidad de dorsal.
+                        const int32 Owner = Claimants[0];
+
+                        if (Owner == CurrentOwner)
+                        {
+                            // Continuacion: sigue siendo suyo, el marco propio es la
+                            // fuente correcta (ver comentario de AssignCleanMove).
+                            AssignCleanMove(Owner, Dir, Idx);
+                        }
+                        else
+                        {
+                            // ESTE ES EL CAMINO DE RESOLUCION MAS FRECUENTE CON DIFERENCIA
+                            // -el "1 reclamante claro" que ademas es un traspaso de verdad-.
+                            // Material de Prev, no del marco de Owner (ver AssignHandoff).
+                            const uint8 TypeBeforeHandoff = Prev[FaceIdx].CrustTypeData[Idx];
+
+                            AssignHandoff(Owner, Idx);
+
+                            if (TypeBeforeHandoff == 1 && Face.CrustTypeData[Idx] == 0)
+                            {
+                                ++Count.HandoffFromContinental;
+                            }
+
+                            // El mundo cambia de dueno visible aqui aunque solo haya un
+                            // reclamante: el territorio de CurrentOwner ya se retiro de
+                            // este punto y el de Owner lo alcanzo. Conceder es todo lo que
+                            // hace falta -CurrentOwner ya no lo reclamaba, no hay nada que
+                            // liberarle.
+                            Events.Add({ Owner, ClaimFrameIdx[0], 1 });
+                        }
+                    }
+                    else if (Claimants.Num() == 0)
+                    {
+                        // Sin dueño claro dentro del radio de contienda -ni siquiera el
+                        // propio dueno anterior-. Antes de crear corteza hay que decidir si
+                        // esto es un rift de verdad: divergencia real del campo de
+                        // velocidades, no ausencia geometrica de reclamante.
                         //
-                        // Se suelda a la placa que estaba aqui antes: la corteza nueva se
-                        // acreciona al borde de la placa que se aleja.
-                        Face.PlateIDData[Idx]   = (PreviousOwner < NumPlates) ? PreviousOwner : 0;
-                        Face.CrustTypeData[Idx] = 0;
-                        Face.CrustAgeData[Idx]  = 0.0f;
-                        Face.CrustThicknessData[Idx] = FIsostasyParams().OceanicThickness;
-                        Face.ElevationData[Idx] = -FIsostasyParams().RidgeDepth;
-                        ++Count.Created;
+                        // UN RIFT ES DIVERGENCIA. Para cada vecina se mira que placa la
+                        // posee y a que velocidad va, y se proyecta esa velocidad sobre la
+                        // direccion que se aleja de esta celda. Si la suma es positiva, el
+                        // material se marcha en todas direcciones y aflora manto: rift.
+                        // Distingue un rift de una frontera TRANSFORMANTE, que tambien deja
+                        // huecos al discretizar pero no crea corteza.
+                        float Divergence = 0.0f;
+                        int32 DivergenceSamples = 0;
+
+                        for (int32 N = 0; N < 4; ++N)
+                        {
+                            ECSCubeFace NF; int32 NX, NY;
+                            if (!GetNeighborPixel(static_cast<ECSCubeFace>(FaceIdx), X, Y, NOff[N][0], NOff[N][1], NF, NX, NY))
+                            {
+                                continue;
+                            }
+
+                            const int32 NFaceIdx = static_cast<int32>(NF);
+                            const int32 NIdx = NY * Resolution + NX;
+
+                            const int32 NeighbourPlate = static_cast<int32>(Prev[NFaceIdx].PlateIDData[NIdx]);
+                            if (!Plates.IsValidIndex(NeighbourPlate))
+                            {
+                                continue;
+                            }
+
+                            const FVector NeighbourDir = CubeFaceMapping::PixelToDirection(NF, NX, NY, Resolution);
+
+                            // Velocidad de la placa que posee la vecina, en la posicion de
+                            // la vecina: v = omega x r
+                            const FVector AngularVel =
+                                Plates[NeighbourPlate].EulerPole.GetSafeNormal() * Plates[NeighbourPlate].AngularVelocity;
+                            const FVector NeighbourVel = FVector::CrossProduct(AngularVel, NeighbourDir);
+
+                            FVector Outward = NeighbourDir - Dir;
+                            Outward -= Dir * FVector::DotProduct(Outward, Dir);
+                            if (Outward.IsNearlyZero())
+                            {
+                                continue;
+                            }
+                            Outward = Outward.GetSafeNormal();
+
+                            Divergence += static_cast<float>(FVector::DotProduct(NeighbourVel, Outward));
+                            ++DivergenceSamples;
+                        }
+
+                        const int32 PreviousOwner = Plates.IsValidIndex(CurrentOwner) ? CurrentOwner : 0;
+
+                        // UMBRAL EN UNIDADES FISICAS, fijado por conservacion de corteza
+                        // (medido con Simu.Tectonics.LongRunStability): 0.10 * MaxAngularSpeed
+                        // equilibra creacion y destruccion sobre una esfera cerrada.
+                        //
+                        // PROBADO A LA MITAD (0.05) Y DESCARTADO (18-08-2026): con F1F activo
+                        // sobre la base ya arreglada, el ratio creado/destruido medido en
+                        // Simu.Tectonics.F1EF1FLongRun es 0.42-0.50 estable con el umbral
+                        // original; bajarlo a la mitad apenas lo movio a 0.46-0.49 -y encima
+                        // la tierra emergida salio peor (9.7% vs 11.8% a 1000 Ma), con una
+                        // explosion de fragmentaciones F1E al final (8->15 placas en el
+                        // ultimo tramo). El umbral de rift NO es la palanca dominante del
+                        // desequilibrio: revertido al valor original. El desequilibrio sigue
+                        // sin explicar -ver ANEXO.md, sospecha ahora en el lado de la
+                        // destruccion (una colision con 3+ reclamantes destruye varias celdas
+                        // de una vez; el rift solo crea una por celda que cumple el umbral,
+                        // una asimetria estructural, no solo numerica).
+                        const float AvgDivergence = (DivergenceSamples > 0)
+                            ? (Divergence / DivergenceSamples) : 0.0f;
+                        const bool bDiverging = (DivergenceSamples >= 2)
+                            && (AvgDivergence > 0.10f * MaxAngularSpeed);
+
+                        if (bDiverging)
+                        {
+                            // DIAGNOSTICO (18-08-2026): el rift pone CrustTypeData a
+                            // oceanica SIN mirar que habia antes -no distingue "aqui ya
+                            // habia oceano, nace mas" de "esto era continente y una vecina
+                            // se retira de un trozo continental de golpe". La colision, por
+                            // otro lado, nunca destruye continente (la continental siempre
+                            // gana la celda en disputa, ver el bloque de colision mas abajo)
+                            // -asi que si algo esta comiendose el continente, tiene que ser
+                            // esto. Se cuenta antes de sobreescribir.
+                            if (Prev[FaceIdx].CrustTypeData[Idx] == 1)
+                            {
+                                ++Count.RiftFromContinental;
+                            }
+
+                            // RIFT DE VERDAD: la placa vecina se retira -detectado ahora
+                            // correctamente incluso si PreviousOwner es lenta cerca de su
+                            // propio polo, porque su territorio ya no la reclama por
+                            // remuestreo, la reclama de verdad. Corteza oceanica nueva,
+                            // soldada al borde que se retira.
+                            Face.PlateIDData[Idx]        = static_cast<uint8>(PreviousOwner);
+                            Face.CrustTypeData[Idx]      = 0;
+                            Face.CrustAgeData[Idx]       = 0.0f;
+                            Face.CrustThicknessData[Idx] = FIsostasyParams().OceanicThickness;
+                            Face.ElevationData[Idx]      = -FIsostasyParams().RidgeDepth;
+                            Events.Add({ PreviousOwner, GetTerritoryFrameIndex(PreviousOwner, Dir), 1 });
+                            ++Count.Created;
+                        }
+                        else
+                        {
+                            // COMPLETAR LA PARTICION POR VECINO MAS CERCANO: ni dueño claro
+                            // dentro del radio de contienda, ni rift -candidato a costura
+                            // transformante-. Candidates ya esta calculado (el arbitro de
+                            // arriba), asi que aqui solo hace falta el mas cercano de todos
+                            // -Voronoi discreto sin radio de corte, no un parche-, sea cual
+                            // sea su distancia. Solo si NINGUNA placa tiene territorio ni
+                            // siquiera dentro del radio amplio de FindNearestOwnerWide
+                            // (Candidates vacio) se cae al ultimo recurso de conservar el
+                            // estado anterior.
+                            const int32 NearestPlate = (Candidates.Num() > 0) ? Candidates[0].Plate : INDEX_NONE;
+                            const int32 NearestFrameIdx = (Candidates.Num() > 0) ? Candidates[0].FrameIdx : INDEX_NONE;
+
+                            if (NearestPlate != INDEX_NONE)
+                            {
+                                // Este es por definicion un traspaso -ningun reclamante
+                                // dentro del radio de contienda confirma a NearestPlate como
+                                // dueño ya asentado-: material de Prev, no del marco de
+                                // NearestPlate (ver AssignHandoff). Sin crear ni destruir
+                                // corteza, solo cambia quien manda.
+                                const uint8 TypeBeforeHandoff = Prev[FaceIdx].CrustTypeData[Idx];
+
+                                AssignHandoff(NearestPlate, Idx);
+
+                                if (TypeBeforeHandoff == 1 && Face.CrustTypeData[Idx] == 0)
+                                {
+                                    ++Count.HandoffFromContinental;
+                                }
+                                Events.Add({ NearestPlate, NearestFrameIdx, 1 });
+                                ++Count.ResolvedByWideSearch;
+                            }
+                            else
+                            {
+                                // Ultimo recurso de verdad: ni siquiera con el radio
+                                // ampliado hay una placa cerca. Residuo real (ver ANEXO
+                                // A14, "trilema"): se conserva el estado anterior.
+                                Face.PlateIDData[Idx]        = static_cast<uint8>(PreviousOwner);
+                                Face.CrustTypeData[Idx]      = Prev[FaceIdx].CrustTypeData[Idx];
+                                Face.CrustAgeData[Idx]       = Prev[FaceIdx].CrustAgeData[Idx];
+                                Face.CrustThicknessData[Idx] = Prev[FaceIdx].CrustThicknessData[Idx];
+                                Face.ElevationData[Idx]      = Prev[FaceIdx].ElevationData[Idx];
+                                Events.Add({ PreviousOwner, GetTerritoryFrameIndex(PreviousOwner, Dir), 1 });
+                                ++Count.Moved;
+                                ++Count.Unresolved;
+
+                                // DIAGNOSTICO (17-08-2026): del residuo que sigue sin
+                                // resolverse NI SIQUIERA con la busqueda ampliada -deberia
+                                // ser un puñado de celdas ahora, no miles-. Convergente
+                                // (vecinos que se acercan de media) es sospechoso de un
+                                // fallo real; cerca de cero es un caso aislado genuino.
+                                if (AvgDivergence < -0.10f * MaxAngularSpeed)
+                                {
+                                    ++Count.UnresolvedConverging;
+                                }
+                                else
+                                {
+                                    ++Count.UnresolvedNearZero;
+                                }
+
+                                // RecoveryCountData cambia de significado con R2.9 Fase 4: ya
+                                // no cuenta recuperaciones por tolerancia (ese mecanismo se
+                                // quito, ver TryTerritoryTolerant mas arriba) sino cuantas
+                                // veces esta celda cayo en el residuo real -ni reclamante, ni
+                                // rift, ni vecino cercano-. Deberia ser rarisimo ahora.
+                                ++Face.RecoveryCountData[Idx];
+                            }
+                        }
                     }
                     else
                     {
-                    // ====================================================================
-                    // RECUPERACION POR TOLERANCIA DE MEDIA CELDA (16-08-2026)
-                    //
-                    // CAUSA RAIZ de los cordones de corteza congelada. El test de
-                    // reclamacion es prev[nearest(R^-1 * d)].PlateID == P, y ese nearest()
-                    // redondea al centro de celda mas cercano: hasta MEDIA CELDA de error.
-                    //
-                    // Una celda que pertenece legitimamente a la placa P pero esta a menos
-                    // de media celda de la frontera anterior de P puede caer, al redondear,
-                    // justo fuera de la region de P. Resultado: cero reclamantes para una
-                    // celda que no es rift ni colision. Es un FALLO DE BUSQUEDA, no fisica.
-                    //
-                    // Y como el error de redondeo depende de la geometria local, a lo largo
-                    // de una frontera con orientacion desfavorable fallan SIEMPRE LAS
-                    // MISMAS celdas, adveccion tras adveccion. Esa es la linea persistente
-                    // que conservaba su contenido mientras el entorno se renovaba.
-                    //
-                    // La solucion no es decidir que hacer con el hueco - se probaron las
-                    // tres opciones y todas empeoraban algo - sino que el hueco NO EXISTA:
-                    // se repite la busqueda mirando las cuatro celdas que rodean la
-                    // posicion continua exacta, que es justo el alcance del redondeo.
-                    //
-                    // Se hace SOLO cuando la busqueda estricta no encontro a nadie. Las
-                    // celdas de interior (un reclamante) y las de colision (dos o mas) no
-                    // se tocan. Eso importa: un intento anterior aplico tolerancia a TODAS
-                    // las celdas y triplico las colisiones, porque dos placas pasaban a
-                    // reclamar la misma celda y el algoritmo entero se apoya en cuantas
-                    // placas reclaman.
-                    // ====================================================================
-                    // COMO SE ELIGE ENTRE VARIOS CANDIDATOS (16-08-2026)
-                    //
-                    // Antes se prefiria "la placa que ya ocupaba esta celda", con un break
-                    // que cortaba en cuanto la encontraba. Se justificaba como continuidad
-                    // del campo, pero es un SESGO A NO MOVERSE, y tenia dos sintomas que
-                    // el usuario vio en pantalla:
-                    //
-                    //   - Una peninsula parada mientras el resto del continente derivaba.
-                    //     En una frontera con orientacion desfavorable la busqueda estricta
-                    //     falla siempre en las mismas celdas; la recuperacion se las
-                    //     devolvia a su dueno anterior una y otra vez y no advectaban nunca.
-                    //   - "Puentes" rectos de tierra entre continentes. Es la misma celda
-                    //     congelada: al recuperar copia tambien el CrustType, asi que la
-                    //     franja conservaba su corteza continental mientras el entorno se
-                    //     renovaba a oceano.
-                    //
-                    // Salian alineados con los ejes porque los candidatos son {+-1,0} y
-                    // {0,+-1}: la rejilla, no la tectonica.
-                    //
-                    // Ahora se elige por DISTANCIA. El retrotrazado cae en un punto
-                    // continuo (CellX, CellY) y el material de ese punto pertenece a quien
-                    // de verdad lo contiene, asi que entre los candidatos que coinciden se
-                    // toma el mas cercano a esa posicion. Es un criterio geometrico y
-                    // deterministico: no depende de quien estuviera antes, con lo que
-                    // desaparece el punto fijo que congelaba las celdas.
-                    int32 RecoveredPlate = INDEX_NONE;
-                    int32 RecoveredFace = 0;
-                    int32 RecoveredIdx = 0;
-                    float BestDistSq = TNumericLimits<float>::Max();
+                        // COLISION. Gana una placa y el resto subducen.
+                        ++Count.Collisions;
 
-                    for (int32 P = 0; P < NumPlates; ++P)
-                    {
-                        const FVector PrevDir = InverseRotations[P].RotateVector(Dir);
-                        ECSCubeFace PF; float PU, PV;
-                        CubeFaceMapping::DirectionToFaceTexUV(PrevDir, PF, PU, PV);
+                        TArray<float, TInlineAllocator<8>> ClaimAge;
+                        TArray<uint8, TInlineAllocator<8>> ClaimType;
+                        TArray<float, TInlineAllocator<8>> ClaimThickness;
+                        TArray<float, TInlineAllocator<8>> ClaimElevation;
 
-                        // Posicion continua en coordenadas de celda, y celda mas cercana.
-                        const float CellX = PU * Resolution - 0.5f;
-                        const float CellY = PV * Resolution - 0.5f;
-                        const int32 NearX = FMath::Clamp(FMath::RoundToInt(CellX), 0, Resolution - 1);
-                        const int32 NearY = FMath::Clamp(FMath::RoundToInt(CellY), 0, Resolution - 1);
-
-                        // Hacia que lado esta la mitad de celda que el redondeo perdio.
-                        const int32 DirX = (CellX >= static_cast<float>(NearX)) ? 1 : -1;
-                        const int32 DirY = (CellY >= static_cast<float>(NearY)) ? 1 : -1;
-
-                        // Las cuatro celdas del entorno se piden a GetNeighborPixel, que
-                        // CRUZA ENTRE CARAS.
-                        //
-                        // La primera version recortaba los indices al rango de la cara en
-                        // vez de cruzar, y eso dejaba un artefacto sistematico a lo largo
-                        // de las 12 aristas del cubo: junto a una costura, la busqueda
-                        // miraba las celdas del borde OPUESTO de la misma cara, que no
-                        // tienen ninguna relacion con el punto. Como el error dependia solo
-                        // de la geometria de la arista, fallaba siempre en las mismas
-                        // celdas y se veia en pantalla como una franja recta de tierra que
-                        // no cambiaba nunca.
-                        //
-                        // Es el mismo error que F0 elimino de todo el proyecto: tratar una
-                        // cara como si fuera una imagen aislada.
-                        const int32 Offsets[4][2] = { {0, 0}, {DirX, 0}, {0, DirY}, {DirX, DirY} };
-
-                        for (int32 C = 0; C < 4; ++C)
+                        for (int32 C = 0; C < Claimants.Num(); ++C)
                         {
-                            ECSCubeFace CF;
-                            int32 CX, CY;
-                            if (!GetNeighborPixel(PF, NearX, NearY, Offsets[C][0], Offsets[C][1], CF, CX, CY))
+                            float CAge; uint8 CType; float CThick; float CElev;
+                            ++Count.MaterialReads;
+                            if (!ReadPlateMaterial(Claimants[C], Dir, CAge, CType, CThick, CElev))
+                            {
+                                ++Count.MaterialFallbacks;
+                                CAge = Prev[FaceIdx].CrustAgeData[Idx];
+                                CType = Prev[FaceIdx].CrustTypeData[Idx];
+                                CThick = Prev[FaceIdx].CrustThicknessData[Idx];
+                                CElev = Prev[FaceIdx].ElevationData[Idx];
+                            }
+                            ClaimAge.Add(CAge);
+                            ClaimType.Add(CType);
+                            ClaimThickness.Add(CThick);
+                            ClaimElevation.Add(CElev);
+                        }
+
+                        int32 Winner = 0;
+                        for (int32 C = 1; C < Claimants.Num(); ++C)
+                        {
+                            const bool bWinnerContinental = (ClaimType[Winner] == 1);
+                            const bool bChallengerContinental = (ClaimType[C] == 1);
+
+                            if (bChallengerContinental != bWinnerContinental)
+                            {
+                                // Continental sobre oceanica: la oceanica subduce.
+                                if (bChallengerContinental)
+                                {
+                                    Winner = C;
+                                }
+                            }
+                            else if (!bWinnerContinental)
+                            {
+                                // Oceanica contra oceanica: subduce la mas vieja.
+                                if (ClaimAge[C] < ClaimAge[Winner])
+                                {
+                                    Winner = C;
+                                }
+                            }
+                            else
+                            {
+                                // Continental contra continental: se queda la mas alta.
+                                if (ClaimElevation[C] > ClaimElevation[Winner])
+                                {
+                                    Winner = C;
+                                }
+                            }
+                        }
+
+                        // DIAGNOSTICO (18-08-2026): "gana la continental" solo se aplica
+                        // ENTRE LOS RECLAMANTES ACTUALES. Si la placa continental que era
+                        // dueña de esta celda ya se retiro del todo (su propia busqueda ya
+                        // no la encuentra aqui), la celda se disputa entre otras placas -a
+                        // lo mejor ninguna continental- sin que la regla de proteccion
+                        // llegue a aplicarse nunca, porque la dueña continental ni siquiera
+                        // participa ya en la disputa.
+                        if (Prev[FaceIdx].CrustTypeData[Idx] == 1 && ClaimType[Winner] == 0)
+                        {
+                            ++Count.CollisionFromContinental;
+                        }
+
+                        Face.PlateIDData[Idx]       = static_cast<uint8>(Claimants[Winner]);
+                        Face.ElevationData[Idx]     = ClaimElevation[Winner];
+                        Face.CrustAgeData[Idx]      = ClaimAge[Winner];
+                        Face.CrustTypeData[Idx]     = ClaimType[Winner];
+                        Face.RefSourceFaceData[Idx] = static_cast<uint8>(FaceIdx);
+                        Face.RefSourceIdxData[Idx]  = Idx;
+
+                        // CONSERVACION DE CORTEZA CONTINENTAL (ROADMAP.md F2): el grosor
+                        // del perdedor continental se suma al del ganador en vez de
+                        // perderse; solo la oceanica subduce de verdad.
+                        float Thickness = ClaimThickness[Winner];
+                        int32 SubductedCount = 0;
+
+                        for (int32 C = 0; C < Claimants.Num(); ++C)
+                        {
+                            if (C == Winner)
                             {
                                 continue;
                             }
 
-                            const int32 CFaceIdx = static_cast<int32>(CF);
-                            const int32 CIdx = CY * Resolution + CX;
+                            // El territorio del perdedor se libera: su marco ya no debe
+                            // reclamar este punto la proxima vez que se le pregunte.
+                            Events.Add({ Claimants[C], ClaimFrameIdx[C], 0 });
 
-                            if (Prev[CFaceIdx].PlateIDData[CIdx] != static_cast<uint8>(P))
+                            if (ClaimType[C] == 1)
                             {
-                                continue;
+                                Thickness += ClaimThickness[C];
                             }
-
-                            // Distancia del punto retrotrazado al centro del candidato. Se
-                            // mide en la cara de origen, antes de cruzar: los desfases son
-                            // de una celda, asi que la aproximacion es local y basta para
-                            // ordenar candidatos.
-                            const float DX = CellX - static_cast<float>(NearX + Offsets[C][0]);
-                            const float DY = CellY - static_cast<float>(NearY + Offsets[C][1]);
-                            const float DistSq = DX * DX + DY * DY;
-
-                            if (DistSq < BestDistSq)
+                            else
                             {
-                                BestDistSq = DistSq;
-                                RecoveredPlate = P;
-                                RecoveredFace = CFaceIdx;
-                                RecoveredIdx = CIdx;
+                                ++SubductedCount;
                             }
                         }
+                        Events.Add({ Claimants[Winner], ClaimFrameIdx[Winner], 1 });
+
+                        Face.CrustThicknessData[Idx] = FMath::Min(Thickness, FIsostasyParams().MaxThickness);
+                        Count.Destroyed += SubductedCount;
                     }
-
-                    if (RecoveredPlate != INDEX_NONE)
-                    {
-                        // Movimiento normal, igual que el caso de un unico reclamante: el
-                        // material tambien sale del marco de la placa.
-                        float RAge; uint8 RType; float RThick; float RElev;
-                        ++Count.MaterialReads;
-                        if (!ReadPlateMaterial(RecoveredPlate, Dir, RAge, RType, RThick, RElev))
-                        {
-                            ++Count.MaterialFallbacks;
-                            RAge = Prev[RecoveredFace].CrustAgeData[RecoveredIdx];
-                            RType = Prev[RecoveredFace].CrustTypeData[RecoveredIdx];
-                            RThick = Prev[RecoveredFace].CrustThicknessData[RecoveredIdx];
-                            RElev = Prev[RecoveredFace].ElevationData[RecoveredIdx];
-                        }
-
-                        Face.PlateIDData[Idx]        = static_cast<uint8>(RecoveredPlate);
-                        Face.ElevationData[Idx]      = RElev;
-                        Face.CrustAgeData[Idx]       = RAge;
-                        Face.CrustTypeData[Idx]      = RType;
-                        Face.CrustThicknessData[Idx] = RThick;
-                        Face.RefSourceFaceData[Idx] = static_cast<uint8>(RecoveredFace);
-                        Face.RefSourceIdxData[Idx] = RecoveredIdx;
-                        ++Count.Moved;
-                        ++Count.Recovered;
-                        ++Face.RecoveryCountData[Idx];
-
-                        // Se recalcula la velocidad igual que en el resto de ramas.
-                        const int32 RecOwner = static_cast<int32>(Face.PlateIDData[Idx]);
-                        if (Plates.IsValidIndex(RecOwner))
-                        {
-                            const FVector AngularVel =
-                                Plates[RecOwner].EulerPole.GetSafeNormal() * Plates[RecOwner].AngularVelocity;
-                            const FVector Velocity3D = FVector::CrossProduct(AngularVel, Dir);
-                            FVector TU, TV, FN;
-                            CubeFaceMapping::GetFaceAxes(static_cast<ECSCubeFace>(FaceIdx), TU, TV, FN);
-                            Face.VelocityData[Idx] = FVector2f(
-                                static_cast<float>(FVector::DotProduct(Velocity3D, TU)),
-                                static_cast<float>(FVector::DotProduct(Velocity3D, TV)));
-                        }
-                        continue;
-                    }
-
-                        // Ni reclamante estricto, ni rift, ni recuperable con tolerancia.
-                        // Es el residuo que ninguna de las tres vias resuelve.
-                        //
-                        // Se conserva el estado anterior, que es lo menos danino: crear
-                        // oceano disolvia los continentes desde dentro y rellenar del
-                        // vecindario los sesgaba hacia el oceano (ver ROADMAP.md). Pero
-                        // conservar CONGELA la celda, asi que esto solo es aceptable
-                        // mientras sea residual - lo vigila Simu.Tectonics.LongRunStability.
-                        //
-                        // TRILEMA DOCUMENTADO (16-08-2026). Ninguna de las tres salidas es
-                        // buena, porque la celda no deberia existir. Medido en
-                        // Simu.Tectonics.LongRunStability, 1000 Ma, partiendo de 24,6% de
-                        // tierra emergida:
-                        //
-                        //   a) crear oceano       -> los continentes se disuelven desde
-                        //                            dentro. Tierra al 8,9%.
-                        //   b) rellenar del vecindario -> como los huecos salen sobre todo
-                        //                            en margenes continentales, el vecino
-                        //                            suele ser oceano. Tierra al 11,3%
-                        //                            (12,1% prefiriendo la misma placa).
-                        //   c) conservar el estado -> tierra estable en 25,1%, pero las
-                        //                            celdas se congelan: mantienen corteza
-                        //                            vieja mientras su entorno se renueva,
-                        //                            y se ven como cordones elevados que
-                        //                            no envejecen ni se reciclan.
-                        //
-                        // Se elige (c): un artefacto visual localizado es preferible a
-                        // perder la mitad de los continentes. Pero es una eleccion entre
-                        // males, no una solucion.
-                        //
-                        // La solucion de verdad es que estos huecos NO EXISTAN, y eso pide
-                        // reescribir la adveccion en coordenadas materiales en vez de
-                        // remuestrear el campo en cada paso. Ver el apartado de defectos
-                        // abiertos en ROADMAP.md.
-                        Face.PlateIDData[Idx]        = PreviousOwner;
-                        Face.CrustTypeData[Idx]      = Prev[FaceIdx].CrustTypeData[Idx];
-                        Face.CrustAgeData[Idx]       = Prev[FaceIdx].CrustAgeData[Idx];
-                        Face.CrustThicknessData[Idx] = Prev[FaceIdx].CrustThicknessData[Idx];
-                        Face.ElevationData[Idx]      = Prev[FaceIdx].ElevationData[Idx];
-                        ++Count.Moved;
-                        ++Count.Unresolved;
-                    }
-                }
-                else
-                {
-                    // COLISION. Gana una placa y el resto subducen.
-                    ++Count.Collisions;
-
-                    // El material de CADA reclamante sale de SU PROPIO marco. Importa: quien
-                    // gana una colision se decide comparando tipo, edad y altura, y si esas
-                    // comparaciones se hicieran sobre material remuestreado en cadena, el
-                    // ganador podria cambiar de una celda a la siguiente por ruido y no por
-                    // fisica. Eso es parte de lo que picaba el mapa de placas.
-                    TArray<float, TInlineAllocator<8>> ClaimAge;
-                    TArray<uint8, TInlineAllocator<8>> ClaimType;
-                    TArray<float, TInlineAllocator<8>> ClaimThickness;
-                    TArray<float, TInlineAllocator<8>> ClaimElevation;
-
-                    for (int32 C = 0; C < Claimants.Num(); ++C)
-                    {
-                        float CAge; uint8 CType; float CThick; float CElev;
-                        ++Count.MaterialReads;
-                        if (!ReadPlateMaterial(Claimants[C], Dir, CAge, CType, CThick, CElev))
-                        {
-                            ++Count.MaterialFallbacks;
-                            const int32 SFb = SourceFace[C], SIb = SourceIdx[C];
-                            CAge = Prev[SFb].CrustAgeData[SIb];
-                            CType = Prev[SFb].CrustTypeData[SIb];
-                            CThick = Prev[SFb].CrustThicknessData[SIb];
-                            CElev = Prev[SFb].ElevationData[SIb];
-                        }
-                        ClaimAge.Add(CAge);
-                        ClaimType.Add(CType);
-                        ClaimThickness.Add(CThick);
-                        ClaimElevation.Add(CElev);
-                    }
-
-                    int32 Winner = 0;
-                    for (int32 C = 1; C < Claimants.Num(); ++C)
-                    {
-                        const bool bWinnerContinental = (ClaimType[Winner] == 1);
-                        const bool bChallengerContinental = (ClaimType[C] == 1);
-
-                        if (bChallengerContinental != bWinnerContinental)
-                        {
-                            // Continental sobre oceanica: la oceanica es mas densa y
-                            // subduce. Por eso los continentes persisten miles de millones
-                            // de anos mientras el fondo oceanico se recicla entero.
-                            if (bChallengerContinental)
-                            {
-                                Winner = C;
-                            }
-                        }
-                        else if (!bWinnerContinental)
-                        {
-                            // Oceanica contra oceanica: subduce la MAS VIEJA, que se ha
-                            // enfriado y es mas densa. Gana la mas joven.
-                            if (ClaimAge[C] < ClaimAge[Winner])
-                            {
-                                Winner = C;
-                            }
-                        }
-                        else
-                        {
-                            // Continental contra continental: ninguna subduce, las dos
-                            // flotan. Se queda la mas alta, aproximacion barata a que el
-                            // material se apila. El relieve de la colision en si lo
-                            // produce el termino de frontera de Step().
-                            if (ClaimElevation[C] > ClaimElevation[Winner])
-                            {
-                                Winner = C;
-                            }
-                        }
-                    }
-
-                    const int32 WF = SourceFace[Winner];
-                    const int32 WI = SourceIdx[Winner];
-
-                    const int32 WinnerFace = WF;
-                    const int32 WinnerIdx = WI;
-
-                    Face.PlateIDData[Idx]   = static_cast<uint8>(Claimants[Winner]);
-                    Face.ElevationData[Idx] = ClaimElevation[Winner];
-                    Face.CrustAgeData[Idx]  = ClaimAge[Winner];
-                    Face.CrustTypeData[Idx] = ClaimType[Winner];
-                    Face.RefSourceFaceData[Idx] = static_cast<uint8>(WinnerFace);
-                    Face.RefSourceIdxData[Idx] = WinnerIdx;
-
-                    // CONSERVACION DE CORTEZA CONTINENTAL (ROADMAP.md F2).
-                    //
-                    // Antes de F2 el perdedor simplemente desaparecia, y el planeta perdia
-                    // ~29% de corteza continental cada 200 Ma - insostenible, porque en la
-                    // Tierra el area continental lleva miles de millones de anos
-                    // aproximadamente constante.
-                    //
-                    // La fisica real: la corteza oceanica SI se destruye (subduce al
-                    // manto), pero la continental NO puede - es demasiado ligera para
-                    // hundirse. Cuando dos continentes chocan, su material se APILA. Por
-                    // eso el Tibet tiene 70 km de corteza en vez de 35.
-                    //
-                    // Asi que el grosor del perdedor continental se suma al del ganador,
-                    // y de ahi salen las montanas por flotacion isostatica, sin ningun
-                    // termino de levantamiento inventado.
-                    float Thickness = ClaimThickness[Winner];
-                    int32 SubductedCount = 0;
-
-                    for (int32 C = 0; C < Claimants.Num(); ++C)
-                    {
-                        if (C == Winner)
-                        {
-                            continue;
-                        }
-
-                        if (ClaimType[C] == 1)
-                        {
-                            // Continental: se apila, no se pierde.
-                            Thickness += ClaimThickness[C];
-                        }
-                        else
-                        {
-                            // Oceanica: subduce y desaparece de verdad.
-                            ++SubductedCount;
-                        }
-                    }
-
-                    Face.CrustThicknessData[Idx] = FMath::Min(Thickness, FIsostasyParams().MaxThickness);
-                    Count.Destroyed += SubductedCount;
                 }
 
                 // La velocidad depende de donde esta el punto AHORA y de quien lo posee
@@ -1546,6 +1596,19 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
         }
     });
 
+    // Aplicacion secuencial de los eventos de territorio recogidos arriba -ver el
+    // comentario junto a FTerritoryEvent sobre por que no se escriben directamente.
+    for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
+    {
+        for (const FTerritoryEvent& Ev : TerritoryEventsPerFace[FaceIdx])
+        {
+            if (PlateTerritory.IsValidIndex(Ev.PlateIdx) && PlateTerritory[Ev.PlateIdx].IsValidIndex(Ev.FrameIdx))
+            {
+                PlateTerritory[Ev.PlateIdx][Ev.FrameIdx] = Ev.NewValue;
+            }
+        }
+    }
+
     // ============================================================
     // LIMPIEZA DE MOTAS (15-08-2026)
     //
@@ -1566,9 +1629,24 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
         const double DespeckleStart = FPlatformTime::Seconds();
         const TArray<FTectonicFaceTextureData> Speckled = FaceData;
 
+        // Igual que en la resolucion principal: los cambios de territorio se recogen por
+        // cara y se aplican despues, no dentro del ParallelFor.
+        TArray<TArray<FTerritoryEvent>> DespeckleEventsPerFace;
+        DespeckleEventsPerFace.SetNum(6);
+
+        // DIAGNOSTICO (18-08-2026): esto reasigna por coincidencia de PLACA, no de tipo de
+        // corteza -un pixel continental legitimo, si su placa dueña no coincide con ninguna
+        // de las 4 vecinas (aunque sean de una placa mayormente oceanica), adopta el tipo
+        // oceanico del vecino mayoritario. Candidato al resto del sumidero de continente que
+        // rift+traspaso+colision no explican.
+        TArray<int32> DespeckleFromContinentalPerFace;
+        DespeckleFromContinentalPerFace.SetNumZeroed(6);
+
         ParallelFor(6, [&](int32 FaceIdx)
         {
             FTectonicFaceTextureData& Face = FaceData[FaceIdx];
+            TArray<FTerritoryEvent>& Events = DespeckleEventsPerFace[FaceIdx];
+            int32& DespeckleFromContinental = DespeckleFromContinentalPerFace[FaceIdx];
             const int32 NOff[4][2] = {{-1,0},{1,0},{0,-1},{0,1}};
 
             for (int32 Y = 0; Y < Resolution; ++Y)
@@ -1627,19 +1705,58 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
 
                     if (BestFace >= 0)
                     {
+                        if (Speckled[FaceIdx].CrustTypeData[Idx] == 1 && Speckled[BestFace].CrustTypeData[BestIdx] == 0)
+                        {
+                            ++DespeckleFromContinental;
+                        }
+
                         Face.PlateIDData[Idx]        = BestId;
                         Face.CrustTypeData[Idx]      = Speckled[BestFace].CrustTypeData[BestIdx];
                         Face.CrustAgeData[Idx]       = Speckled[BestFace].CrustAgeData[BestIdx];
                         Face.CrustThicknessData[Idx] = Speckled[BestFace].CrustThicknessData[BestIdx];
                         Face.ElevationData[Idx]      = Speckled[BestFace].ElevationData[BestIdx];
+
+                        // Rarisimo (una mota de un pixel), pero si no se libera/concede
+                        // aqui tambien, PlateTerritory se desincroniza permanentemente de
+                        // este pixel: la placa vieja seguiria reclamandolo para siempre.
+                        const FVector Dir = CubeFaceMapping::PixelToDirection(
+                            static_cast<ECSCubeFace>(FaceIdx), X, Y, Resolution);
+                        if (Plates.IsValidIndex(static_cast<int32>(Mine)))
+                        {
+                            Events.Add({ static_cast<int32>(Mine), GetTerritoryFrameIndex(Mine, Dir), 0 });
+                        }
+                        if (Plates.IsValidIndex(static_cast<int32>(BestId)))
+                        {
+                            Events.Add({ static_cast<int32>(BestId), GetTerritoryFrameIndex(BestId, Dir), 1 });
+                        }
                     }
                 }
             }
         });
 
+        for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
+        {
+            for (const FTerritoryEvent& Ev : DespeckleEventsPerFace[FaceIdx])
+            {
+                if (PlateTerritory.IsValidIndex(Ev.PlateIdx) && PlateTerritory[Ev.PlateIdx].IsValidIndex(Ev.FrameIdx))
+                {
+                    PlateTerritory[Ev.PlateIdx][Ev.FrameIdx] = Ev.NewValue;
+                }
+            }
+        }
+
+        for (int32 F : DespeckleFromContinentalPerFace)
+        {
+            AdvectionStats.CellsDespeckleFromContinental += F;
+        }
+
         AccumulateMs(StepTimings.DespeckleMs, DespeckleStart);
     }
 
+    int32 ThisAdvectionUnresolved = 0;
+    int32 ThisAdvectionUnresolvedConverging = 0;
+    int32 ThisAdvectionUnresolvedNearZero = 0;
+    int32 ThisAdvectionResolvedByWideSearch = 0;
     for (const FFaceCounters& C : Counters)
     {
         AdvectionStats.CellsMoved     += C.Moved;
@@ -1650,7 +1767,19 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
         AdvectionStats.CellsUnresolved += C.Unresolved;
         AdvectionStats.MaterialReads += C.MaterialReads;
         AdvectionStats.MaterialFallbacks += C.MaterialFallbacks;
+        AdvectionStats.CellsResolvedByWideSearch += C.ResolvedByWideSearch;
+        AdvectionStats.CellsRiftFromContinental += C.RiftFromContinental;
+        AdvectionStats.CellsHandoffFromContinental += C.HandoffFromContinental;
+        AdvectionStats.CellsCollisionFromContinental += C.CollisionFromContinental;
+        ThisAdvectionUnresolved += C.Unresolved;
+        ThisAdvectionUnresolvedConverging += C.UnresolvedConverging;
+        ThisAdvectionUnresolvedNearZero += C.UnresolvedNearZero;
+        ThisAdvectionResolvedByWideSearch += C.ResolvedByWideSearch;
     }
+    AdvectionStats.LastUnresolvedCells = ThisAdvectionUnresolved;
+    AdvectionStats.LastUnresolvedConverging = ThisAdvectionUnresolvedConverging;
+    AdvectionStats.LastUnresolvedNearZero = ThisAdvectionUnresolvedNearZero;
+    AdvectionStats.LastResolvedByWideSearch = ThisAdvectionResolvedByWideSearch;
     AdvectionStats.AdvectionCount++;
     AdvectionStats.AdvectedTime += DeltaTime;
 
@@ -1721,9 +1850,55 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
             {
                 AdvectPlateField(MaxAdvectionDt);
 
-                // R2.12: PlateIDData solo cambia aqui, asi que los segmentos se
-                // reconstruyen a la misma cadencia que la propia adveccion.
-                ExtractAndTrackBoundarySegments(MaxAdvectionDt);
+                if (bDebugAdvectionOnly)
+                {
+                    // MODO DEPURACION - CAPA 2a (17-08-2026): igual que produccion desde el
+                    // 18-08-2026 (ver la rama de abajo y ANEXO.md), WriteBackToPlateFrames()
+                    // se llama tras CADA adveccion, no solo una vez al final del Step(). Esta
+                    // capa lo hacia asi desde el principio -era la unica forma de que
+                    // ReadPlateMaterial() no leyera un marco congelado mientras
+                    // PlateAccumRotation seguia creciendo, el fantasma/cinta que aparecio la
+                    // primera vez que se probo esta capa-; produccion tenia el mismo defecto
+                    // sin diagnosticar hasta que F1F lo hizo visible como perdida de
+                    // corteza continental.
+                    const double WriteBackStart = FPlatformTime::Seconds();
+                    WriteBackToPlateFrames();
+                    AccumulateMs(StepTimings.WriteBackMs, WriteBackStart);
+                }
+                else
+                {
+                    // ARREGLO DE RAIZ (18-08-2026, ver ANEXO.md): WriteBackToPlateFrames()
+                    // corria una sola vez al final de Step(), despues de la isostasia -no
+                    // una vez por adveccion, pese a que TimeScale alto mete hasta 8
+                    // advecciones por Step()-. Mismo defecto que ya se habia corregido en la
+                    // Capa 2a (ver el comentario de la rama de arriba) pero nunca se llevo a
+                    // produccion. Consecuencia medida: en las advecciones intermedias, una
+                    // placa que lee su PROPIO material -ni siquiera un traspaso de dueño- lo
+                    // encontraba desactualizado respecto al mundo, volcando tipos de corteza
+                    // equivocados a un ritmo de miles de celdas por tramo de 125 Ma -la
+                    // mayor parte del sumidero de corteza continental sin explicar de F1F.
+                    // Se llama aqui, ANTES de segmentos/cinematica, para que ambos lean
+                    // material ya sincronizado con esta misma adveccion.
+                    const double WriteBackStart = FPlatformTime::Seconds();
+                    WriteBackToPlateFrames();
+                    AccumulateMs(StepTimings.WriteBackMs, WriteBackStart);
+
+                    // F1E Fase A: si la adveccion partio el territorio de alguna placa en
+                    // trozos disjuntos, aqui nace la placa nueva -antes de reconstruir
+                    // segmentos, para que estos ya reflejen la particion.
+                    HandlePlateFragmentation();
+
+                    // R2.12: PlateIDData solo cambia aqui, asi que los segmentos se
+                    // reconstruyen a la misma cadencia que la propia adveccion.
+                    const double SegmentsStart = FPlatformTime::Seconds();
+                    ExtractAndTrackBoundarySegments(MaxAdvectionDt);
+                    AccumulateMs(StepTimings.SegmentsMs, SegmentsStart);
+
+                    // F1F Fase B: con los segmentos ya al dia, el balance de pares que
+                    // sale de ellos tambien lo esta. No-op si bUseDynamicKinematics es
+                    // false -mismo interruptor que las Capas 1/2a.
+                    UpdatePlateKinematicsFromTorqueBalance();
+                }
 
                 PendingAdvectionTime -= MaxAdvectionDt;
                 ++Done;
@@ -1738,6 +1913,13 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
                 PendingAdvectionTime = 0.0f;
             }
         }
+    }
+
+    // MODO DEPURACION - CAPA 2a: corta aqui, justo despues de mover PlateIDData y la
+    // corteza por adveccion. Nada de envejecimiento, fisica de frontera ni isostasia.
+    if (bDebugAdvectionOnly)
+    {
+        return;
     }
 
     // Envejecer la corteza. Va fuera del bucle de sub-pasos porque es lineal en el
@@ -2113,7 +2295,9 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
     // Lo que la fisica acaba de cambiar sobre el mundo (orogenia, acrecion, difusion,
     // isostasia) hay que devolverlo a los marcos de placa: si no, la proxima adveccion lo
     // borraria al leer de un marco que no se entero.
+    const double WriteBackStart = FPlatformTime::Seconds();
     WriteBackToPlateFrames();
+    AccumulateMs(StepTimings.WriteBackMs, WriteBackStart);
 
     TotalSimulationTime += DeltaTimeScaled;
     StepCount++;
@@ -2183,6 +2367,357 @@ void URasterizedTectonics::InitializePlateMaterialFrames()
             }
         }
     }
+}
+
+void URasterizedTectonics::InitializePlateTerritory()
+{
+    if (!PlateSystem)
+    {
+        return;
+    }
+
+    const int32 NumPlates = PlateSystem->GetPlates().Num();
+    const int32 NumCells = GetFrameCellCount();
+
+    PlateTerritory.Reset();
+    PlateTerritory.SetNum(NumPlates);
+    for (int32 P = 0; P < NumPlates; ++P)
+    {
+        PlateTerritory[P].SetNumZeroed(NumCells);
+    }
+
+    // Con PlateAccumRotation a identidad (InitializePlateMaterialFrames ya la puso), el
+    // marco de cada placa coincide celda a celda con el mundo.
+    for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
+    {
+        const FTectonicFaceTextureData& Face = FaceData[FaceIdx];
+        for (int32 Y = 0; Y < Resolution; ++Y)
+        {
+            for (int32 X = 0; X < Resolution; ++X)
+            {
+                const int32 WIdx = Y * Resolution + X;
+                const int32 P = static_cast<int32>(Face.PlateIDData[WIdx]);
+                if (!PlateTerritory.IsValidIndex(P))
+                {
+                    continue;
+                }
+                PlateTerritory[P][GetFrameIndex(FaceIdx, X, Y)] = 1;
+            }
+        }
+    }
+}
+
+void URasterizedTectonics::EnsurePlateFrameCapacity(int32 PlateIndex)
+{
+    const int32 NumCells = GetFrameCellCount();
+
+    while (PlateTerritory.Num() <= PlateIndex)
+    {
+        PlateTerritory.AddDefaulted();
+        PlateTerritory.Last().SetNumZeroed(NumCells);
+    }
+    while (PlateMaterial.Num() <= PlateIndex)
+    {
+        PlateMaterial.AddDefaulted();
+        PlateMaterial.Last().SetNum(NumCells);
+    }
+    while (PlateAccumRotation.Num() <= PlateIndex)
+    {
+        PlateAccumRotation.Add(FQuat::Identity);
+    }
+}
+
+// ============================================================
+// F1E FASE A (17-08-2026): NACIMIENTO POR FRAGMENTACION
+//
+// Ver el comentario de la declaracion (RasterizedTectonics.h) para el motivo. Aqui solo el
+// mecanismo: flood-fill de componentes conexas sobre PlateIDData completo, componente mayor
+// se queda con el ID original, cada componente menor nace como placa nueva.
+//
+// DOS PASADAS, A PROPOSITO -la primera version guardaba la lista de celdas (FaceIdx, Idx)
+// de CADA componente, incluida la componente unica y gigante de una placa que no se ha
+// fragmentado, cada adveccion. Medido: eso disparo el coste del paso a ~4000ms, porque para
+// un planeta entero (6*Res*Res celdas) eso es construir y hacer crecer un TArray de pares
+// del tamano del PLANETA, en el hilo de juego, sin ParallelFor, EN CADA adveccion -y una
+// placa se fragmenta poquisimas veces en toda una corrida. La pasada 1 aqui solo ETIQUETA
+// (un int32 por celda, sin heap por celda) y CUENTA -nunca guarda coordenadas-. La pasada 2,
+// la unica que toca cada celda una vez mas para reescribir PlateIDData y sembrar
+// territorio/material, SOLO se ejecuta si de verdad hay alguna placa fragmentada -el caso
+// comun (nada fragmentado) se va con un solo barrido barato.
+// ============================================================
+void URasterizedTectonics::HandlePlateFragmentation()
+{
+    if (!bIsInitialized || !PlateSystem)
+    {
+        return;
+    }
+
+    const double FragStart = FPlatformTime::Seconds();
+
+    // Cerca del limite de uint8 de PlateIDData (0-255, ver TectonicTypes.h): no arriesgar
+    // desbordar. A partir de aqui, los fragmentos que sobren se quedan con el PlateID del
+    // padre -no es correcto, pero es preferible a que un ID nuevo envuelva a 0 y corrompa
+    // una placa existente.
+    static constexpr int32 MaxPlates = 250;
+    if (PlateSystem->GetPlates().Num() >= MaxPlates)
+    {
+        AccumulateMs(StepTimings.FragmentationMs, FragStart);
+        return;
+    }
+
+    // ------------------------------------------------------------
+    // PASADA 1: etiquetar y contar, sin guardar coordenadas.
+    // ------------------------------------------------------------
+    TArray<TArray<int32>> Label; // -1 = sin visitar; en otro caso, indice de componente
+    Label.SetNum(6);
+    for (int32 F = 0; F < 6; ++F)
+    {
+        Label[F].Init(INDEX_NONE, Resolution * Resolution);
+    }
+
+    TArray<int32> ComponentPlateID;
+    TArray<int32> ComponentCellCount;
+
+    // F1E Fase A.1 -asimilacion (17-08-2026): mientras se hace el flood-fill, se registra
+    // que PlateID limitan con cada componente. Por la propia definicion del flood-fill, dos
+    // celdas vecinas con el MISMO PlateID caen siempre en la MISMA componente -asi que
+    // cualquier vecino fuera de la componente actual tiene, necesariamente, un PlateID
+    // DISTINTO-. Si una componente pequeña linda unicamente con una sola placa vecina en
+    // todo su perimetro, esa placa vecina la rodea por completo y deberia quedarsela -ver
+    // ComponentBorderPlateID/Ambiguous, usados mas abajo-. Si linda con dos o mas, queda
+    // ambigua y no se toca -misma filosofia que el resto del trilema de R2.9 Fase 4-.
+    TArray<int32> ComponentBorderPlateID;   // INDEX_NONE = todavia no se ha visto ningun vecino distinto
+    TArray<bool> ComponentBorderAmbiguous;  // true = linda con 2+ placas vecinas distintas
+
+    TArray<TPair<int32, int32>> Stack;
+    const int32 Offsets4[4][2] = { {-1, 0}, {1, 0}, {0, -1}, {0, 1} };
+
+    for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
+    {
+        for (int32 Y = 0; Y < Resolution; ++Y)
+        {
+            for (int32 X = 0; X < Resolution; ++X)
+            {
+                const int32 SeedIdx = Y * Resolution + X;
+                if (Label[FaceIdx][SeedIdx] != INDEX_NONE)
+                {
+                    continue;
+                }
+
+                const int32 SeedPlate = static_cast<int32>(FaceData[FaceIdx].PlateIDData[SeedIdx]);
+                const int32 ComponentIdx = ComponentPlateID.Add(SeedPlate);
+                ComponentCellCount.Add(0);
+                ComponentBorderPlateID.Add(INDEX_NONE);
+                ComponentBorderAmbiguous.Add(false);
+
+                Stack.Reset();
+                Stack.Add(TPair<int32, int32>(FaceIdx, SeedIdx));
+                Label[FaceIdx][SeedIdx] = ComponentIdx;
+
+                while (Stack.Num() > 0)
+                {
+                    const TPair<int32, int32> Cur = Stack.Pop(EAllowShrinking::No);
+                    const int32 CFace = Cur.Key;
+                    const int32 CIdx = Cur.Value;
+                    const int32 CY = CIdx / Resolution;
+                    const int32 CX = CIdx % Resolution;
+
+                    ++ComponentCellCount[ComponentIdx];
+
+                    for (int32 i = 0; i < 4; ++i)
+                    {
+                        ECSCubeFace NF; int32 NX, NY;
+                        if (!GetNeighborPixel(static_cast<ECSCubeFace>(CFace), CX, CY,
+                                               Offsets4[i][0], Offsets4[i][1], NF, NX, NY))
+                        {
+                            continue;
+                        }
+                        const int32 NFaceIdx = static_cast<int32>(NF);
+                        const int32 NIdx = NY * Resolution + NX;
+
+                        const int32 NeighborPlate = static_cast<int32>(FaceData[NFaceIdx].PlateIDData[NIdx]);
+                        if (NeighborPlate != SeedPlate)
+                        {
+                            // Vecino de otra placa: registrar como candidato a "quien rodea
+                            // a esta componente", sin visitarlo -pertenece a su propio
+                            // flood-fill, no al de aqui.
+                            if (ComponentBorderPlateID[ComponentIdx] == INDEX_NONE)
+                            {
+                                ComponentBorderPlateID[ComponentIdx] = NeighborPlate;
+                            }
+                            else if (ComponentBorderPlateID[ComponentIdx] != NeighborPlate)
+                            {
+                                ComponentBorderAmbiguous[ComponentIdx] = true;
+                            }
+                            continue;
+                        }
+
+                        if (Label[NFaceIdx][NIdx] != INDEX_NONE)
+                        {
+                            continue;
+                        }
+
+                        Label[NFaceIdx][NIdx] = ComponentIdx;
+                        Stack.Add(TPair<int32, int32>(NFaceIdx, NIdx));
+                    }
+                }
+            }
+        }
+    }
+
+    // Agrupar componentes por placa original -son pocos (decenas), no celdas.
+    TMap<int32, TArray<int32>> ComponentsPerPlate;
+    for (int32 C = 0; C < ComponentPlateID.Num(); ++C)
+    {
+        ComponentsPerPlate.FindOrAdd(ComponentPlateID[C]).Add(C);
+    }
+
+    // ------------------------------------------------------------
+    // Decidir que componentes nacen como placa nueva. Nada de esto toca las celdas todavia.
+    //
+    // UMBRAL MINIMO (17-08-2026, medido tras el primer despliegue): sin esto, cualquier
+    // resto de motas que la limpieza de un solo pixel no atrapa -un par de pixeles sueltos
+    // en el borde de una frontera ruidosa- se convierte en placa propia. Medido en el log de
+    // una corrida real: 180 nacimientos, la inmensa mayoria de 2 a 41 celdas -ruido, no
+    // fragmentacion de placa de verdad-, disparando el numero de placas de ~20 a 187+. Cada
+    // placa de mas cuesta un `WriteBackToPlateFrames()` entero (6*Res*Res) por si sola, asi
+    // que ese ruido es tambien el origen directo del coste de "wb" en el HUD. Umbral con
+    // margen amplio (~20x) sobre el maximo de ruido observado, para no confundirlo con un
+    // fragmento real: un trozo de placa genuino deberia verse a simple vista en el visor de
+    // ID, no ser un puñado de pixeles.
+    // ------------------------------------------------------------
+    static constexpr int32 MinFragmentCells = 800;
+
+    const TArray<FTectonicPlate>& PlatesConstRef = PlateSystem->GetPlates();
+
+    // Por componente que va a nacer: a que PlateID nuevo se reasigna. INDEX_NONE = se queda.
+    TArray<int32> ComponentNewPlateID;
+    ComponentNewPlateID.Init(INDEX_NONE, ComponentPlateID.Num());
+    bool bAnyFragmentation = false;
+
+    for (auto& Entry : ComponentsPerPlate)
+    {
+        TArray<int32>& Comps = Entry.Value;
+        if (Comps.Num() < 2)
+        {
+            continue;
+        }
+
+        // La componente mayor conserva el PlateID original y su cinematica tal cual.
+        Comps.Sort([&ComponentCellCount](int32 A, int32 B) { return ComponentCellCount[A] > ComponentCellCount[B]; });
+
+        const int32 ParentID = Entry.Key;
+        if (!PlatesConstRef.IsValidIndex(ParentID))
+        {
+            continue; // no deberia pasar: toda celda tiene un PlateID valido
+        }
+        const FTectonicPlate ParentPlate = PlatesConstRef[ParentID];
+
+        for (int32 i = 1; i < Comps.Num(); ++i)
+        {
+            const int32 ComponentIdx = Comps[i];
+
+            if (ComponentCellCount[ComponentIdx] >= MinFragmentCells)
+            {
+                if (PlateSystem->GetPlates().Num() >= MaxPlates)
+                {
+                    UE_LOG(LogRasterizedTectonics, Warning,
+                        TEXT("F1E: limite de %d placas alcanzado, se descartan fragmentos restantes de la placa %d"),
+                        MaxPlates, ParentID);
+                    continue;
+                }
+
+                // Hereda tipo de corteza, densidad, grosor y cinematica del padre: F1F la
+                // refinara sola en la proxima adveccion si la cinematica dinamica esta activa.
+                FTectonicPlate NewPlate = ParentPlate;
+                NewPlate.CellCount = ComponentCellCount[ComponentIdx];
+                NewPlate.PlateID = PlateSystem->GetPlates().Num(); // TectonicPlateSystem asume Plates[i].PlateID == i
+                NewPlate.PlateName = FString::Printf(TEXT("Plate_%d"), NewPlate.PlateID);
+                const int32 NewID = PlateSystem->AddPlate(NewPlate);
+
+                EnsurePlateFrameCapacity(NewID);
+                PlateAccumRotation[NewID] = PlateAccumRotation.IsValidIndex(ParentID)
+                    ? PlateAccumRotation[ParentID] : FQuat::Identity;
+
+                ComponentNewPlateID[ComponentIdx] = NewID;
+                bAnyFragmentation = true;
+
+                UE_LOG(LogRasterizedTectonics, Log,
+                    TEXT("F1E: la placa %d se fragmenta -nace la placa %d con %d celdas"),
+                    ParentID, NewID, ComponentCellCount[ComponentIdx]);
+            }
+            else if (!bDebugDisableAssimilation
+                     && !ComponentBorderAmbiguous[ComponentIdx] && ComponentBorderPlateID[ComponentIdx] != INDEX_NONE)
+            {
+                // F1E Fase A.1 -asimilacion: la componente es demasiado pequeña para ser
+                // placa propia, pero esta enteramente rodeada por UNA sola placa vecina -no
+                // es territorio en disputa, es una isla huerfana dejada atras por una
+                // colision, y esa vecina deberia quedarsela en vez de conservar el dueño
+                // viejo indefinidamente (motivo completo en ANEXO.md). No hace falta crear
+                // placa ni tocar PlateAccumRotation -el destino ya existe y ya tiene su
+                // propia rotacion acumulada; el sembrado de la Pasada 2 la usa tal cual.
+                const int32 AssimilatorID = ComponentBorderPlateID[ComponentIdx];
+                ComponentNewPlateID[ComponentIdx] = AssimilatorID;
+                bAnyFragmentation = true;
+
+                UE_LOG(LogRasterizedTectonics, Log,
+                    TEXT("F1E: isla huerfana de la placa %d (%d celdas) asimilada por la placa %d"),
+                    ParentID, ComponentCellCount[ComponentIdx], AssimilatorID);
+            }
+            // Componente pequeña Y ambigua (linda con 2+ placas, o con ninguna resuelta):
+            // se deja tal cual, mismo criterio que el resto del trilema documentado.
+        }
+    }
+
+    // ------------------------------------------------------------
+    // PASADA 2: solo si de verdad nacio alguna placa. Reescribe PlateIDData y siembra
+    // territorio/material celda a celda, para los componentes marcados en la pasada 1.
+    // ------------------------------------------------------------
+    if (bAnyFragmentation)
+    {
+        for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
+        {
+            for (int32 Y = 0; Y < Resolution; ++Y)
+            {
+                for (int32 X = 0; X < Resolution; ++X)
+                {
+                    const int32 Idx = Y * Resolution + X;
+                    const int32 ComponentIdx = Label[FaceIdx][Idx];
+                    const int32 NewID = ComponentNewPlateID[ComponentIdx];
+                    if (NewID == INDEX_NONE)
+                    {
+                        continue;
+                    }
+
+                    FaceData[FaceIdx].PlateIDData[Idx] = static_cast<uint8>(NewID);
+
+                    // Sembrar el territorio y el material de la placa nueva en su propio
+                    // marco -que en el instante del nacimiento coincide con el marco del
+                    // padre, misma rotacion acumulada- para que AdvectPlateField no la trate
+                    // como si nunca hubiera rotado.
+                    const FVector Dir = CubeFaceMapping::PixelToDirection(static_cast<ECSCubeFace>(FaceIdx), X, Y, Resolution);
+                    const FVector FrameDir = PlateAccumRotation[NewID].Inverse().RotateVector(Dir);
+
+                    ECSCubeFace FF; float FU, FV;
+                    CubeFaceMapping::DirectionToFaceTexUV(FrameDir, FF, FU, FV);
+                    const int32 FX = FMath::Clamp(FMath::FloorToInt(FU * Resolution), 0, Resolution - 1);
+                    const int32 FY = FMath::Clamp(FMath::FloorToInt(FV * Resolution), 0, Resolution - 1);
+                    const int32 FrameIdx = GetFrameIndex(static_cast<int32>(FF), FX, FY);
+
+                    PlateTerritory[NewID][FrameIdx] = 1;
+
+                    FPlateMaterialFrame& Frame = PlateMaterial[NewID];
+                    Frame.Occupied[FrameIdx] = 1;
+                    Frame.CrustAge[FrameIdx] = FaceData[FaceIdx].CrustAgeData[Idx];
+                    Frame.CrustType[FrameIdx] = FaceData[FaceIdx].CrustTypeData[Idx];
+                    Frame.CrustThickness[FrameIdx] = FaceData[FaceIdx].CrustThicknessData[Idx];
+                    Frame.Elevation[FrameIdx] = FaceData[FaceIdx].ElevationData[Idx];
+                }
+            }
+        }
+    }
+
+    AccumulateMs(StepTimings.FragmentationMs, FragStart);
 }
 
 bool URasterizedTectonics::ReadPlateMaterial(int32 PlateIdx, const FVector& WorldDir,
@@ -2458,6 +2993,14 @@ void URasterizedTectonics::ExtractAndTrackBoundarySegments(float DeltaTime)
         FVector NormalSum = FVector::ZeroVector;
         float ConvergenceSum = 0.0f;
         float TangentialSum = 0.0f;
+
+        // F1F: para el brazo de palanca y para decidir quien subduce (ver
+        // ComputePlateDrivingTorques). Cada celda del componente pertenece a PlateA o a
+        // PlateB -su propio dueno-, nunca a los dos.
+        FVector PositionSum = FVector::ZeroVector;
+        float AgeSumA = 0.0f, AgeSumB = 0.0f;
+        int32 CountA = 0, CountB = 0;
+        int32 OceanicVotesA = 0, OceanicVotesB = 0;
     };
 
     TArray<TArray<bool>> Visited;
@@ -2507,6 +3050,28 @@ void URasterizedTectonics::ExtractAndTrackBoundarySegments(float DeltaTime)
                     Comp.NormalSum += Info[CFace][CIdx].WorldNormal;
                     Comp.ConvergenceSum += Info[CFace][CIdx].LocalConvergence;
                     Comp.TangentialSum += Info[CFace][CIdx].LocalTangential;
+                    Comp.PositionSum += CubeFaceMapping::PixelToDirection(
+                        static_cast<ECSCubeFace>(CFace), CX, CY, Resolution);
+
+                    // F1F: esta celda es de PlateA o de PlateB -su propio dueno, nunca los
+                    // dos-. Se acumula edad y voto de tipo oceanico de SU lado.
+                    {
+                        const uint8 CellPlate = FaceData[CFace].PlateIDData[CIdx];
+                        const float CellAge = FaceData[CFace].CrustAgeData[CIdx];
+                        const bool bCellOceanic = (FaceData[CFace].CrustTypeData[CIdx] == 0);
+                        if (static_cast<int32>(CellPlate) == PA)
+                        {
+                            Comp.AgeSumA += CellAge;
+                            ++Comp.CountA;
+                            if (bCellOceanic) { ++Comp.OceanicVotesA; }
+                        }
+                        else
+                        {
+                            Comp.AgeSumB += CellAge;
+                            ++Comp.CountB;
+                            if (bCellOceanic) { ++Comp.OceanicVotesB; }
+                        }
+                    }
 
                     const int32 Offsets4[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
                     for (int32 i = 0; i < 4; ++i)
@@ -2605,6 +3170,12 @@ void URasterizedTectonics::ExtractAndTrackBoundarySegments(float DeltaTime)
         Seg.AverageNormal = (Comp.Cells.Num() > 0) ? Comp.NormalSum.GetSafeNormal() : FVector::ZeroVector;
         Seg.AverageConvergence = (Comp.Cells.Num() > 0) ? Comp.ConvergenceSum / Comp.Cells.Num() : 0.0f;
         Seg.AverageTangential = (Comp.Cells.Num() > 0) ? Comp.TangentialSum / Comp.Cells.Num() : 0.0f;
+        Seg.AveragePosition = (Comp.Cells.Num() > 0) ? Comp.PositionSum.GetSafeNormal() : FVector::ZeroVector;
+        Seg.AverageAgePlateA = (Comp.CountA > 0) ? Comp.AgeSumA / Comp.CountA : 0.0f;
+        Seg.AverageAgePlateB = (Comp.CountB > 0) ? Comp.AgeSumB / Comp.CountB : 0.0f;
+        // Mayoria simple: oceanica si al menos la mitad de las celdas de ese lado lo son.
+        Seg.CrustTypePlateA = (Comp.CountA > 0 && Comp.OceanicVotesA * 2 >= Comp.CountA) ? 0 : 1;
+        Seg.CrustTypePlateB = (Comp.CountB > 0 && Comp.OceanicVotesB * 2 >= Comp.CountB) ? 0 : 1;
 
         for (const TPair<int32,int32>& Cell : Comp.Cells)
         {
@@ -2615,6 +3186,205 @@ void URasterizedTectonics::ExtractAndTrackBoundarySegments(float DeltaTime)
     }
 
     BoundarySegments = MoveTemp(NewSegments);
+}
+
+// ============================================================
+// F1F, FASE A (17-08-2026): BALANCE DE PARES POR PLACA -SOLO DIAGNOSTICO.
+//
+// Marco academico establecido: Forsyth & Uyeda 1975, "On the relative importance of the
+// driving forces of plate motion". A escala de placa el numero de Reynolds es tan bajo
+// que la inercia no pinta nada -es flujo de Stokes-, asi que esto NO es F=ma: la placa no
+// acelera, su velocidad en cada instante es la que hace CERO el par neto. Eso es un
+// balance algebraico, no una integracion temporal.
+//
+// R2.12 ya discretiza la frontera en segmentos -exactamente lo que estos modelos
+// necesitan-, asi que esto suma sobre BoundarySegments en vez de reinventar la
+// discretizacion. Reutiliza la MISMA clasificacion convergente/divergente/transformante
+// que ya usa Step(), ningun umbral nuevo.
+//
+// CONSTANTES SIN CALIBRAR TODAVIA. La proporcion relativa (tiron de losa ~2x empuje de
+// dorsal, resultado repetido en la literatura) es lo que importa en esta fase; la escala
+// absoluta se fija en la Fase B contra el criterio medible de R2.5 (velocidades reales,
+// 1-15 cm/año) -no copiando unidades SI de la Tierra, que tiene otro numero y tamano de
+// placas.
+// ============================================================
+void URasterizedTectonics::ComputePlateDrivingTorques(TArray<FVector>& OutRidgePushTorque, TArray<FVector>& OutSlabPullTorque,
+    TArray<int32>& OutConvergentSegmentsTouching, TArray<int32>& OutConvergentSegmentsSubducting) const
+{
+    const int32 NumPlates = PlateSystem ? PlateSystem->GetPlates().Num() : 0;
+    OutRidgePushTorque.Init(FVector::ZeroVector, NumPlates);
+    OutSlabPullTorque.Init(FVector::ZeroVector, NumPlates);
+    OutConvergentSegmentsTouching.Init(0, NumPlates);
+    OutConvergentSegmentsSubducting.Init(0, NumPlates);
+    if (NumPlates == 0 || !bIsInitialized)
+    {
+        return;
+    }
+
+    const TArray<FTectonicPlate>& Plates = PlateSystem->GetPlates();
+    const float RadiusMetres = Grid ? (Grid->GetRadius() / 100.0f) : 6371000.0f;
+    const float CellWidthMetres = (Resolution > 0)
+        ? (PI * 0.5f * RadiusMetres / static_cast<float>(Resolution)) : 1.0f;
+
+    const float RidgePushPerMetre = 1.0f;
+    const float SlabPullPerMetreSqrtAge = 2.0f;
+
+    for (const FBoundarySegment& Seg : BoundarySegments)
+    {
+        if (Seg.CellCount <= 0 || Seg.AveragePosition.IsNearlyZero())
+        {
+            continue;
+        }
+
+        // Misma prueba que Step(): el tangencial domina -> transformante, sin consumidor
+        // todavia (friccion/sismicidad, ROADMAP F1G). Ni empuje ni tiron aqui.
+        const float TangentialSum = FMath::Abs(Seg.AverageTangential);
+        if (TangentialSum > FMath::Abs(Seg.AverageConvergence))
+        {
+            continue;
+        }
+
+        const float LengthMetres = Seg.CellCount * CellWidthMetres;
+        const FVector LeverArm = Seg.AveragePosition * RadiusMetres;
+
+        if (Seg.AverageConvergence <= 0.0f)
+        {
+            // DIVERGENTE: empuje simetrico, aleja a las dos placas a lo largo de la
+            // normal del segmento (que sale de PlateA hacia PlateB).
+            if (!Plates.IsValidIndex(Seg.PlateA) || !Plates.IsValidIndex(Seg.PlateB))
+            {
+                continue;
+            }
+            const float ForceMag = RidgePushPerMetre * LengthMetres;
+            const FVector ForceOnA = Seg.AverageNormal * -ForceMag;
+            const FVector ForceOnB = Seg.AverageNormal * ForceMag;
+            OutRidgePushTorque[Seg.PlateA] += FVector::CrossProduct(LeverArm, ForceOnA);
+            OutRidgePushTorque[Seg.PlateB] += FVector::CrossProduct(LeverArm, ForceOnB);
+        }
+        else
+        {
+            // DIAGNOSTICO: cuenta como "tocando" para las dos placas del segmento,
+            // aunque luego resulte que nadie subduce aqui -asi un tiron de losa en 0 se
+            // puede leer como "N segmentos convergentes, 0 con subduccion propia" en vez
+            // de "sin datos".
+            if (Plates.IsValidIndex(Seg.PlateA)) { ++OutConvergentSegmentsTouching[Seg.PlateA]; }
+            if (Plates.IsValidIndex(Seg.PlateB)) { ++OutConvergentSegmentsTouching[Seg.PlateB]; }
+
+            // CONVERGENTE: subduce el lado oceanico; entre dos oceanicas, la mas vieja
+            // (mas fria, mas densa) -misma regla de densidad que ya decide el ganador de
+            // colision en AdvectPlateField, aplicada aqui a nivel de segmento.
+            bool bAIsSubducting;
+            if (Seg.CrustTypePlateA != Seg.CrustTypePlateB)
+            {
+                bAIsSubducting = (Seg.CrustTypePlateA == 0);
+            }
+            else if (Seg.CrustTypePlateA == 0)
+            {
+                bAIsSubducting = (Seg.AverageAgePlateA > Seg.AverageAgePlateB);
+            }
+            else
+            {
+                // Continental contra continental: nadie subduce, no hay tiron de losa
+                // aqui -el relieve de esa colision ya lo produce el termino de Step().
+                continue;
+            }
+
+            const int32 SubductingPlate = bAIsSubducting ? Seg.PlateA : Seg.PlateB;
+            const float SubductingAge = bAIsSubducting ? Seg.AverageAgePlateA : Seg.AverageAgePlateB;
+            if (!Plates.IsValidIndex(SubductingPlate))
+            {
+                continue;
+            }
+            ++OutConvergentSegmentsSubducting[SubductingPlate];
+
+            const float ForceMag = SlabPullPerMetreSqrtAge * LengthMetres * FMath::Sqrt(FMath::Max(SubductingAge, 0.0f));
+            // Tira hacia la fosa: en el sentido de la convergencia, no en contra.
+            const FVector ForceDir = bAIsSubducting ? Seg.AverageNormal : -Seg.AverageNormal;
+            OutSlabPullTorque[SubductingPlate] += FVector::CrossProduct(LeverArm, ForceDir * ForceMag);
+        }
+    }
+}
+
+void URasterizedTectonics::UpdatePlateKinematicsFromTorqueBalance()
+{
+    if (!bUseDynamicKinematics || !bIsInitialized || !PlateSystem)
+    {
+        return;
+    }
+
+    const int32 NumPlates = PlateSystem->GetPlates().Num();
+    if (NumPlates == 0)
+    {
+        return;
+    }
+
+    TArray<FVector> RidgePush, SlabPull;
+    TArray<int32> ConvTouching, ConvSubducting;
+    ComputePlateDrivingTorques(RidgePush, SlabPull, ConvTouching, ConvSubducting);
+
+    // Area de cada placa: celdas propias x area de celda. No hay un contador ya hecho de
+    // esto -GetContinentalBreakdown cuenta tipo de corteza, no dueno- asi que se recorre
+    // una vez. Barato: 6 x Res^2, una vez por adveccion, no por celda de frontera.
+    TArray<float> PlateAreaM2;
+    PlateAreaM2.Init(0.0f, NumPlates);
+    const float RadiusMetres = Grid ? (Grid->GetRadius() / 100.0f) : 6371000.0f;
+    const float CellWidthMetres = (Resolution > 0)
+        ? (PI * 0.5f * RadiusMetres / static_cast<float>(Resolution)) : 1.0f;
+    const float CellAreaM2 = CellWidthMetres * CellWidthMetres;
+
+    for (int32 FaceIdx = 0; FaceIdx < 6; ++FaceIdx)
+    {
+        for (const uint8 PlateID : FaceData[FaceIdx].PlateIDData)
+        {
+            if (PlateID < NumPlates)
+            {
+                PlateAreaM2[PlateID] += CellAreaM2;
+            }
+        }
+    }
+
+    // Copia completa -no solo EulerPole/AngularVelocity- porque RestorePlateState()
+    // sobreescribe la placa entera por indice; no tocar el resto (Centroid, Age,
+    // CellCount...) es responsabilidad de quien llama, no de esa funcion.
+    TArray<FTectonicPlate> Plates = PlateSystem->GetPlates();
+
+    // R2.5: velocidades reales entre 1 y 15 cm/año. Clamp DURO -ROADMAP.md F1F lo pide
+    // explicitamente-, no solo la esperanza de que DragCoefficient este bien afinado.
+    // Ninguna combinacion de pares debe poder sacar a una placa de rango fisico, pase lo
+    // que pase con la calibracion. v[cm/año] = omega[rad/Ma] * RadiusMetres[m] / 1e4.
+    const float RadPerMaPerCmPerYear = 1.0e4f / FMath::Max(RadiusMetres, 1.0f);
+    const float MinAngularSpeed = 1.0f * RadPerMaPerCmPerYear;
+    const float MaxAngularSpeed = 15.0f * RadPerMaPerCmPerYear;
+
+    for (int32 P = 0; P < NumPlates; ++P)
+    {
+        const float Area = FMath::Max(PlateAreaM2[P], 1.0f);
+        const FVector NewOmega = (RidgePush[P] + SlabPull[P]) / (DragCoefficient * Area);
+
+        // Media movil sobre el vector de rotacion completo (eje y magnitud a la vez, no
+        // por separado -mezclar dos ejes por separado no da el mismo resultado que
+        // mezclar los vectores y luego separar). Ver el comentario junto a
+        // KinematicsSmoothingAlpha: esto es lo que evita el bucle cerrado sin amortiguar.
+        const FVector OldOmega = Plates[P].EulerPole.GetSafeNormal() * Plates[P].AngularVelocity;
+        FVector BlendedOmega = FMath::Lerp(OldOmega, NewOmega, KinematicsSmoothingAlpha);
+
+        // Sin fuerza motriz ni velocidad previa (placa recien nacida, o sin ninguna
+        // frontera activa desde el principio): no hay nada que mezclar, se deja como esta.
+        // El clamp de abajo no aplica aqui -no es que sea "demasiado lenta", es que no hay
+        // nada -eje ni magnitud- que clampear.
+        if (BlendedOmega.IsNearlyZero())
+        {
+            continue;
+        }
+
+        const FVector Axis = BlendedOmega.GetSafeNormal();
+        const float ClampedSpeed = FMath::Clamp(BlendedOmega.Size(), MinAngularSpeed, MaxAngularSpeed);
+
+        Plates[P].EulerPole = Axis;
+        Plates[P].AngularVelocity = ClampedSpeed;
+    }
+
+    PlateSystem->RestorePlateState(Plates);
 }
 
 void URasterizedTectonics::SyncFromGPU()

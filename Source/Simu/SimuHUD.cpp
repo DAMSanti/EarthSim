@@ -4,6 +4,8 @@
 #include "PlanetApproachPawn.h"
 #include "Engine/Canvas.h"
 #include "GameFramework/PlayerController.h"
+#include "EngineUtils.h"
+#include "CubeSphere/Test/TectonicsTestActor.h"
 
 void ASimuHUD::DrawScreenArrow(const FVector2D& Origin, const FVector2D& Dir, const FLinearColor& Color)
 {
@@ -35,6 +37,10 @@ void ASimuHUD::DrawHUD()
     {
         return;
     }
+
+    // Independiente del pawn y de sus condiciones de brujula (orbita, fuera de encuadre):
+    // el texto de depuracion de tectonica se dibuja siempre que haya un actor que lo pida.
+    DrawTectonicsDebugText();
 
     APlanetApproachPawn* Pawn = Cast<APlanetApproachPawn>(PlayerOwner->GetPawn());
     if (!Pawn || !Pawn->bShowPlanetCompass)
@@ -107,4 +113,58 @@ void ASimuHUD::DrawHUD()
     const float DistanceKm = FVector::Dist(PlanetCenter, Pawn->GetActorLocation()) / 100000.0f;
     DrawText(FString::Printf(TEXT("Planeta a %.0f km"), DistanceKm),
         FLinearColor::Red, Origin.X, Origin.Y - 24.0f);
+}
+
+ATectonicsTestActor* ASimuHUD::FindTectonicsActor()
+{
+    if (CachedTectonicsActor)
+    {
+        return CachedTectonicsActor;
+    }
+
+    if (UWorld* World = GetWorld())
+    {
+        for (TActorIterator<ATectonicsTestActor> It(World); It; ++It)
+        {
+            CachedTectonicsActor = *It;
+            break;
+        }
+    }
+
+    return CachedTectonicsActor;
+}
+
+void ASimuHUD::DrawTectonicsDebugText()
+{
+    ATectonicsTestActor* Tectonics = FindTectonicsActor();
+    if (!Tectonics)
+    {
+        return;
+    }
+
+    const float Margin = 12.0f;
+    const float Scale = TectonicsTextScale;
+
+    const FString& DebugText = Tectonics->GetHUDDebugText();
+    if (!DebugText.IsEmpty())
+    {
+        DrawText(DebugText, FLinearColor::White, Margin, Margin, nullptr, Scale);
+    }
+
+    const FString& KeyLegendText = Tectonics->GetHUDKeyLegendText();
+    if (!KeyLegendText.IsEmpty())
+    {
+        float TextW = 0.0f, TextH = 0.0f;
+        GetTextSize(KeyLegendText, TextW, TextH, nullptr, Scale);
+        DrawText(KeyLegendText, FLinearColor(0.65f, 0.85f, 1.0f), Canvas->ClipX - TextW - Margin, Margin, nullptr, Scale);
+    }
+
+    const FString& CostText = Tectonics->GetHUDCostText();
+    if (!CostText.IsEmpty())
+    {
+        float TextW = 0.0f, TextH = 0.0f;
+        GetTextSize(CostText, TextW, TextH, nullptr, Scale);
+        DrawText(CostText, FLinearColor(1.0f, 0.9f, 0.4f),
+            (Canvas->ClipX - TextW) * 0.5f, Canvas->ClipY - TextH - Margin, nullptr, Scale);
+    }
 }

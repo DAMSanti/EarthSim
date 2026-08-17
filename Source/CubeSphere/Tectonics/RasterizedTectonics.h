@@ -38,12 +38,14 @@ struct FTectonicFaceTextureData
     TArray<int32> RefSourceIdxData;
     TArray<int32> RecoveryCountData;
 
-    // DIAGNOSTICO: cuantas advecciones ha resuelto esta celda por el camino de
-    // recuperacion. Una celda que recupera casi siempre es una celda CONGELADA: la
-    // busqueda estricta falla en ella de forma sistematica por su geometria local, no por
-    // azar. Es la medida directa del sintoma que se ve en pantalla (una peninsula parada
-    // mientras el resto deriva), y hace falta porque las metricas anteriores no lo veian:
-    // median islas de corteza OCEANICA vieja y el sintoma es CONTINENTAL.
+    // DIAGNOSTICO: cuantas veces esta celda cayo en el residuo real de AdvectPlateField
+    // -ni reclamante (ni con tolerancia), ni rift- y se le conservo el estado anterior.
+    // Desde R2.9 Fase 4 (ANEXO.md A14) ya NO cuenta recuperaciones por tolerancia -ese
+    // mecanismo se quito por quedar matematicamente inalcanzable-, sino el trilema
+    // documentado: sobre todo fronteras transformantes, que no convergen ni divergen y por
+    // tanto no tienen colision ni rift que las resuelva. Es la senal para
+    // StuckCellsNearEulerPole y para ver en el visor si el residuo forma un patron
+    // reconocible (estrias a lo largo de una frontera que desliza).
     
     bool bIsValid = false;
 };
@@ -295,6 +297,14 @@ struct CUBESPHERE_API FTectonicStepTimings
     UPROPERTY(BlueprintReadOnly)
     float DespeckleMs = 0.0f;
 
+    /** R2.12: extraccion y seguimiento de segmentos de frontera, tras cada adveccion. */
+    UPROPERTY(BlueprintReadOnly)
+    float SegmentsMs = 0.0f;
+
+    /** Write-back del material a los marcos por placa (WriteBackToPlateFrames). */
+    UPROPERTY(BlueprintReadOnly)
+    float WriteBackMs = 0.0f;
+
     /** Barrido de fronteras: detecciÃ³n de convergencia y engrosamiento. */
     UPROPERTY(BlueprintReadOnly)
     float BoundaryMs = 0.0f;
@@ -306,6 +316,10 @@ struct CUBESPHERE_API FTectonicStepTimings
     /** ElevaciÃ³n derivada por isostasia mÃ¡s resoluciÃ³n del nivel del mar. */
     UPROPERTY(BlueprintReadOnly)
     float IsostasyMs = 0.0f;
+
+    /** F1E Fase A: deteccion de componentes conexas (HandlePlateFragmentation). */
+    UPROPERTY(BlueprintReadOnly)
+    float FragmentationMs = 0.0f;
 };
 
 /**
@@ -378,6 +392,87 @@ struct CUBESPHERE_API FTectonicAdvectionStats
      */
     UPROPERTY(BlueprintReadOnly)
     int32 CellsUnresolved = 0;
+
+    /**
+     * Celdas resueltas por la busqueda ampliada de vecino mas cercano (18-08-2026),
+     * acumulado desde el inicio -mismo patron que CellsUnresolved-. Ver FindNearestOwnerWide.
+     * Junto con CellsCreated (rift) suma el total de celdas que en algun momento tuvieron
+     * CERO reclamantes en la busqueda estricta, para comparar contra CollisionCells (2+
+     * reclamantes) y ver si el desequilibrio creacion/destruccion ya esta en el propio
+     * conteo de reclamantes, antes de que ninguna logica de resolucion decida nada.
+     */
+    UPROPERTY(BlueprintReadOnly)
+    int32 CellsResolvedByWideSearch = 0;
+
+    /**
+     * DIAGNOSTICO (18-08-2026): de las celdas creadas por rift (CellsCreated), cuantas
+     * convertian una celda que YA ERA continental -el rift pone CrustTypeData a oceanica
+     * sin mirar que habia antes-. La colision nunca destruye continente (la continental
+     * siempre gana la celda en disputa), asi que si el area continental cae, este contador
+     * dice si el rift es el sumidero.
+     */
+    UPROPERTY(BlueprintReadOnly)
+    int32 CellsRiftFromContinental = 0;
+
+    /**
+     * DIAGNOSTICO (18-08-2026): de los traspasos por vecino mas cercano (costura
+     * transformante), cuantos convertian una celda continental a oceanica -no por rift,
+     * sino porque AssignCleanMove lee el material que el nuevo dueño tiene GUARDADO en su
+     * propio marco (posiblemente viejo, de otro momento de su historia), y el resguardo a
+     * "lo que habia en el mundo" solo salta si ese marco esta completamente vacio.
+     */
+    UPROPERTY(BlueprintReadOnly)
+    int32 CellsHandoffFromContinental = 0;
+
+    /**
+     * DIAGNOSTICO (18-08-2026): de las colisiones, cuantas convertian una celda YA
+     * continental a oceanica porque la dueña continental original ya no era una de las
+     * reclamantes -"gana la continental" solo se aplica entre quienes disputan la celda
+     * AHORA, no protege el tipo previo si la dueña original ya se retiro del todo.
+     */
+    UPROPERTY(BlueprintReadOnly)
+    int32 CellsCollisionFromContinental = 0;
+
+    /**
+     * DIAGNOSTICO (18-08-2026): de la limpieza de motas (celdas aisladas que no coinciden
+     * con ninguna de sus 4 vecinas), cuantas eran continentales y adoptaron el tipo
+     * oceanico del vecino mayoritario -reasigna por coincidencia de PLACA, no de tipo de
+     * corteza, asi que un pixel continental legitimo rodeado por una placa mayormente
+     * oceanica se convierte sin pasar por rift, colision ni traspaso.
+     */
+    UPROPERTY(BlueprintReadOnly)
+    int32 CellsDespeckleFromContinental = 0;
+
+    /**
+     * DIAGNOSTICO (17-08-2026): CellsUnresolved de arriba es ACUMULADO desde el inicio de
+     * la simulacion y por tanto crece sin parar aunque el ritmo real este estable -no sirve
+     * para ver si el problema empeora o no. Este es solo el recuento de la adveccion MAS
+     * RECIENTE (se sobreescribe, no se suma), la señal de verdad para saber si el residuo
+     * por adveccion crece, se mantiene, o baja segun avanza la simulacion.
+     */
+    UPROPERTY(BlueprintReadOnly)
+    int32 LastUnresolvedCells = 0;
+
+    /**
+     * DIAGNOSTICO (17-08-2026): desglose de LastUnresolvedCells. Convergentes -vecinos que
+     * se acercan de media, pero el conteo de reclamantes dio 0 igualmente- son sospechosas
+     * de un fallo real en la busqueda tolerante. CercaDeCero -sin movimiento relativo radial
+     * claro- encajan con fronteras transformantes, ya documentadas en ROADMAP.md F1D como
+     * sin friccion ni sismicidad modeladas.
+     */
+    UPROPERTY(BlueprintReadOnly)
+    int32 LastUnresolvedConverging = 0;
+
+    UPROPERTY(BlueprintReadOnly)
+    int32 LastUnresolvedNearZero = 0;
+
+    /**
+     * Celdas resueltas en la adveccion mas reciente por la busqueda ampliada de vecino mas
+     * cercano (18-08-2026), completando la particion en costuras transformantes en vez de
+     * dejarlas en LastUnresolvedCells. Ver FindNearestOwnerWide en RasterizedTectonics.cpp.
+     */
+    UPROPERTY(BlueprintReadOnly)
+    int32 LastResolvedByWideSearch = 0;
 
     /** CuÃ¡ntas veces se ha ejecutado la advecciÃ³n desde el inicio. */
     UPROPERTY(BlueprintReadOnly)
@@ -478,6 +573,30 @@ struct CUBESPHERE_API FBoundarySegment
 
     UPROPERTY(BlueprintReadOnly)
     float AverageTangential = 0.0f;
+
+    // ============================================================
+    // F1F (17-08-2026): lo que hace falta para calcular fuerzas impulsoras, no solo
+    // clasificar el regimen. Ver ANEXO.md, balance de pares por placa.
+    // ============================================================
+
+    /** Direccion unitaria desde el centro de la esfera hasta el centroide del segmento -el
+     * brazo de palanca para el par (torque = brazo x fuerza). */
+    UPROPERTY(BlueprintReadOnly)
+    FVector AveragePosition = FVector::ZeroVector;
+
+    /** Tipo de corteza (0=oceanica, 1=continental) en el lado de PlateA/PlateB, medido en
+     * las celdas de frontera -no promedio de toda la placa. Decide quien subduce. */
+    UPROPERTY(BlueprintReadOnly)
+    uint8 CrustTypePlateA = 0;
+    UPROPERTY(BlueprintReadOnly)
+    uint8 CrustTypePlateB = 0;
+
+    /** Edad media de la corteza en el lado de PlateA/PlateB, en las celdas de frontera.
+     * Para el tiron de losa: mas vieja, mas fria, mas densa, tira mas. */
+    UPROPERTY(BlueprintReadOnly)
+    float AverageAgePlateA = 0.0f;
+    UPROPERTY(BlueprintReadOnly)
+    float AverageAgePlateB = 0.0f;
 };
 
 /**
@@ -564,6 +683,58 @@ public:
     /** R2.12: los segmentos de frontera activos ahora mismo, con su ID persistente. */
     UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics")
     const TArray<FBoundarySegment>& GetBoundarySegments() const { return BoundarySegments; }
+
+    /**
+     * F1F, FASE A (17-08-2026): SOLO DIAGNOSTICO. Calcula, para cada placa, el par de
+     * empuje de dorsal y el par de tiron de losa a partir de BoundarySegments -no toca
+     * AngularVelocity ni EulerPole, eso es la Fase B. Constantes SIN CALIBRAR: la
+     * proporcion relativa (tiron ~2x empuje, Forsyth & Uyeda 1975) es lo que importa
+     * ahora; la escala absoluta se fija despues contra R2.5 (1-15 cm/año).
+     *
+     * OutRidgePushTorque/OutSlabPullTorque: un FVector por placa (indice = indice de
+     * placa), direccion = eje del par, magnitud = su tamano. Comparables directamente con
+     * EulerPole en forma, no en escala todavia.
+     *
+     * OutConvergentSegmentsTouching/OutConvergentSegmentsSubducting: para que un tiron de
+     * losa en 0 se explique solo -placa sin ningun segmento convergente donde subduzca
+     * ELLA (0 subduciendo de 0 tocando, o de N tocando si todos son continente contra
+     * continente) es un cero correcto, no un fallo de calculo.
+     */
+    UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics")
+    void ComputePlateDrivingTorques(TArray<FVector>& OutRidgePushTorque, TArray<FVector>& OutSlabPullTorque,
+        TArray<int32>& OutConvergentSegmentsTouching, TArray<int32>& OutConvergentSegmentsSubducting) const;
+
+    // ============================================================
+    // F1F, FASE B (17-08-2026): CIERRA EL BALANCE -CON INTERRUPTOR.
+    //
+    // Sigma tau = 0 en el regimen cuasi-estatico (Stokes, sin inercia): el arrastre basal
+    // es resistivo y proporcional a velocidad x area, asi que despejar la velocidad de
+    // equilibrio es algebraico, no una integracion:
+    //
+    //     omega_vector = (tiron_losa + empuje_dorsal) / (DragCoefficient * area_placa)
+    //
+    // omega_vector ES directamente EulerPole normalizado * AngularVelocity -la misma
+    // representacion que ya usa CalculatePlateRotation-, asi que no hace falta separar
+    // signo de eje: la direccion de omega_vector YA es el polo, su magnitud YA es la
+    // velocidad angular.
+    //
+    // Interruptor por la misma razon que las Capas 1/2a: comparar lado a lado contra la
+    // cinematica fija de siempre, sin perder la posibilidad de volver atras.
+    // ============================================================
+
+    UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics|F1F")
+    void SetUseDynamicKinematics(bool bEnabled) { bUseDynamicKinematics = bEnabled; }
+
+    UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics|F1F")
+    bool IsUsingDynamicKinematics() const { return bUseDynamicKinematics; }
+
+    /**
+     * Recalcula el balance de pares y escribe EulerPole/AngularVelocity de cada placa via
+     * PlateSystem->RestorePlateState(). No-op si bUseDynamicKinematics es false. Se llama
+     * a la misma cadencia que ExtractAndTrackBoundarySegments -justo despues, con los
+     * segmentos ya al dia- desde Step().
+     */
+    void UpdatePlateKinematicsFromTorqueBalance();
 
     /**
      * Tiempo que el simulador CREE que ha pasado.
@@ -653,6 +824,24 @@ public:
     /** Cuantas veces esta celda se resolvio por recuperacion (diagnostico de congelacion). */
     UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics")
     int32 GetRecoveryCountAt(ECSCubeFace Face, int32 X, int32 Y) const;
+
+    /**
+     * DIAGNOSTICO (17-08-2026): `AdvectionStats.CellsUnresolved` es un CONTADOR ACUMULADO
+     * de eventos -se suma en cada adveccion, nunca se resetea-, asi que crece sin limite
+     * aunque el area realmente afectada este parada. No distingue "son las mismas 600
+     * celdas fallando cada vez" (residuo cronico, acotado) de "cada vez fallan celdas
+     * distintas" (residuo que se extiende, sin acotar). `RecoveryCountData` ya lleva la
+     * cuenta POR CELDA -esto solo la resume sin tocar la logica de resolucion, para
+     * verificar cual de los dos casos es antes de decidir si hace falta un arreglo de
+     * verdad en AdvectPlateField.
+     *
+     * @param OutDistinctFrozenCells Cuantas celdas, del planeta entero, han fallado alguna
+     *        vez (RecoveryCountData > 0). Si esto se mantiene acotado mientras
+     *        CellsUnresolved sigue subiendo, el residuo es cronico, no se extiende.
+     * @param OutMaxRecoveryCount El mayor numero de fallos que acumula una sola celda.
+     */
+    UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics")
+    void GetFrozenCellDiagnostics(int32& OutDistinctFrozenCells, int32& OutMaxRecoveryCount) const;
 
     /** Tipo de corteza: 0 = oceÃ¡nica, 1 = continental. */
     UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics")
@@ -882,8 +1071,17 @@ protected:
     /** Un marco de material por placa. */
     TArray<FPlateMaterialFrame> PlateMaterial;
 
-    /** Rotacion acumulada de cada placa desde el inicio. Solo la usa el material. */
+    /** Rotacion acumulada de cada placa desde el inicio. La usan el material y el territorio. */
     TArray<FQuat> PlateAccumRotation;
+
+    /**
+     * Territorio de cada placa -que celdas son suyas-, en el marco propio de esa placa.
+     * Mismo layout que PlateMaterial (GetFrameIndex). A diferencia del material, NUNCA se
+     * reescribe por completo: se actualiza con escrituras puntuales, solo en el instante
+     * del evento tectonico (rift, colision) que cambia la propiedad de una celda. Ver
+     * ANEXO.md A14 (R2.9 Fase 4).
+     */
+    TArray<TArray<uint8>> PlateTerritory;
 
 public:
     // ============================================================
@@ -916,8 +1114,71 @@ public:
         return FMath::RadiansToDegrees(DebugAccumRotation[PlateIdx].GetAngle());
     }
 
+    // ============================================================
+    // CAPA 2a (17-08-2026): adveccion real (AdvectPlateField, con GetNeighborPixel ya
+    // arreglado, conteo de reclamantes, recuperacion por tolerancia), pero SIN fisica de
+    // frontera, SIN isostasia, SIN envejecer la corteza. Es la Capa 1 mas el mecanismo de
+    // transporte de verdad, nada mas -el candidato mas directo a la cinta, porque es
+    // donde la propiedad se re-deriva y el material se remuestrea cada adveccion.
+    // ============================================================
+
+    /** Activa/desactiva el modo. Tecla Y en TectonicsTestActor. */
+    UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics|Debug")
+    void SetDebugAdvectionOnly(bool bEnabled) { bDebugAdvectionOnly = bEnabled; }
+
+    UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics|Debug")
+    bool IsDebugAdvectionOnly() const { return bDebugAdvectionOnly; }
+
+    // ============================================================
+    // F1E FASE A.1 (17-08-2026): INTERRUPTOR DE ASIMILACION, SOLO PARA COMPARAR
+    //
+    // Corrida larga (207 advecciones): los segmentos de frontera de R2.12 pasaron de 44 a
+    // 107 con las mismas 8 placas de siempre -la frontera se fragmenta en trozos cada vez
+    // mas pequeños, no se queda estable-, y el campo "celdas congeladas" paso de una linea
+    // limpia a ruido disperso por medio planeta. Hipotesis sin confirmar: la asimilacion fija
+    // PERMANENTEMENTE cualquier isla huerfana en cuanto aparece -incluida una que sea solo
+    // ruido de una advección y se habria autocorregido sola en la siguiente-, así que podria
+    // estar convirtiendo ruido transitorio en desgaste de frontera mas rapido de lo que se
+    // cura. Este interruptor deja que HandlePlateFragmentation() siga creando placas nuevas
+    // por encima del umbral (eso no es sospechoso), pero desactiva SOLO la asimilacion de
+    // islas por debajo del umbral -vuelven a quedarse tal cual, como antes de esta Fase A.1-,
+    // para comparar en la misma sesion si el crecimiento de segmentos para o sigue igual.
+    // ============================================================
+
+    /** Activa/desactiva SOLO la asimilacion de islas huerfanas. Tecla I en TectonicsTestActor. */
+    UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics|Debug")
+    void SetDebugDisableAssimilation(bool bDisabled) { bDebugDisableAssimilation = bDisabled; }
+
+    UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics|Debug")
+    bool IsDebugAssimilationDisabled() const { return bDebugDisableAssimilation; }
+
 private:
     bool bDebugFakeRotationOnly = false;
+    bool bDebugAdvectionOnly = false;
+    bool bUseDynamicKinematics = false;
+    bool bDebugDisableAssimilation = false;
+
+    /**
+     * Coeficiente de arrastre basal, F1F Fase B. NO son N*s/m como en la literatura -las
+     * fuerzas de ComputePlateDrivingTorques tampoco lo son todavia (ver su comentario)-,
+     * es la unica constante de calibracion que falta para que la velocidad de equilibrio
+     * caiga en el rango real de R2.5 (1-15 cm/año). Medido, no elegido a ojo: ver
+     * ANEXO.md F1F Fase B para la corrida que fijo este valor.
+     */
+    float DragCoefficient = 1500.0f;
+
+    /**
+     * F1F Fase B, ARREGLO (17-08-2026): sin esto, la velocidad de equilibrio se recalcula
+     * desde cero cada adveccion y se aplica de golpe -un bucle cerrado sin amortiguar,
+     * porque la velocidad mueve la placa, la placa cambia la geometria de frontera, y la
+     * geometria decide la velocidad de la proxima adveccion. Medido: el numero de
+     * segmentos donde una placa subduce saltaba (2->3->6->5->2->3) en pocas advecciones,
+     * mucho mas rapido de lo que una frontera real se reorganiza. Misma leccion que
+     * AccumulateMs (Coste en el HUD): un valor instantaneo y ruidoso no se muestra, ni se
+     * actua sobre el, se suaviza. Peso de la velocidad NUEVA en cada adveccion -no un
+     * paso de tiempo real, es una media movil sobre advecciones.
+     */
+    float KinematicsSmoothingAlpha = 0.01f;
 
     /** PlateIDData tal como salio del Voronoi, antes de la primera adveccion. Congelado. */
     TArray<TArray<uint8>> OriginalPlateIDSnapshot;
@@ -965,6 +1226,47 @@ private:
 
     /** Llena los marcos de material desde el mundo actual, con rotaciones a identidad. */
     void InitializePlateMaterialFrames();
+
+    /** Llena PlateTerritory desde el mundo actual, con rotaciones a identidad. */
+    void InitializePlateTerritory();
+
+    /**
+     * F1E Fase A (17-08-2026): ciclo de vida de placas, nacimiento por fragmentacion.
+     *
+     * Motivo: F1F (balance de pares) crea una realimentacion sin freno -la placa que ya
+     * esta "ganando" (mas margen convergente) tira mas fuerte, avanza mas, y gana todavia
+     * mas margen convergente en la siguiente adveccion-. En la Tierra real el freno es el
+     * ciclo de vida de placas: cuando una placa avanza por en medio de otra, el trozo que
+     * queda al otro lado se separa y pasa a tener su propia cinematica en vez de arrastrarse
+     * con la placa original. Sin esto, F1F no tiene contrapeso.
+     *
+     * Recorre PlateIDData completo (las 6 caras, TODAS las celdas, no solo frontera) con un
+     * flood-fill de componentes conexas de 4 vecinos -mismo patron cruzando caras que
+     * ExtractAndTrackBoundarySegments-. Si el territorio de una placa resulta ser 2+
+     * componentes disjuntas, la mayor conserva el PlateID y la cinematica; cada trozo menor
+     * nace como placa nueva (PlateSystem->AddPlate), heredando tipo de corteza, densidad,
+     * grosor y cinematica del padre en el instante del nacimiento -F1F la refinara sola en
+     * la proxima adveccion si la cinematica dinamica esta activa-. PlateTerritory,
+     * PlateMaterial y PlateAccumRotation de la placa nueva se siembran ahi mismo, copiando
+     * la rotacion acumulada del padre, para que AdvectPlateField no la trate como si nunca
+     * hubiera rotado.
+     *
+     * Fase A.1 -asimilacion (17-08-2026): un trozo menor por debajo del umbral de "placa
+     * nueva" no se ignora sin mas. Si esta enteramente rodeado por UNA sola placa vecina
+     * (nunca puede lindar con otro trozo de su propia placa original -el propio flood-fill
+     * los habria fusionado en la misma componente-), esa vecina lo asimila: es una isla
+     * huerfana dejada atras por una colision, no territorio en disputa. Si linda con dos o
+     * mas placas distintas, queda ambigua y se deja tal cual -mismo trilema documentado en
+     * R2.9 Fase 4-. Reportado por el usuario viendo crecer estas islas en una corrida larga.
+     *
+     * Se llama tras AdvectPlateField y antes de ExtractAndTrackBoundarySegments, para que
+     * los segmentos ya reflejen la particion. No corre en la Capa 2a de depuracion (adveccion
+     * pura): esa capa aisla el transporte, no el ciclo de vida.
+     */
+    void HandlePlateFragmentation();
+
+    /** Crece PlateTerritory/PlateMaterial/PlateAccumRotation hasta cubrir PlateIndex. */
+    void EnsurePlateFrameCapacity(int32 PlateIndex);
 
     /**
      * Devuelve a los marcos de placa lo que la fisica ha cambiado sobre el mundo.

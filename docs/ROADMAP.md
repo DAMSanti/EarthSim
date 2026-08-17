@@ -107,27 +107,36 @@ Las fases son secuenciales por **dependencia técnica**, no por calendario.
 - [x] Clasificar por velocidad relativa proyectada sobre la normal: convergente / divergente / transformante
 - [x] Distinguir subducción de orogenia por tipo de corteza de los dos lados (ya en la selección de ganador de colisión, verificado en la auditoría de F1C)
 - [x] Aplicar la física **solo en la banda de frontera**, no en el 28 % del planeta (resuelto como efecto lateral de F1B; confirmado hoy por el propio recuento de celdas de segmento, 1–3 % del planeta)
-- [ ] Fallas transformantes: fricción y sismicidad, sin crear ni destruir corteza (hoy solo se excluyen de crecer/decrecer corteza — no hay fricción ni sismicidad modeladas)
+- [x] Fallas transformantes: la **partición** en la costura ya no se queda congelada sin resolver — completada por vecino más cercano cuando la búsqueda estricta no reclama la celda y no es rift (`FindNearestOwnerWide`, 18-08-2026, ver [`ANEXO.md`](ANEXO.md#costura-transformante-partición-completada-por-vecino-más-cercano-18-08-2026)). Medido: sin resolver por advección de 400-800 a un puñado; segmentos de R2.12 dejan de fragmentarse sin parar.
+- [x] **Árbitro único de vecino más cercano** (18-08-2026): el conteo de reclamantes independientes (`Claimants.Num()`, uno por placa, cada uno con su propia prueba SI/NO) se sustituyó por un único árbitro de distancia — colisión/traspaso/rift se derivan de comparar la distancia más cercana contra la segunda con la misma vara de medir, en vez de contarse por separado con pruebas de exigencia distinta (reclamar era una condición OR, no reclamar una condición AND — estructuralmente asimétrico). Mismo principio que usa GPlates para particionar el planeta. Ver [`ANEXO.md`](ANEXO.md#árbitro-único-de-vecino-más-cercano-arreglo-de-raíz-de-la-asimetría-18-08-2026)
+- [ ] Fallas transformantes: fricción, esfuerzo acumulado y sismicidad de verdad — sigue sin crear ni destruir corteza, el punto de arriba solo resuelve a quién pertenece la celda, no añade la física de deslizamiento en sí
 - [ ] Registrar «tipo de frontera» como campo categórico en el visor
-- [ ] Recalibrar el umbral de rift ahora que la balanza de corteza es sana (el valor actual no es de fiar)
+- [x] Recalibrar el umbral de rift ahora que la balanza de corteza es sana — probado (18-08-2026, ver [`ANEXO.md`](ANEXO.md#por-qué-el-equilibrio-es-tan-bajo-umbral-de-rift-probado-y-descartado-18-08-2026)): bajarlo a la mitad apenas movió el ratio creado/destruido (0,42-0,50 → 0,46-0,49) y empeoró la tierra emergida. **No es la palanca dominante**, revertido al valor original. El desequilibrio 2:1 sigue sin explicar — sospecha sin confirmar en la asimetría estructural colisión (destruye varias celdas a la vez) vs. rift (crea una por una)
 
-### 1E. Ciclo de vida de placas
-- [ ] Etiquetado de **componentes conexas** sobre el mapa de IDs
+### 1E. Ciclo de vida de placas 🟡
+
+> Motivo de traerlo antes de tiempo: F1F (balance de pares) crea una realimentación positiva sin freno — la placa que ya gana margen convergente tira más fuerte y gana todavía más margen — y solo el ciclo de vida la contrarresta en la Tierra real. Ver [`ANEXO.md`](ANEXO.md#f1e-fase-a-nacimiento-por-fragmentación-17-08-2026).
+
+- [x] Etiquetado de **componentes conexas** sobre el mapa de IDs (`HandlePlateFragmentation`, flood-fill de 4 vecinos cruzando caras, mismo patrón que R2.12)
 - [ ] **Muerte:** placa por debajo del umbral de área ⇒ se elimina, su corteza pasa a la vecina
-- [ ] **Nacimiento por rift:** placa partida en dos componentes ⇒ se divide
-- [ ] Asignar polo de Euler propio a la placa nueva, derivado de la geometría del rift
+- [x] **Nacimiento por fragmentación:** placa partida en dos o más componentes ⇒ la mayor conserva el ID, cada trozo menor nace como placa nueva (`AddPlate`)
+- [x] **Asimilación de islas huérfanas:** un trozo por debajo del umbral de placa nueva, rodeado enteramente por una sola placa vecina, se le asigna a esa vecina en vez de conservar el dueño viejo indefinidamente (ver [`ANEXO.md`](ANEXO.md#f1e-fase-a1-asimilación-de-islas-huérfanas-17-08-2026)) — corta el crecimiento de las islas residuales del trilema de R2.9 Fase 4, no lo elimina (una isla ambigua, con 2+ vecinas distintas, se sigue dejando tal cual)
+- [ ] Asignar polo de Euler propio a la placa nueva, derivado de la geometría del rift (hoy hereda la cinemática del padre tal cual; F1F la reafina si la cinemática dinámica está activa)
 - [ ] **Sutura:** dos placas sin movimiento relativo prolongado se sueldan
-- [ ] Gestionar el marco de material al nacer, morir y fusionar
+- [x] Sembrar el marco de material y territorio de la placa nueva al nacer (`PlateTerritory`/`PlateMaterial`/`PlateAccumRotation` copiados del padre en el instante del nacimiento)
+- [ ] Gestionar el marco de material al morir y fusionar
 - [ ] Historial de placas (quién nació de quién, cuándo murió)
+- [x] Verificado con datos, no solo a ojo — `Simu.Tectonics.F1EF1FLongRun` (18-08-2026): con F1F dinámico activo sobre la base ya arreglada (ver costura transformante más abajo), la tierra emergida se **estabiliza** en 12-14% en vez de colapsar sin fondo (antes: 24,5%→8,6% en 382 Ma y seguía cayendo). F1E fragmentó solo una vez en 1000 Ma a resolución de producción — mejora real pero modesta, la mayor parte de la estabilización parece venir del arreglo de frontera, no de F1E en sí (ver [`ANEXO.md`](ANEXO.md#validación-f1e--f1f-¿frena-el-monopolio-18-08-2026)). El equilibrio (12-14%) sigue muy por debajo del ~41% real — no es "resuelto", es "ya no se desboca"
 
 ### 1F. Dinámica
-- [ ] Calcular longitud de margen en subducción por placa
-- [ ] **Tirón de la losa:** ∝ longitud del margen × edad media de la losa
-- [ ] **Empuje de dorsal:** ∝ longitud de dorsal
-- [ ] **Arrastre basal:** ∝ −área × velocidad
-- [ ] Integrar la velocidad angular desde el par resultante (`EulerPole` y `AngularVelocity` pasan a ser escribibles)
+- [x] Calcular longitud de margen en subducción por placa (`ComputePlateDrivingTorques`, a partir de los segmentos de R2.12 — ver [`ANEXO.md`](ANEXO.md#f1f-balance-de-pares-por-placa-17-08-2026))
+- [x] **Tirón de la losa:** ∝ longitud del margen × √edad media de la losa (misma ley que el hundimiento térmico de F2, no una constante inventada aparte)
+- [x] **Empuje de dorsal:** ∝ longitud de dorsal
+- [x] **Arrastre basal:** ∝ −área × velocidad (calibrado, `DragCoefficient`)
+- [x] Integrar la velocidad angular desde el par resultante (`EulerPole`/`AngularVelocity` escribibles vía `RestorePlateState`; interruptor `D`, cinemática fija de siempre por defecto)
 - [ ] Campo de esfuerzo del manto de gran escala, reorganizable cada ~100–200 Ma
-- [ ] Acotar velocidades al rango real de 1–15 cm/año
+- [x] Acotar velocidades al rango real de 1–15 cm/año (clamp duro, no solo calibración)
+- [x] **Verificado con datos, no solo a ojo** — mismo test que F1E (`Simu.Tectonics.F1EF1FLongRun`, 18-08-2026): con la cinemática dinámica puesta, el planeta se estabiliza en vez de colapsar (ver ANEXO). R2.18 (campo de esfuerzo del manto) sigue pendiente por separado
 
 ### 1G. Vulcanismo
 - [ ] Puntos calientes anclados al **marco del manto**, no a las placas
@@ -139,10 +148,12 @@ Las fases son secuenciales por **dependencia técnica**, no por calendario.
 - [⏸] Ráster como única fuente de verdad del campo de IDs — no: todavía sin consumidor
 
 ### 1H. Defectos abiertos de F1
-- [ ] **Tierra emergida cae al 13,2 % desde 24,5 % en 1000 Ma** — el planeta se ahoga (`LongRunStability` en rojo)
-- [ ] Celdas que no advectan: 185 en corrida larga, 154 cerca del polo de Euler (`NoPermanentlyStuckCells` y `StuckCellsNearEulerPole` en rojo)
+- [ ] **Tierra emergida (por elevación) sigue cayendo — 24,5 % → 0,9-2,3 % —, pese a que la corteza continental por TIPO ya no se destruye** (`LongRunStability`/`F1EF1FLongRun` en rojo). La fuga de tipo que causaba la caída anterior (13,2 %/9,5 %) está cerrada (ver la entrada de `WriteBackToPlateFrames` más abajo y [`ANEXO.md`](ANEXO.md#la-fuga-de-tipo-que-sobrevivió-al-write-back-extinción-total-en-continentspersist-18-08-2026-misma-sesión-un-día-después)) — la corteza continental por tipo ahora **crece** (x2,48 en `ContinentsPersist`, converge en vez de extinguirse), pero la fracción de tierra por elevación no lo refleja. Hipótesis sin confirmar: isostasia no tiene tiempo, dentro de la ventana del test, de levantar por encima del nivel del mar la corteza continental joven que ya no se pierde. Probado y descartado que sea el mismo alias mundo↔marco (extendido a `ElevationData`, cero efecto medido). Pendiente de investigar en una próxima sesión.
+- [x] Celdas que no advectan cerca del polo de Euler, y el caso peor — una frontera divergente vecina enmascarada por el autorreclamo, que crecía territorio sin límite en vez de crear corteza nueva. **R2.9 Fase 4: `PlateTerritory[P]`, marker-in-cell por placa** (mecanismo y diseño en [`ANEXO.md` A14](ANEXO.md#a14-r29-no-basta-la-propiedad-necesita-el-mismo-tratamiento-que-el-material-17-08-2026)). Verificado por test, no solo a ojo: `StuckCellsNearEulerPole` (0 atascadas), `NoPermanentlyStuckCells`, `OceanicRibbon`, `FrozenCellsAtProductionRes` — los 4 en verde 17-08-2026. Umbrales de "sin resolver" en `FrozenCellsAtProductionRes` y `LongRunStability` recalibrados contra la línea base honesta post-arreglo (ver ANEXO A14)
+- [x] R2.9 Fase 3: las pasadas de conteo y resolución de `AdvectPlateField` usaban tolerancias distintas y podían discrepar sobre quién reclama una celda, disfrazando colisiones reales de movimientos limpios (punteado que alternaba de placa en fronteras diagonales) — unificadas en `TryClaimTolerant`; recuperación por tolerancia quitada por quedar matemáticamente inalcanzable (ver ANEXO A14)
 - [ ] 285 motas de un píxel dentro de una misma placa (`NoStraightCrustBridges` en rojo — **su nombre no describe su aserción**, renombrarlo)
 - [ ] Métrica de **rectitud antinatural** para el escalonado (densidad de esquinas de 90°), que reemplace al cociente de longitud de frontera
+- [x] `WriteBackToPlateFrames()` solo corría una vez por `Step()`, no una vez por advección — con `TimeScale` alto caben varias advecciones por `Step()` y el material leía de un marco desincronizado en las intermedias. Se caracterizó como "acotado, no catastrófico"; resultó ser un sumidero grande de corteza continental. Arreglado el 18-08-2026 llevando a producción el mismo patrón que ya usaba la Capa 2a de depuración. **No era la causa completa**: el sumidero dominante real (94% del total, incluso en el camino de interior sin cambio de dueño) era que la conversión mundo↔marco rotado (`floor()` en ambos sentidos) no es una inversa exacta y ocasionalmente alias-ea la celda de marco vecina — invisible en el interior homogéneo de una placa, catastrófico justo en una costa, categórico y permanente. Arreglado aparte (mismo día): el tipo de corteza sale siempre de `Prev` en continuación y traspaso, nunca del marco rotado de una placa (`AssignCleanMove`/`AssignHandoff` nuevo). **Validado con test automatizado** (no solo a ojo): `Simu.Tectonics.ContinentsPersist` pasa de extinción total (1321→0 celdas) a x2,48 de crecimiento convergente; el ratio global creación/destrucción de corteza mejora de ~0,45 a ~0,88. Ver [`ANEXO.md`](ANEXO.md#la-fuga-de-tipo-que-sobrevivió-al-write-back-extinción-total-en-continentspersist-18-08-2026-misma-sesión-un-día-después)
 
 **Invariantes:** I-04 … I-13
 **Hecho cuando:** en el visor de ID de placa se ven **regiones, no ruido**; el área de cada placa **cambia** con el tiempo; y se observa un ciclo de agregación y dispersión de supercontinentes.

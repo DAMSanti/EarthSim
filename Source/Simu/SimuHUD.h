@@ -6,6 +6,8 @@
 #include "GameFramework/HUD.h"
 #include "SimuHUD.generated.h"
 
+class ATectonicsTestActor;
+
 /**
  * ASimuHUD
  *
@@ -45,7 +47,30 @@ public:
     UPROPERTY(EditAnywhere, Category = "Compass")
     float CompassScreenMargin = 120.0f;
 
+    /** Escala del texto de depuracion de tectonica (los tres bloques). 1.0 = fuente base. */
+    UPROPERTY(EditAnywhere, Category = "Tectonics Debug")
+    float TectonicsTextScale = 1.4f;
+
 private:
     /** Dibuja una flecha 2D desde Origin en la direccion Dir (normalizada, en pixeles). */
     void DrawScreenArrow(const FVector2D& Origin, const FVector2D& Dir, const FLinearColor& Color);
+
+    // ============================================================
+    // TEXTO DE DEPURACION DE TECTONICA (17-08-2026)
+    //
+    // ATectonicsTestActor (modulo CubeSphere) construye tres bloques de texto cada tick
+    // pero no puede dibujarlos el mismo -CubeSphere no depende de Simu, y esta HUD si
+    // depende de CubeSphere, asi que la busqueda va en este sentido-. Posiciones fijas:
+    // depuracion arriba izquierda, teclas arriba derecha, coste una sola linea abajo
+    // centrada. Antes esto eran GEngine->AddOnScreenDebugMessage, que solo sabe apilar
+    // arriba a la izquierda.
+    // ============================================================
+
+    /** Busca el actor de tectonica en el nivel (una sola vez, cacheado). */
+    ATectonicsTestActor* FindTectonicsActor();
+
+    void DrawTectonicsDebugText();
+
+    UPROPERTY(Transient)
+    TObjectPtr<ATectonicsTestActor> CachedTectonicsActor = nullptr;
 };

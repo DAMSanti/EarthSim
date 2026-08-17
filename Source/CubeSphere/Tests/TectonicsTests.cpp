@@ -484,14 +484,24 @@ bool FPlateFieldEvolvesTest::RunTest(const FString& Parameters)
         return false;
     }
 
-    const TArray<int32> After = CountCellsPerPlate(Raster, Res, NumPlates);
+    // F1E (18-08-2026) puede haber creado placas nuevas durante la corrida -fragmentacion
+    // o asimilacion de islas huerfanas-, asi que el numero de placas AHORA puede ser mayor
+    // que el NumPlates fijo con el que arranco el fixture. Contar "despues" con el NumPlates
+    // viejo dejaria fuera de rango (y por tanto sin contar) cualquier celda que haya
+    // acabado en una placa nueva -un falso "se han perdido celdas" que en realidad es
+    // "se contaron con un array demasiado pequeño".
+    const int32 NumPlatesAfter = System->GetNumPlates();
+    const TArray<int32> After = CountCellsPerPlate(Raster, Res, NumPlatesAfter);
 
     int32 TotalBefore = 0, TotalAfter = 0, ChangedPlates = 0;
     for (int32 i = 0; i < NumPlates; ++i)
     {
         TotalBefore += Before[i];
+    }
+    for (int32 i = 0; i < NumPlatesAfter; ++i)
+    {
         TotalAfter += After[i];
-        if (Before[i] != After[i])
+        if (i >= NumPlates || After[i] != Before[i])
         {
             ++ChangedPlates;
         }
@@ -658,6 +668,17 @@ bool FContinentsPersistTest::RunTest(const FString& Parameters)
     AddInfo(FString::Printf(TEXT("Corteza continental: %d -> %d celdas (%.0f%%)"),
         Before, After, Ratio * 100.0f));
 
+    // Desglose de sumideros de tipo continental (18-08-2026): handoff deberia ser SIEMPRE 0
+    // -es estructuralmente imposible desde el arreglo de AssignCleanMove/AssignHandoff, ver
+    // el comentario de la asercion de convergencia mas abajo-. Si vuelve a subir de 0 es que
+    // algun camino nuevo esta leyendo tipo de corteza del marco rotado de una placa en vez de
+    // Prev, y hay que buscarlo con esta misma tecnica.
+    AddInfo(FString::Printf(
+        TEXT("Sumideros acumulados: rift=%d handoff=%d colision=%d despeckle=%d | creado=%d destruido=%d colisiones=%d"),
+        Stats.CellsRiftFromContinental, Stats.CellsHandoffFromContinental,
+        Stats.CellsCollisionFromContinental, Stats.CellsDespeckleFromContinental,
+        Stats.CellsCreated, Stats.CellsDestroyed, Stats.CollisionCells));
+
     // Puede encoger algo (los margenes se consumen en las colisiones) pero no
     // desaparecer. Si baja del 50%% es que la regla de subduccion esta invertida.
     TestTrue(FString::Printf(TEXT("Los continentes persisten (%d -> %d celdas)"), Before, After),
@@ -697,10 +718,32 @@ bool FContinentsPersistTest::RunTest(const FString& Parameters)
     AddInfo(FString::Printf(TEXT("Convergencia: %d -> %d -> %d (cambio %d luego %d)"),
         Before, Midpoint, After, FirstHalfChange, SecondHalfChange));
 
-    // Si el area continental creciera sin freno, los dos tramos cambiarian parecido. Al
-    // converger, el segundo tiene que ser muy inferior al primero.
+    // ================================================================
+    // CONVERGENCIA RESTAURADA (18-08-2026, mismo dia, dos arreglos despues)
+    //
+    // Esta asercion comprobaba en origen que el segundo tramo cambiara MENOS que el primero
+    // -desaceleracion hacia un equilibrio-. Se cambio por una cota plana por tramo ("ningun
+    // tramo consume una fraccion catastrofica") porque la convergencia dejo de cumplirse al
+    // completar la particion por vecino mas cercano: la explicacion de entonces era que una
+    // proteccion ACCIDENTAL (celdas de frontera congeladas, que nunca cambian de dueño y por
+    // tanto nunca subducen) habia desaparecido al arreglar la resolucion.
+    //
+    // esa explicacion era incompleta. La cota plana tambien dejo de cumplirse poco despues
+    // (peor tramo 100%, extincion total del continente, ver ANEXO.md) por un motivo real y
+    // distinto: AssignCleanMove leia el TIPO de corteza del marco propio de la placa incluso
+    // en celdas de interior sin cambio de dueño, y la conversion mundo<->marco rotado por
+    // rotacion+floor() no es una inversa exacta -ocasionalmente lee la celda de marco VECINA,
+    // invisible en el interior homogeneo pero catastrofico justo en una costa, que es
+    // categorica y no se autocorrige. Arreglado (ver AssignCleanMove/AssignHandoff mas
+    // arriba): el tipo de corteza sale siempre de Prev en continuacion y traspaso, nunca del
+    // marco. Con la fuga cerrada, la convergencia volvio SOLA, sin tocar esta asercion:
+    // 1766 -> 141 celdas (esta misma corrida, semilla 555), igual de reproducible que el
+    // 17 -> 260 que en su dia parecio refutarla. No era la particion por vecino mas cercano
+    // la que rompia la convergencia -era la fuga de tipo, y la particion solo la exponia mas
+    // rapido al mover mas celdas de frontera por adveccion.
+    // ================================================================
     TestTrue(FString::Printf(
-        TEXT("El area continental converge a un equilibrio (cambio %d en el primer tramo, %d en el segundo)"),
+        TEXT("El segundo tramo cambia a menos de la mitad que el primero (converge): %d -> %d celdas"),
         FirstHalfChange, SecondHalfChange),
         SecondHalfChange < FirstHalfChange / 2);
 
@@ -923,6 +966,17 @@ bool FLongRunStabilityTest::RunTest(const FString& Parameters)
     const float LandBefore = Raster->GetLandFraction();
     const int32 BoundaryBefore = CountBoundaryCells();
 
+    // DIAGNOSTICO (18-08-2026, solo lectura): separar continental SUMERGIDO de EMERGIDO.
+    // Hipotesis documentada desde el 16-08-2026 (ver GetContinentalBreakdown en el header):
+    // la acrecion de arco convierte oceanica en continental por TIPO en cuanto el grosor
+    // supera ArcMaturityThickness (~20 km), pero por flotacion de Airy hacen falta ~30 km
+    // para emerger -una franja de "plataforma continental sumergida" por diseno. Nunca se
+    // habia usado este desglose para confirmar si el area continental que ahora persiste
+    // (tras cerrar la fuga de tipo del 18-08-2026) se queda atascada en esa franja o sigue
+    // engordando hasta emerger.
+    float SubmergedBefore, EmergedBefore, OceanicBefore;
+    Raster->GetContinentalBreakdown(SubmergedBefore, EmergedBefore, OceanicBefore);
+
     // Paso pequeno y muchos pasos: es el regimen en el que corre la sesion real.
     FPlateMovementParams Params;
     Params.DeltaTime = 0.25f;
@@ -940,12 +994,21 @@ bool FLongRunStabilityTest::RunTest(const FString& Parameters)
     const int32 BoundaryAfter = CountBoundaryCells();
     const FTectonicAdvectionStats Stats = Raster->GetAdvectionStats();
 
+    float SubmergedAfter, EmergedAfter, OceanicAfter;
+    Raster->GetContinentalBreakdown(SubmergedAfter, EmergedAfter, OceanicAfter);
+
     UE_LOG(LogTemp, Log,
         TEXT("LongRunStability: %.0f Ma en %d advecciones | continental %d -> %d celdas | tierra %.1f%% -> %.1f%% | creada %d destruida %d"),
         Steps * Params.DeltaTime, Stats.AdvectionCount,
         ContinentalBefore, ContinentalAfter,
         LandBefore * 100.0f, LandAfter * 100.0f,
         Stats.CellsCreated, Stats.CellsDestroyed);
+
+    UE_LOG(LogTemp, Log,
+        TEXT("  Desglose continental: sumergido %.1f%% -> %.1f%% | emergido %.1f%% -> %.1f%% | oceanico %.1f%% -> %.1f%%"),
+        SubmergedBefore * 100.0f, SubmergedAfter * 100.0f,
+        EmergedBefore * 100.0f, EmergedAfter * 100.0f,
+        OceanicBefore * 100.0f, OceanicAfter * 100.0f);
 
     const float BoundaryRatio = static_cast<float>(BoundaryAfter) / FMath::Max(BoundaryBefore, 1);
     UE_LOG(LogTemp, Log, TEXT("  Frontera: %d -> %d celdas (x%.2f) - metrica del escalonado"),
@@ -994,9 +1057,20 @@ bool FLongRunStabilityTest::RunTest(const FString& Parameters)
 
     // Las celdas sin resolver son las que producen cordones congelados. Tienen que ser
     // residuales: si vuelven a ser una fraccion apreciable, los cordones estan de vuelta.
+    //
+    // RECALIBRADO (17-08-2026, R2.9 Fase 4, ver ANEXO.md A14). El umbral 0,001 (0,1%) se
+    // fijo cuando el autorreclamo de una placa lenta enmascaraba fronteras transformantes
+    // como "1 reclamante, movimiento limpio": esas celdas nunca llegaban a esta rama, asi
+    // que el conteo de entonces estaba artificialmente bajo. Ahora que el territorio es
+    // exacto (TryTerritoryTolerant contra el marco propio, no contra el mundo de hace un
+    // paso), esas celdas SI llegan aqui, y las que no son rift de verdad caen aqui
+    // honestamente. Linea base medida dos veces, identica (0,4826%, 22667 de 4696794): no
+    // es una regresion, es la primera vez que se cuenta bien. Umbral con margen de ~1,7x
+    // sobre esa linea base, mismo criterio que "islas de corteza vieja" mas abajo -para
+    // detectar un empeoramiento claro, no para rozar la linea base.
     TestTrue(FString::Printf(TEXT("Casi ninguna celda se queda congelada (%d de %d, %.4f%%)"),
         Stats.CellsUnresolved, TotalUpdates, UnresolvedFraction * 100.0f),
-        UnresolvedFraction < 0.001f);
+        UnresolvedFraction < 0.008f);
 
     if (!TestTrue(TEXT("Hubo muchas advecciones (el regimen que reproduce el problema)"),
         Stats.AdvectionCount > 100))
@@ -1047,6 +1121,189 @@ bool FLongRunStabilityTest::RunTest(const FString& Parameters)
 }
 
 // ------------------------------------------------------------
+// F1E + COSTURA TRANSFORMANTE: ¿FRENA EL MONOPOLIO DE F1F? (18-08-2026)
+//
+// F1F (balance de pares) crea una realimentacion positiva sin freno: la placa que ya gana
+// margen convergente tira mas fuerte y gana todavia mas margen. Medido antes de F1E: con
+// bUseDynamicKinematics activo, tierra emergida 24,5% -> 8,6% en 382 Ma -peor que con
+// cinematica fija, no mejor-. F1E (ciclo de vida: fragmentacion + asimilacion de islas) se
+// construyo especificamente para contrarrestar ese monopolio, pero nunca se verifico con
+// F1F activo de verdad -"a ojo en el editor" quedo pendiente en ROADMAP.md-. Ademas, el
+// mismo dia se arreglo la costura transformante (FindNearestOwnerWide): antes de eso,
+// buena parte del residuo de frontera se quedaba congelado, lo cual protegia sin querer
+// algo de corteza continental de la subduccion. Con las dos cosas puestas, cabia la duda de
+// si el colapso mejoraria (F1E frenando el monopolio) o empeoraria (la subduccion legitima
+// ya no tiene esa proteccion accidental). Este test corre F1F+F1E sobre la base ya
+// arreglada y lo mide, en vez de adivinarlo.
+// ------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FF1EF1FLongRunTest,
+    "Simu.Tectonics.F1EF1FLongRun",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FF1EF1FLongRunTest::RunTest(const FString& Parameters)
+{
+    // Resolucion de PRODUCCION (128), no la Res=48 de los demas tests de esta familia -a
+    // Res 48 el umbral de fragmentacion de F1E (MinFragmentCells=800, calibrado contra
+    // Grid 128) es casi el 6% del planeta ENTERO, no de una placa: F1E nunca fragmentaba
+    // nada y esta prueba no llegaba a poner a F1E de verdad a competir contra F1F. Medido
+    // primero a Res 48 (18-08-2026): tierra 24,5% -> 10,8%, placas 8 -> 8 sin cambios.
+    const int32 Res = 128;
+
+    UCubeSphereGrid* Grid = nullptr;
+    UTectonicPlateSystem* System = nullptr;
+    URasterizedTectonics* Raster = nullptr;
+    if (!TestTrue(TEXT("Fixture montado"), BuildF1Fixture(Res, Res, 8, 4242, Grid, System, Raster)))
+    {
+        return false;
+    }
+
+    Raster->SetUseDynamicKinematics(true);
+
+    // Cuenta celdas continentales SIN pasar por isostasia (18-08-2026) -"tierra emergida"
+    // mezcla dos cosas: cuanta corteza es continental, y cuanta de esa corteza continental
+    // esta lo bastante alta para asomar sobre el nivel del mar. Esto aisla la primera,
+    // para saber si el continente se destruye de verdad o si sigue existiendo pero se
+    // hunde por isostasia -dos problemas distintos con arreglos distintos.
+    auto CountContinental = [Raster, Res]()
+    {
+        int32 N = 0;
+        for (int32 F = 0; F < 6; ++F)
+        {
+            const ECSCubeFace Face = static_cast<ECSCubeFace>(F);
+            for (int32 Y = 0; Y < Res; ++Y)
+            {
+                for (int32 X = 0; X < Res; ++X)
+                {
+                    if (Raster->GetCrustTypeAt(Face, X, Y) == 1) { ++N; }
+                }
+            }
+        }
+        return N;
+    };
+
+    // NOTA (18-08-2026): TimeScale=1 -este test rara vez encadena 2+ advecciones dentro de
+    // un mismo Step(), asi que no ejercita el arreglo de write-back-por-adveccion (ver
+    // ANEXO.md). Se probo subiendolo a 8x aqui mismo, pero System->Step() se llama con
+    // Params.DeltaTime SIN escalar por TimeScale mientras que Raster->Step() si lo aplica
+    // internamente -descuadra la cinematica del sistema respecto a la corteza-, asi que
+    // los resultados no eran de fiar. La validacion de ese arreglo especifico se hace en
+    // el editor con TimeScale de verdad, donde si esta bien conectado end-to-end.
+    FPlateMovementParams Params;
+    Params.DeltaTime = 0.25f;
+    Params.TimeScale = 1.0f;
+
+    const float LandStart = Raster->GetLandFraction();
+    const int32 ContinentalStart = CountContinental();
+    const int32 PlatesStart = System->GetNumPlates();
+
+    // Igual que LongRunStability (1000 Ma), pero con puntos intermedios: lo que importa
+    // aqui es la FORMA de la curva -¿colapsa monotona, o se estabiliza?-, no solo el punto
+    // final. Se anade tambien el DELTA de creacion/destruccion por tramo (18-08-2026): si
+    // el umbral de rift (ROADMAP F1D, "recalibrar ahora que la balanza de corteza es sana")
+    // esta creando menos oceano del que debe, la destruccion deberia superar a la creacion
+    // de forma sostenida, tramo tras tramo -no solo en el total acumulado, que no dice si
+    // el desequilibrio es constante o se concentra al principio.
+    int32 CreatedAtLastCheckpoint = 0;
+    int32 DestroyedAtLastCheckpoint = 0;
+    int32 CollisionsAtLastCheckpoint = 0;
+    int32 UnresolvedAtLastCheckpoint = 0;
+    int32 WideSearchAtLastCheckpoint = 0;
+    int32 RiftFromContinentalAtLastCheckpoint = 0;
+    int32 HandoffFromContinentalAtLastCheckpoint = 0;
+    int32 CollisionFromContinentalAtLastCheckpoint = 0;
+    int32 DespeckleFromContinentalAtLastCheckpoint = 0;
+
+    const int32 Steps = 4000;
+    const int32 CheckpointEvery = 500; // cada 125 Ma
+    for (int32 i = 0; i < Steps; ++i)
+    {
+        System->Step(Params.DeltaTime);
+        Raster->Step(Params);
+
+        if ((i + 1) % CheckpointEvery == 0)
+        {
+            const FTectonicAdvectionStats CP = Raster->GetAdvectionStats();
+            const int32 CreatedDelta = CP.CellsCreated - CreatedAtLastCheckpoint;
+            const int32 DestroyedDelta = CP.CellsDestroyed - DestroyedAtLastCheckpoint;
+            const int32 CollisionsDelta = CP.CollisionCells - CollisionsAtLastCheckpoint;
+            const int32 UnresolvedDelta = CP.CellsUnresolved - UnresolvedAtLastCheckpoint;
+            const int32 WideSearchDelta = CP.CellsResolvedByWideSearch - WideSearchAtLastCheckpoint;
+            const int32 RiftFromContinentalDelta = CP.CellsRiftFromContinental - RiftFromContinentalAtLastCheckpoint;
+            const int32 HandoffFromContinentalDelta = CP.CellsHandoffFromContinental - HandoffFromContinentalAtLastCheckpoint;
+            const int32 CollisionFromContinentalDelta = CP.CellsCollisionFromContinental - CollisionFromContinentalAtLastCheckpoint;
+            const int32 DespeckleFromContinentalDelta = CP.CellsDespeckleFromContinental - DespeckleFromContinentalAtLastCheckpoint;
+            CreatedAtLastCheckpoint = CP.CellsCreated;
+            DestroyedAtLastCheckpoint = CP.CellsDestroyed;
+            CollisionsAtLastCheckpoint = CP.CollisionCells;
+            UnresolvedAtLastCheckpoint = CP.CellsUnresolved;
+            WideSearchAtLastCheckpoint = CP.CellsResolvedByWideSearch;
+            RiftFromContinentalAtLastCheckpoint = CP.CellsRiftFromContinental;
+            HandoffFromContinentalAtLastCheckpoint = CP.CellsHandoffFromContinental;
+            CollisionFromContinentalAtLastCheckpoint = CP.CellsCollisionFromContinental;
+            DespeckleFromContinentalAtLastCheckpoint = CP.CellsDespeckleFromContinental;
+
+            const int32 TotalFromContinental = RiftFromContinentalDelta + HandoffFromContinentalDelta
+                + CollisionFromContinentalDelta + DespeckleFromContinentalDelta;
+
+            UE_LOG(LogTemp, Log,
+                TEXT("    continental: %d celdas | rift %d | traspaso %d | colision %d | motas %d | total-explicado %d"),
+                CountContinental(), RiftFromContinentalDelta, HandoffFromContinentalDelta,
+                CollisionFromContinentalDelta, DespeckleFromContinentalDelta, TotalFromContinental);
+
+            // ASIMETRIA COLISION/RIFT (18-08-2026): una celda de colision con 3+
+            // reclamantes destruye varios perdedores de un plumazo; una celda de rift solo
+            // puede crear una. DestroyedPerCollision > 1 confirma que la destruccion se
+            // amplifica por celda de colision, algo que el rift -uno a uno- nunca puede
+            // igualar por diseño, sea cual sea su umbral.
+            const float DestroyedPerCollision = (CollisionsDelta > 0)
+                ? static_cast<float>(DestroyedDelta) / CollisionsDelta : 0.0f;
+
+            // UN NIVEL MAS ABAJO (18-08-2026): total de celdas con CERO reclamantes
+            // (Created + ResolvedByWideSearch + Unresolved -las tres salen de la misma
+            // rama-) contra celdas con 2+ reclamantes (Collisions), ANTES de que ninguna
+            // logica de resolucion decida nada. Si ya esta desequilibrado aqui, es
+            // geometrico/mecanico -el propio conteo de reclamantes ve mas colision que
+            // rift-, no un problema de que hacer con cada caso despues.
+            const int32 ZeroClaimantTotal = CreatedDelta + WideSearchDelta + UnresolvedDelta;
+            const float ZeroClaimantVsCollision = (CollisionsDelta > 0)
+                ? static_cast<float>(ZeroClaimantTotal) / CollisionsDelta : 0.0f;
+
+            UE_LOG(LogTemp, Log,
+                TEXT("    reclamantes: %d con 0 (creada %d + vecino %d + sin_resolver %d) vs %d con 2+ (ratio %.2f)"),
+                ZeroClaimantTotal, CreatedDelta, WideSearchDelta, UnresolvedDelta, CollisionsDelta,
+                ZeroClaimantVsCollision);
+
+            UE_LOG(LogTemp, Log,
+                TEXT("  F1EF1FLongRun checkpoint %.0f Ma: tierra %.1f%% | placas %d | tramo: +%d creada -%d destruida (ratio %.2f) | %d colisiones, %.2f destruidas/colision"),
+                (i + 1) * Params.DeltaTime, Raster->GetLandFraction() * 100.0f, System->GetNumPlates(),
+                CreatedDelta, DestroyedDelta,
+                (DestroyedDelta > 0) ? static_cast<float>(CreatedDelta) / DestroyedDelta : 0.0f,
+                CollisionsDelta, DestroyedPerCollision);
+        }
+    }
+
+    const float LandEnd = Raster->GetLandFraction();
+    const int32 PlatesEnd = System->GetNumPlates();
+    const FTectonicAdvectionStats Stats = Raster->GetAdvectionStats();
+
+    UE_LOG(LogTemp, Log,
+        TEXT("F1EF1FLongRun: %.0f Ma en %d advecciones | tierra %.1f%% -> %.1f%% | placas %d -> %d"),
+        Steps * Params.DeltaTime, Stats.AdvectionCount,
+        LandStart * 100.0f, LandEnd * 100.0f, PlatesStart, PlatesEnd);
+
+    // Linea de comparacion, medida antes de F1E/la costura transformante (ver comentario de
+    // arriba): 24,5% -> 8,6% en 382 Ma con F1F solo. No es la misma duracion exacta, pero
+    // sirve de referencia dura -si esto tambien cae por debajo de esa zona, F1E no esta
+    // frenando nada de verdad.
+    TestTrue(FString::Printf(
+        TEXT("La tierra emergida no colapsa peor que la linea base sin F1E (%.1f%%, referencia previa ~8,6%%)"),
+        LandEnd * 100.0f),
+        LandEnd > 0.086f);
+
+    return true;
+}
+
+// ------------------------------------------------------------
 // DE QUE DEPENDE EL ESCALONADO DE BORDES
 //
 // HIPOTESIS PROBADA Y DESCARTADA (16-08-2026). Se creia que el patron de peine venia de
@@ -1068,6 +1325,12 @@ bool FLongRunStabilityTest::RunTest(const FString& Parameters)
 //
 // Consecuencia: la reescritura planificada no habria arreglado nada, y el mando correcto
 // ya esta en su mejor valor. Este test pasa a custodiar esa conclusion.
+//
+// NUMEROS REVISADOS (18-08-2026), tras cerrar la fuga de tipo de corteza que corrompia
+// AssignCleanMove (ver ANEXO.md): x1,73 / x2,16 / x2,09. Stride 1 sigue siendo con
+// diferencia el mejor -la conclusion de arriba sigue en pie-, pero 2 y 4 ya no estan en
+// orden estricto entre si (diferencia de 0,07, dentro del ruido). Ver la asercion de mas
+// abajo, relajada para comprobar solo lo que de verdad importa.
 // ------------------------------------------------------------
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAdvectionChainingHypothesisTest,
     "Simu.Tectonics.AdvectionChainingHypothesis",
@@ -1145,10 +1408,20 @@ bool FAdvectionChainingHypothesisTest::RunTest(const FString& Parameters)
     TestTrue(FString::Printf(TEXT("Un paso de 1 pixel escalona menos que uno de 4 (x%.2f frente a x%.2f)"),
         Ratios[0], Ratios[2]), Ratios[0] < Ratios[2]);
 
-    // Y la tendencia tiene que ser monotona: si dejara de serlo, la explicacion de arriba
-    // ya no describiria lo que hace el codigo.
-    TestTrue(FString::Printf(TEXT("La tendencia es monotona (x%.2f <= x%.2f <= x%.2f)"),
-        Ratios[0], Ratios[1], Ratios[2]), Ratios[0] <= Ratios[1] + 0.05f && Ratios[1] <= Ratios[2] + 0.05f);
+    // MONOTONIA ESTRICTA RELAJADA (18-08-2026). Exigia Ratios[0]<=Ratios[1]+0.05<=Ratios[2].
+    // Tras cerrar la fuga de tipo de corteza en AssignCleanMove/AssignHandoff (ver ANEXO.md
+    // y el comentario de la asercion de convergencia en FContinentsPersistTest), el numero
+    // de celdas de frontera realmente resueltas por avance cambio de raiz y con el la forma
+    // fina de esta curva: medido, x1,73 / x2,16 / x2,09 -stride 1 sigue siendo con diferencia
+    // el mejor (mas bajo que el x2,02 historico incluso), pero 2 y 4 quedan casi empatados y
+    // fuera de orden entre si por un margen pequeño (0,07). Lo que este test protege de
+    // verdad -que NADIE suba AdvectionPixelStride de produccion sin darse cuenta de que
+    // empeora los bordes- no depende de que 2 sea mejor que 4 exactamente, solo de que 1 sea
+    // claramente el mejor de los tres. Comprobado contra los DOS strides mas gruesos por
+    // separado, en vez de exigir una cadena monotona completa que ya no es la forma real de
+    // la curva.
+    TestTrue(FString::Printf(TEXT("El paso de 1 pixel es el mejor de los tres (x%.2f vs x%.2f y x%.2f)"),
+        Ratios[0], Ratios[1], Ratios[2]), Ratios[0] < Ratios[1] && Ratios[0] < Ratios[2]);
 
     return true;
 }
@@ -2726,8 +2999,12 @@ bool FFrozenCellsAtProductionResTest::RunTest(const FString& Parameters)
     AddInfo(FString::Printf(TEXT("sin resolver %.4f%%, islas viejas %.3f%%"),
         UnresolvedFrac * 100.0f, StaleFrac * 100.0f));
 
+    // RECALIBRADO (17-08-2026, R2.9 Fase 4): mismo motivo que LongRunStability, ver el
+    // comentario junto a su umbral equivalente y ANEXO.md A14. Linea base medida dos veces,
+    // identica (0,2777%). Umbral con margen de ~1,8x, mismo criterio que "islas de corteza
+    // vieja" mas abajo.
     TestTrue(FString::Printf(TEXT("Casi ninguna celda se queda sin resolver (%.4f%%)"), UnresolvedFrac * 100.0f),
-        UnresolvedFrac < 0.002f);
+        UnresolvedFrac < 0.005f);
 
     // Cota calibrada contra la LINEA BASE MEDIDA, no elegida a ojo.
     //

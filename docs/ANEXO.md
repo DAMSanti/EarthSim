@@ -522,3 +522,358 @@ Promediar sobre el segmento entero cancela el ruido de celda suelta en vez de ac
 **Lo que esto NO arregla, y hay que decirlo explícito.** El "peine" (escalonado de bordes, [más arriba](#escalonado-de-bordes-peine)) es un artefacto de **`PlateIDData`**, no de la física de frontera. Los segmentos se **construyen a partir de** `PlateIDData` ya resuelto por `AdvectPlateField` — lo leen, no lo cambian. La propiedad sigue decidiéndose exactamente igual que siempre (vecino más cercano sobre un campo categórico, re-cuantizado cada advección), así que el contorno visual de ID de placa sigue tan dentado como antes. Confirmado visualmente en el editor tras este commit: el peine seguía ahí. Lo que sí debería suavizarse es el crecimiento de relieve a lo largo de un margen (ya no lo decide una celda suelta mal clasificada), no la forma del propio contorno de placa.
 
 **Lo que esto tampoco es todavía:** segmentos persistentes con historia rica (fusión, ciclo de vida propio) — la identidad de hoy es puramente "qué componente solapa más con cuál del paso anterior", suficiente para `Age` pero no para todo lo que R2.16 va a necesitar de un segmento (por ejemplo, longitud real para el tirón de la losa, R2.17).
+
+---
+
+## A14. R2.9 no basta: la propiedad necesita el mismo tratamiento que el material (17-08-2026)
+
+### El arnés de depuración por capas
+
+Para aislar el peine y la cinta de una vez, sin adivinar, se construyó un modo de prueba por capas en `RasterizedTectonics`, activable en caliente desde `TectonicsTestActor` (`T` capa 1, `Y` capa 2a), cada una construida sobre la anterior en vez de sustituirla:
+
+- **Capa 1** (`DebugFakeRotateStep`): rotación geométrica pura. Cada celda se resuelve retro-rotando contra el Voronoi original congelado (`OriginalPlateIDSnapshot`), usando solo `CubeFaceMapping` — sin `GetNeighborPixel`, sin conteo de reclamantes, sin recuperación por tolerancia. Resultado: geometría limpia, sin bloques de esquina. Confirma que `CubeFaceMapping` en sí no es la fuente de nada de lo que sigue.
+- **Capa 2a**: `AdvectPlateField` real, pero sin física de frontera ni isostasia — corta justo después del bucle de advección en `Step()`. Aísla el mecanismo de transporte (conteo, resolución, colisión, rift) del resto de la maquinaria.
+
+Detalle de implementación que costó una vuelta: `WriteBackToPlateFrames()` en producción solo corre **una vez por `Step()`**, al final. La Capa 2a, al cortar antes de llegar ahí, dejaba el marco de material congelado desde que se activaba el modo mientras `PlateAccumRotation` seguía creciendo — un fantasma diagonal que no era el bug buscado, sino un artefacto del propio arnés. Se corrigió llamando `WriteBackToPlateFrames()` tras cada `AdvectPlateField()` **dentro** de la Capa 2a (no así en producción, ver "lo que queda pendiente" más abajo).
+
+### R2.9 Fase 3: las dos pasadas de `AdvectPlateField` no estaban de acuerdo
+
+Con la Capa 2a limpia de ese fantasma, seguía apareciendo un punteado que alternaba de placa a lo largo de fronteras diagonales — visible en el campo de ID de placa, no solo en material (lo que ya descartaba que fuera la cinta de A10/R2.10, que por diseño nunca tocaba la propiedad).
+
+Causa encontrada por lectura de código, confirmada después con el HUD: `AdvectPlateField` tiene dos pasadas.
+
+1. **Conteo** (R2.9 Fase 2, 16-08): para cada celda, prueba cada placa con una búsqueda tolerante de 4 candidatos — el hueco de redondeo de ±0,5 celda documentado ese día. De ahí sale `ClaimCounts`.
+2. **Resolución**: si `ClaimCounts` es 1, reutiliza ese resultado. Si es 0 o 2+, **volvía a calcular los reclamantes desde cero con el test ESTRICTO de una sola celda** (`FloorToInt`, sin tolerancia) — una rama que sobrevivía de un intento del 15-08, un día **antes** de que el test tolerante se volviera el principal en la pasada de conteo.
+
+Consecuencia: el conteo podía decir "2 reclamantes" (colisión de verdad) y la resolución, con menos tolerancia, encontrar 0 para la misma celda — caía en la rama de rift/recuperación, la recuperación (que sí era tolerante) encontraba un ganador por cercanía, y la celda se resolvía como un movimiento limpio de una sola placa **en vez de la colisión que el conteo ya sabía que era**. El desempate por distancia sub-celda hacía que el ganador fuera alternando de placa según la fase, adveción tras adveción: el punteado.
+
+**Arreglo:** una sola función (`TryClaimTolerant`) para las tres pasadas que la necesitan — conteo, resolución de frontera y recuperación. En cuanto la resolución dejó de recalcular con el test estricto, la "recuperación por tolerancia" (16-08) se volvió matemáticamente inalcanzable: si la resolución ya dice 0 reclamantes con la misma búsqueda tolerante que usaba la recuperación, repetirla no puede encontrar nada distinto. Se quitó el bloque entero en vez de dejarlo muerto. Medido en vivo (Capa 2a): "recuperados por tolerancia" cayó de 26.771 a 0; el punteado desapareció.
+
+### El defecto de verdad: la placa lenta enmascara su propio rift
+
+Con el punteado fuera, apareció uno peor, ya reportado por el usuario viéndolo correr en vivo: una península que **crece sin parar**, no se traslada como bloque rígido — "es como si el continente dejara una estela de sí mismo detrás". Con 0 recuperados y 0 congelados confirmados por el HUD, no podía ser ni el defecto de A10 ni el que se acababa de arreglar.
+
+Mecanismo, por lectura de código: cuando una celda tiene exactamente 1 reclamante, se trata como movimiento limpio sin más comprobación — es la rama "normal", sin sospecha. Pero ese único reclamante puede ser **la propia placa lenta reclamándose a sí misma por puro redondeo**, no porque haya avanzado. Es la otra cara de `Simu.Tectonics.StuckCellsNearEulerPole` (test ya existente, ya en rojo antes de esta sesión): cerca del polo de Euler de una placa la velocidad cae por debajo de 0,5 píxel/advección, y el retrotrazado siempre redondea a la misma celda.
+
+Eso solo explicaría una celda congelada, no una que crece. La parte que faltaba: si la placa vecina se **retira de verdad** (divergencia real — debería nacer corteza oceánica ahí), la comprobación de rift **nunca se ejecuta**, porque solo se dispara con `Claimants.Num() == 0`, y aquí siempre da 1 (el autorreclamo). Cada advección la placa rápida se retira un poco más, la celda que deja vacía no la disputa nadie más, y la placa lenta se la queda por descarte. No es tierra avanzando: es tierra a la que nunca se le pregunta si debería convertirse en océano nuevo.
+
+### Por qué no es un caso especial más que parchear
+
+Este es el mismo problema, en dos disfraces: advectar un campo **categórico** (quién es el dueño) sobre una rejilla fija, resolviéndolo contra sí mismo cada paso, pierde el movimiento sub-rejilla de forma **irreversible**. Es el motivo documentado de por el que ningún código de geodinámica computacional serio (CitcomS, ASPECT, Underworld, StGermain) guarda "propiedad" como estado primario en la rejilla: usan **partículas trazadoras** (marker-in-cell) que llevan su identidad en coordenadas continuas, transportadas con la solución exacta de su movimiento — para rotación rígida, eso es una rotación de cuaternión sin ningún error de integración, por pequeño que sea el paso. La rejilla deja de ser la verdad; es una fotografía que se renderiza preguntando a los marcadores dónde están ahora. GPlates, la referencia académica en reconstrucción de placas, va aún más lejos y prescinde de la rejilla: fronteras como polígonos vectoriales, recalculados por intersección — más correcto, pero exige un motor de topología que no encaja con el pipeline de rejilla cubo-esfera que ya existe aquí.
+
+**Diseño elegido: marker-in-cell, extendiendo R2.10 a la propiedad en vez de inventar un mecanismo nuevo.** El material (`PlateMaterial[P]`, `PlateAccumRotation`) ya es exactamente esto — un marco por placa en coordenadas propias, transportado por rotación acumulada exacta, nunca degradado por remuestreos intermedios. `PlateTerritory[P]`: un ráster booleano por placa, mismo layout que `PlateMaterial[P]`, que responde "¿es mío este punto?" contra el marco propio (rotación **acumulada**, no incremental — este es el cambio de fondo respecto a R2.9 tal como está escrito hoy). La diferencia con el material: el territorio **no** se reescribe por completo cada advección (eso reintroduciría exactamente el mismo problema, solo que disfrazado de "write-back"). Se actualiza con escrituras **puntuales, solo en el instante del evento tectónico** que cambia la propiedad de una celda (rift, colisión) — nunca por remuestreo masivo.
+
+Consecuencia práctica, no solo de corrección: la inmensa mayoría de las celdas (interior de placa, lejos de cualquier frontera — R2.12 ya mide que la banda de frontera es 1–3 % del planeta) deja de necesitar la búsqueda cara contra `NumPlates` candidatos cada advección. Les basta comprobar si siguen dentro de su propio territorio, ya rotado exactamente. Debería ser más barato computacionalmente, no solo más correcto.
+
+**Riesgo de concurrencia a vigilar en la implementación:** `PlateTerritory` se actualiza desde dentro del `ParallelFor` por cara de `AdvectPlateField`; dos caras del mundo distintas pueden mapear al mismo índice del marco de una placa. Los eventos de territorio se recogen en listas locales por hilo y se aplican en una pasada secuencial después del `ParallelFor`, no en el propio bucle paralelo.
+
+**Lo que queda pendiente, anotado para no perderlo:** `WriteBackToPlateFrames()` (material) sigue corriendo una sola vez por `Step()` en producción, no una vez por advección como se forzó en la Capa 2a — si en un `Step()` caben varias advecciones seguidas (`TimeScale` alto), el material puede leer de un marco desincronizado durante esas advecciones intermedias. Acotado, no catastrófico, pero es la misma familia de defecto. Candidato a revisar aparte una vez esto esté verificado.
+
+### Verificación por test, y recalibración de dos umbrales (17-08-2026)
+
+Corridos los 20 tests de `Simu.Tectonics.*`: **17 verdes**. `StuckCellsNearEulerPole` — el test que existía específicamente para no pasar hasta que esto se arreglara de verdad — reporta **0 atascadas**. `NoPermanentlyStuckCells` y `OceanicRibbon` (la prueba directa de la cinta) también verdes.
+
+Dos rojos no eran regresión sino umbral desactualizado: `FrozenCellsAtProductionRes` (0,2777 % sin resolver, umbral 0,2 %) y la aserción "congelada" de `LongRunStability` (0,4826 %, umbral 0,1 %). Motivo: esos umbrales se calibraron cuando el autorreclamo de una placa lenta enmascaraba fronteras transformantes como "1 reclamante, movimiento limpio" — esas celdas nunca llegaban a la rama de "sin resolver", así que el conteo de entonces estaba artificialmente bajo. Con el territorio exacto, esas celdas llegan ahí de verdad y las que no son rift caen honestamente en el residuo. No es que hoy se resuelva peor: es la primera vez que se cuenta bien.
+
+Línea base remedida dos veces con el código de hoy, idéntica ambas veces (determinista, misma semilla): 0,2777 % y 0,4826 %. Umbrales recalibrados con el mismo criterio que ya usa "islas de corteza vieja" en este archivo (margen ~1,7-1,8× sobre la línea base medida, para detectar un empeoramiento claro, no para rozarla): `FrozenCellsAtProductionRes` a 0,5 %, `LongRunStability` a 0,8 %. Ambos verdes tras el cambio. La otra aserción de `LongRunStability` (colapso de tierra emergida, 9,5 % desde 24,5 %) se deja tal cual — es el defecto ya documentado en ROADMAP F1H, sin relación con esto, pendiente de F1E/F1F.
+
+---
+
+## F1F. Balance de pares por placa (17-08-2026)
+
+### El marco: torque-balance, no F=ma
+
+A escala de placa el número de Reynolds es tan bajo que la inercia no pinta nada — es flujo de Stokes. Forsyth & Uyeda 1975 ("On the relative importance of the driving forces of plate motion") es la referencia académica: la velocidad de una placa en cada instante es la que hace **cero el par neto**, no el resultado de integrar una aceleración. Eso convierte el problema en un balance algebraico:
+
+```
+Σ τ_i = 0  →  ω = (τ_tirón_losa + τ_empuje_dorsal) / (DragCoefficient × área_placa)
+```
+
+R2.12 ya discretiza la frontera en segmentos — exactamente lo que este tipo de modelo necesita —, así que F1F suma sobre `BoundarySegments` en vez de reinventar la discretización, y reutiliza la misma clasificación convergente/divergente/transformante que ya usa `Step()`.
+
+### Fase A: solo diagnóstico
+
+`ComputePlateDrivingTorques()` calcula, por placa, el par de empuje de dorsal (segmentos divergentes, fuerza constante por unidad de longitud, aplicada a ambos lados) y el par de tirón de losa (segmentos convergentes, el lado oceánico subduce — entre dos oceánicas, la más vieja — magnitud ∝ longitud × √edad, misma ley que ya usa la batimetría por hundimiento térmico de F2, no una constante inventada aparte). Extendido `FBoundarySegment` con `AveragePosition` (brazo de palanca), y tipo de corteza/edad medios por lado (`CrustTypePlateA/B`, `AverageAgePlateA/B`), calculados en la misma Pasada 1/2 donde ya se acumulan convergencia y tangencial.
+
+Verificación (sin tocar `AngularVelocity` todavía): Placa 6 (1 de 4 segmentos convergentes con ella subduciendo) → tirón de losa no nulo. Placa 7 (4 tocan, 0 subduce ella — todas continente-contra-continente) → tirón de losa exactamente 0, y sigue con empuje de dorsal no nulo donde tiene frontera divergente. El cero se explica solo con los contadores `ConvergentSegmentsTouching/Subducting`, no hay que adivinar si es un fallo de cálculo.
+
+### Fase B: cerrar el balance, con interruptor
+
+`UpdatePlateKinematicsFromTorqueBalance()`, interruptor `bUseDynamicKinematics` (tecla `D`, apagado por defecto — misma filosofía que las Capas 1/2a: comparar contra la cinemática fija de siempre sin perder la vuelta atrás). Escribe `EulerPole`/`AngularVelocity` vía `PlateSystem->RestorePlateState()` — no había setter directo, pero `RestorePlateState` ya existía para el propósito de M5 y sirve igual aquí, copiando la placa entera para no tocar `Centroid`/`Age`/`CellCount` por accidente.
+
+**Primeros dos puntos medidos (sin ajustar nada aún):** Placa 6 (empuje 7,68e13, tirón 4,4e14) → 0,0037 rad/Ma → **2,36 cm/año**. Placa 2 (más subducción: 3 de 5 segmentos) → 0,0071 rad/Ma → **4,52 cm/año**, más rápida que la anterior — coincide con la dirección que predice Forsyth-Uyeda (más margen convergente, más tirón, más velocidad) y las dos caen dentro de R2.5 (1-15 cm/año) con `DragCoefficient = 1500` a la primera.
+
+**Bucle sin amortiguar, encontrado por el usuario viéndolo correr.** La primera versión escribía la velocidad recién calculada de golpe, cada advección. Sin previo aviso: velocidad mueve la placa → mueve la placa cambia qué segmentos tocan y cómo se clasifican → la clasificación decide la velocidad de la próxima advección. Síntoma medido: el número de segmentos donde una placa subduce saltaba (2→3→6→5→2→3) en pocos segundos — mucho más rápido de lo que una frontera real se reorganiza. Misma lección que `AccumulateMs` (Coste en el HUD, 15-08-2026): un valor instantáneo y ruidoso no se aplica tal cual, se suaviza. Arreglo: media móvil sobre el **vector** de rotación completo (eje y magnitud juntos — mezclarlos por separado no da el mismo resultado), `KinematicsSmoothingAlpha`. Calibrado por prueba directa, no a ojo de una sola vez: 0,15 seguía oscilando (1↔2↔3 cada ~1s), 0,03 mejor pero seguía (1↔2 cada 3-4s), 0,01 estable. Un parpadeo ocasional de ±1 segmento en el límite exacto de clasificación se acepta como residual, misma familia que el trilema de R2.9 Fase 4 — no todo ruido de un sistema discreto es un bug que haya que perseguir hasta cero.
+
+**Clamp duro además de la calibración.** `R2.5` pide 1-15 cm/año; con `DragCoefficient` ya afinado para los dos casos medidos, nada garantiza que otra combinación de fuerzas no se salga del rango. Se acota `AngularVelocity` a `[MinAngularSpeed, MaxAngularSpeed]` derivados de esas dos cifras vía `v = ω·R`, no solo se confía en la calibración estadística.
+
+**Pendiente:** verificación larga en el editor (regla de cierre de fase) — si `LongRunStability` mejora y si las bandas de isócronas (estrías, más arriba en este documento) se vuelven menos regulares al dejar que las fronteras se reorganicen solas, en vez de girar fijas para siempre. R2.18 (campo de esfuerzo del manto, reorganización cada ~100-200 Ma) queda fuera de esta fase, es un paso posterior.
+
+---
+
+## F1E Fase A: nacimiento por fragmentación (17-08-2026)
+
+### Por qué ahora, y por qué antes que terminar de afinar F1F
+
+Corrida larga de validación de F1F (cinemática dinámica activada, `bUseDynamicKinematics`): tierra emergida cayendo de 24,5 % a 8,6 % en ~382 Ma — **peor** que la línea base con cinemática fija, no mejor. Mecanismo, no casualidad: el tirón de losa de una placa es proporcional a la longitud de su margen convergente; una placa que ya está "ganando" (comiéndose vecinas) tiene más margen convergente, luego más tirón, luego avanza más rápido, luego gana todavía más margen en la próxima advección. Es un monopolio sin freno — ninguna de las Capas 1/2a ni la cinemática fija de siempre lo mostraban, porque ninguna cierra el bucle velocidad→geometría→velocidad que F1F sí cierra.
+
+En la Tierra real el freno no es geométrico, es de ciclo de vida: cuando una placa avanza por en medio de otra, el trozo que queda al otro lado deja de compartir cinemática con el resto — pasa a ser una placa nueva, con su propio balance de pares. Sin eso, F1F no tiene con qué competir contra su propio monopolio. De ahí que F1E (ROADMAP 1E, hasta ahora sin empezar) pase delante de terminar de calibrar F1F en vez de después.
+
+### Mecanismo: componentes conexas sobre `PlateIDData` completo, no solo la banda de frontera
+
+`HandlePlateFragmentation()` recorre las 6 caras **enteras** (no solo el 1-3 % que ya mide R2.12 como banda de frontera — aquí hace falta el interior también, porque un trozo separado puede estar lejos de cualquier frontera activa) con el mismo flood-fill de 4 vecinos cruzando caras que ya usa `ExtractAndTrackBoundarySegments` (`GetNeighborPixel`, pila explícita en vez de recursión). Cada celda visitada se agrupa por `PlateIDData` igual; el resultado es, por cada `PlateID` que aparece en el mapa, una o más componentes conexas disjuntas.
+
+Si una placa resuelve en **una sola** componente, no pasa nada — es el caso normal. Si resuelve en **2 o más**, la mayor conserva el `PlateID` y la cinemática tal cual (no se toca `EulerPole`/`AngularVelocity` del padre); cada componente menor nace como placa nueva vía `TectonicPlateSystem::AddPlate()` (método nuevo — `RestorePlateState()` solo sobreescribe índices que ya existen, no crece el array). La placa nueva hereda tipo de corteza, densidad, grosor y cinemática del padre en el instante del nacimiento: no es un valor arbitrario, es la mejor aproximación disponible, y F1F la reafina sola en la próxima advección si la cinemática dinámica está activa. Lo que **no** hereda todavía es un polo de Euler propio derivado de la geometría del rift (ROADMAP 1E, sigue pendiente) — hasta que eso exista, una placa recién nacida se mueve exactamente como su padre hasta que F1F la reafina.
+
+### Sembrado del marco: el mismo problema que R2.9 Fase 4, resuelto igual
+
+Una placa nueva sin `PlateTerritory`/`PlateMaterial`/`PlateAccumRotation` propios sería exactamente el bug de A14 otra vez: `AdvectPlateField` la trataría como si nunca hubiera rotado. `EnsurePlateFrameCapacity()` crece los tres arrays hasta cubrir el índice nuevo; `PlateAccumRotation[NewID]` se copia **del padre**, no de identidad — en el instante del nacimiento el marco de la placa nueva coincide exactamente con el del padre, misma rotación acumulada, así que copiar es lo correcto, no una aproximación. Con esa rotación ya fijada, cada celda del componente se mapea a su índice de marco (`GetFrameIndex`, misma fórmula que `ReadPlateMaterial`) y se escribe `PlateTerritory[NewID]` y `PlateMaterial[NewID]` (edad, tipo, grosor, elevación tal como estaban en el mundo) en esa única pasada — no hace falta un remuestreo aparte.
+
+El límite documentado en `TectonicTypes.h` (`PlateID` es `uint8`, "0-255 para caber en textura R8") se respeta con un tope duro de 250 placas: por encima, `HandlePlateFragmentation()` no crea más y deja el fragmento sobrante con el `PlateID` del padre (incorrecto — el fragmento no se separa de verdad — pero preferible a que un ID nuevo envuelva `uint8` y corrompa una placa existente por colisión de índice).
+
+### Dónde se llama, y dónde no
+
+En `Step()`, entre `AdvectPlateField()` y `ExtractAndTrackBoundarySegments()` — así los segmentos del mismo paso ya ven la partición, no la del paso anterior. No corre en la Capa 2a de depuración (`bDebugAdvectionOnly`): esa capa existe para aislar el transporte puro, y el ciclo de vida de placas es justo lo contrario de "nada más que transporte".
+
+### Regresión de coste (~4000 ms/paso) en la primera versión, y arreglo
+
+La primera versión guardaba, por cada componente conexa, la lista completa de sus celdas (`TArray<TPair<FaceIdx, Idx>>`) — incluida la componente única y gigante de cualquier placa que **no** se ha fragmentado, que es el caso normal en casi todas las advecciones. Para un planeta entero (6×Res×Res celdas) eso es construir y hacer crecer, en el hilo de juego y sin `ParallelFor`, un array del tamaño del planeta **en cada advección**, cuando una placa se fragmenta muy pocas veces en toda una corrida. Reportado por el usuario tras probarlo: el coste por paso subió a ~4000 ms.
+
+Arreglo, sin cambiar el resultado: dos pasadas en vez de una. La pasada 1 recorre el planeta entero pero solo **etiqueta** cada celda con el índice de su componente (`TArray<int32> Label`, un entero por celda, sin reserva dinámica por celda) y **cuenta** cuántas celdas tiene cada componente — nunca guarda coordenadas. Con eso ya alcanza para decidir, por placa, si hay 2+ componentes y cuál es la mayor. La pasada 2 —la única que reescribe `PlateIDData` y siembra territorio/material, celda a celda— solo se ejecuta si `bAnyFragmentation` es cierto, es decir, si de verdad nació alguna placa nueva en este paso. El caso común (nada fragmentado) sale con un único barrido barato de enteros, sin ningún `TArray` por componente creciendo celda a celda. Instrumentado con `StepTimings.FragmentationMs` (`frag` en el HUD de coste) para verificarlo en vivo, misma disciplina de medir-antes-de-tocar que el resto de este documento.
+
+**Pendiente:** verificación larga en el editor — si esto de verdad frena el colapso de tierra emergida que F1F empeoró, o si solo lo retrasa; y confirmar que `frag` se queda en un coste bajo durante una corrida larga, no solo en el arranque. Muerte (placa por debajo de umbral de área) y sutura (placas co-movientes que se sueldan) quedan fuera de esta fase a propósito: muerte es de prioridad baja porque una placa moribunda hoy es inerte, no dañina; sutura activamente **podría empeorar** el monopolio (menos placas compitiendo por margen convergente), así que no debe entrar en el mismo paso que el freno que se está probando.
+
+---
+
+## Degradado en el campo "ID de placa": vértices compartidos, no la simulación (17-08-2026)
+
+Tras el arreglo de coste de F1E, el usuario reinició la simulación (8 placas, Grid 128) y pidió confirmar si un degradado suave y borroso entre dos placas en el campo "ID de placa (categórico)" era normal. No lo era, y no tenía relación con F1E, F1F ni con nada de `RasterizedTectonics` — es un bug de renderizado que ya existía antes de esta sesión.
+
+**Diagnóstico:** el muestreo del campo en sí ya era correcto — `UPlanetFieldRegistry::SampleActiveBilinear` (`PlanetFieldRegistry.cpp`) ya trata los campos con `Palette == Categorical` con vecino más cercano, con un comentario explícito sobre por qué (mezclar el ID 3 con el 7 da el 5, que es una placa distinta y no está ahí). El problema estaba un paso más allá, en la malla: `CreatePlanetMesh()`/`UpdateMeshColors()` (`TectonicsTestActor.cpp`) construían una rejilla de `(Resolution+1)²` vértices **compartidos** por cara — cada vértice, con un solo color, servido hasta a 4 celdas vecinas. El rasterizador interpola ese color entre los 3 vértices de cada triángulo de todas formas: un triángulo con una esquina en la placa 2 y otra en la placa 4 pinta un degradado suave entre medias, con un tono intermedio que no representa ninguna placa real. Clásico problema de pintar dato categórico con color de vértice interpolado — el propio muestreo "a prueba de mezcla" no evita nada si el vértice donde vive ese resultado se comparte con otra celda de valor distinto.
+
+**Arreglo:** cada celda de la malla pasa a tener sus 4 vértices propios, sin compartir con la celda vecina (`SampleMeshCell()`, nueva función privada usada por `CreatePlanetMesh()` y `UpdateMeshColors()`). Con vértices propios, un campo categórico puede pintar los 4 iguales — muestreados una única vez en el **centro** de la celda, no en una esquina, para no depender de qué celda vecina "gana" un punto que geométricamente comparten — y sale plano de verdad, sin degradado posible porque los 3 vértices de cada triángulo ya llevan el mismo valor. Un campo continuo (elevación, temperatura...) sigue muestreando cada esquina por su cuenta, igual que antes: la costura entre celdas vecinas sigue siendo invisible porque ambas evalúan la misma fórmula en la misma posición del mundo, así que ese aspecto suave no cambia. La posición del vértice (y por tanto la elevación del terreno) se sigue muestreando siempre por esquina, categórico o no — solo el color se aplana, no la forma. El resaltado de placa seleccionada (`HighlightedPlate`) se benefició del mismo arreglo de paso: antes también sufría un blanco/atenuado degradado en el borde de la placa resaltada, por la misma causa raíz.
+
+Coste: ~4× más vértices por cara (4·Resolución² en vez de (Resolución+1)²) al no compartir esquinas. A Resolución=128 (el valor por defecto de `GridResolution`) es un aumento irrelevante para una malla de depuración; no se ha probado a resoluciones de malla mucho mayores.
+
+---
+
+## F1E Fase A.1: asimilación de islas huérfanas (17-08-2026)
+
+Con el degradado de renderizado ya descartado (ver sección anterior), el usuario zoomeó lo bastante cerca como para confirmar que lo que quedaba no era ningún degradado — eran islas pequeñas, perfectamente planas y nítidas, de una placa dentro del territorio de otra. Y, en una corrida larga, esas islas **crecían** en vez de quedarse quietas o desaparecer.
+
+**Mecanismo.** Esto es el mismo trilema de R2.9 Fase 4 (ver A14 más arriba): una celda que no queda reclamada limpiamente por nadie durante la advección, y que tampoco cumple las condiciones de rift, **conserva el dueño anterior** en vez de que se le asigne uno nuevo. Cuando la placa B avanza sobre territorio de la placa A en una colisión, algunas celdas de A pueden quedar rodeadas por B sin que la resolución de esa advección las reclame para B — nace una isla huérfana de A, todavía advectada con la cinemática de A (que puede estar al otro lado del planeta, moviéndose en una dirección completamente distinta), lo que a su vez genera más celdas sin resolver en el nuevo borde de la isla cada vez que A y B seudo-comparten un límite que no es real. De ahí el crecimiento: no es que la isla "gane terreno" de verdad, es que arrastra su propio ruido consigo mientras avanza con la cinemática equivocada.
+
+**Arreglo: asimilación, no solo fragmentación.** `HandlePlateFragmentation()` (F1E Fase A) ya hacía el flood-fill de componentes conexas necesario para detectar estas islas — solo le faltaba decidir qué hacer con las que no llegan al umbral de "placa nueva" (`MinFragmentCells = 800`). Ahora, durante el mismo flood-fill, se registra con qué `PlateID` linda cada componente en su perímetro (`ComponentBorderPlateID`/`ComponentBorderAmbiguous`) — gratis, porque el flood-fill ya visita cada celda vecina de otra placa para descartarla, solo hacía falta anotar cuál es antes de descartarla. Por construcción del propio flood-fill, dos celdas vecinas con el mismo `PlateID` caen siempre en la misma componente, así que cualquier vecino fuera de la componente actual pertenece necesariamente a una placa distinta — no hay ambigüedad posible sobre "es de la misma placa o no".
+
+Con eso, una componente pequeña (por debajo del umbral de placa nueva) se resuelve así:
+- Si linda con una **única** placa vecina en todo su perímetro: esa vecina la asimila — se reasigna `PlateIDData` y se siembra `PlateTerritory`/`PlateMaterial` de esa celda en el marco de la vecina, exactamente igual que al sembrar una placa nueva (mismo bloque de la Pasada 2, sin cambios), salvo que aquí el destino **ya existe** — no se llama `AddPlate` ni se toca `PlateAccumRotation` de la vecina, que ya tiene la suya.
+- Si linda con **dos o más** placas distintas (o con ninguna resuelta): queda ambigua y se deja tal cual, mismo criterio que el resto del trilema — no se inventa una regla de desempate nueva.
+
+Esto no elimina el trilema en sí (sigue habiendo celdas genuinamente ambiguas, y el "candidato a cinta" del HUD seguirá contando algo), pero corta el mecanismo de crecimiento: una isla huérfana rodeada por una sola vecina deja de existir como entidad separada en la siguiente advección, en vez de arrastrar su propio ruido indefinidamente con la cinemática de un dueño que ya no la representa.
+
+**Pendiente:** verificar en una corrida larga que el conteo de "CONGELADOS" del HUD deja de crecer sin límite (o crece mucho más despacio) con este arreglo puesto.
+
+---
+
+## Costura transformante: partición completada por vecino más cercano (18-08-2026)
+
+### El hilo completo, desde una captura de pantalla hasta el núcleo de la advección
+
+Empezó como una duda sobre una imagen: un degradado suave entre dos placas en el campo "ID de placa (categórico)", que no debería existir en un dato categórico. La investigación fue en capas, cada una descartada con datos antes de pasar a la siguiente — se documenta entera porque cada paso descartado es información real, no ruido:
+
+1. **Hipótesis: interpolación de color de vértice.** Confirmada y arreglada — `CreatePlanetMesh()`/`UpdateMeshColors()` compartían vértices entre celdas vecinas, y el rasterizador interpolaba el color entre placas distintas en cada triángulo de frontera. Arreglo: vértices propios por celda (`SampleMeshCell()`), con color plano en campos categóricos. Ver la sección "Degradado en el campo ID de placa" más arriba.
+2. **Con el renderizado arreglado, seguía habiendo una neblina.** Zoom del usuario reveló que eran islas pequeñas y nítidas, no un degradado — el "trilema" de R2.9 Fase 4 dejando huérfanas celdas de una placa dentro de otra tras una colisión.
+3. **F1E Fase A.1: asimilación de islas.** Implementada para que la placa vecina absorbiera las islas huérfanas por debajo del umbral de "placa nueva". Funcionó para lo que se diseñó (miles de islas asimiladas, confirmado por log), pero una corrida larga mostró que el número de segmentos de frontera de R2.12 seguía subiendo sin parar (44 → 107 con las mismas 8 placas) y el campo de residuo se veía cada vez más ruidoso.
+4. **A/B test:** interruptor de depuración (tecla `I`) para desactivar solo la asimilación y comparar. Resultado: **igual de mal, o peor, sin asimilación** (205 segmentos, 829 sin resolver por advección, frente a 107/663 con ella activada). La asimilación quedó exonerada — el problema estaba más abajo, en `AdvectPlateField` en sí.
+5. **Instrumentación del propio mecanismo de resolución**, sin tocar su lógica: cuántas celdas distintas han fallado alguna vez (`GetFrozenCellDiagnostics`, que resultó ser una métrica engañosa porque solo puede crecer — ver más abajo), cuántas fallan en la advección MÁS RECIENTE (`LastUnresolvedCells`, la señal buena), y un desglose de esas últimas entre "converge" (vecinos que se acercan, sospechoso de fallo real) y "cerca de cero" (sin movimiento radial claro, candidato a frontera transformante).
+6. **Resultado decisivo:** de 496 celdas sin resolver en una advección, **477 (96%) eran "cerca de cero"**, solo 19 (4%) parecían convergencia mal contada. Confirmado: el residuo es, de forma abrumadora, fronteras transformantes — exactamente la laguna que `ROADMAP.md` F1D ya documentaba desde antes de esta sesión ("Fallas transformantes: fricción y sismicidad... hoy solo se excluyen de crecer/decrecer corteza, no hay fricción ni sismicidad modeladas"). El propio comentario de la comprobación de rift en `AdvectPlateField` ya distinguía "un rift de una frontera TRANSFORMANTE, que también deja huecos al discretizar pero no crea corteza" — el diseño original ya sabía que el caso existía, solo nunca le dio una resolución de verdad.
+
+### Por qué pasa: dos particiones independientes no encajan en la costura
+
+`PlateTerritory[P]` (R2.9 Fase 4) es exactamente correcto para lo que se diseñó: cada placa lleva su propio territorio, transportado por su propia rotación acumulada, sin ningún error de integración. Pero cada placa lo lleva **con total independencia de sus vecinas** — nada en el diseño garantiza que el borde del territorio de la placa A y el borde del territorio de la placa B coincidan exactamente celda a celda. Para convergencia/divergencia esa ambigüedad no importa: hay un suceso físico real (colisión o rift) que decide qué pasa en el hueco o el solape. Para deslizamiento **tangencial** no hay tal suceso — la celda de la costura, mes tras advección, no es reclamada por ninguna de las dos búsquedas tolerantes (ninguna placa "avanza" hacia ella en sentido radial), tampoco diverge lo bastante para ser rift, así que caía en el tercer brazo del trilema: conservar el dueño anterior. Para siempre. Cada advección volvía a evaluarse la misma celda de costura y volvía a fallar, sin ningún mecanismo que la recompusiera — de ahí que los segmentos de R2.12 se fragmentaran con el tiempo en vez de quedarse estables.
+
+### Arreglo: completar la partición por vecino más cercano (Voronoi discreto), no un parche
+
+Cuando ninguna placa reclama la celda con la búsqueda estricta (`TryTerritoryTolerant`, radio de 1 celda con desempate) y no es un rift de verdad, en vez de resignarse a conservar el estado anterior, se prueba una **búsqueda ampliada** (`FindNearestOwnerWide`, radio 5×5) contra el territorio de **cada** placa, y gana quien tenga el territorio más cercano de verdad. Es el mismo principio con el que GPlates y el resto del software de reconstrucción de placas deciden a qué placa pertenece un punto cuando no hay un borde vectorial exacto que lo diga: una teselación de Voronoi discreta sobre los territorios ya existentes, no una regla inventada aparte. No crea ni destruye corteza — se hereda el material del ganador exactamente igual que un movimiento limpio normal (`AssignCleanMove`), coherente con que una costura transformante no genera ni consume corteza. Radio 5×5 elegido por diseño, no a ojo: un hueco por deslizamiento tangencial no puede ser mayor de ~1 celda, porque `MaxAdvectionDt` ya trocea la advección para que la placa más rápida recorra como mucho ~1 píxel por advección — 5×5 tiene margen de sobra sin alcanzar territorio de una placa no relacionada. Solo si ni siquiera la búsqueda ampliada encuentra una placa cercana se cae al último recurso de conservar el estado anterior — ahora un caso realmente raro, no la norma.
+
+**Medido, antes y después, en la misma corrida (73 advecciones, Grid 128):**
+
+| | Antes | Después |
+|---|---|---|
+| Sin resolver en la advección más reciente | 400-800 | **8** |
+| Resueltas por vecino más cercano | (no existía) | 7.586 |
+| Congelados acumulado | decenas de miles | 486 |
+| Tierra emergida a 118 Ma | colapsando | 22,4% (estable) |
+
+### Diagnóstico engañoso, corregido en el camino: "distintas" siempre crece
+
+Antes de llegar a este arreglo se instrumentó `GetFrozenCellDiagnostics()` (cuántas celdas, en toda la historia de la simulación, han fallado alguna vez) esperando que se estabilizara cerca del número de celdas de frontera. No lo hizo — pasó de 7.539 a 17.490 mientras la frontera solo crecía de 8.738 a 9.373 celdas. Error de diseño reconocido y corregido en la propia sesión: esa métrica cuenta historia ("¿ha fallado esta celda alguna vez?"), y como las fronteras se desplazan por el planeta con el tiempo, barren celdas nuevas sin parar — **tiene que crecer siempre**, sin decir nada sobre si el problema actual empeora. La métrica útil, añadida después, es la que se sobreescribe cada advección (`LastUnresolvedCells`), no la acumulada.
+
+### Verificación por test, y lo que reveló sobre un problema ya conocido
+
+`Simu.Tectonics.*` (20 tests): **17 en verde**. Los 3 rojos:
+
+- **`NoStraightCrustBridges`**: ya estaba en rojo desde antes de esta sesión (motas de una celda dentro de una misma placa), sin relación con costuras entre placas distintas. Sin cambios.
+- **`ContinentsPersist`**: su propia aserción de convergencia ("el segundo tramo cambia menos que el primero") dejó de cumplirse — 17 celdas de cambio en el primer tramo de 150 pasos, 260 en el segundo, reproducible idéntico en dos corridas con semilla fija. El comentario del propio test ya lo predecía: *"el defecto de remuestreo sigue abierto y se aprieta cuando se arregle la advección"*. Recalibrada: en vez de exigir que el segundo tramo desacelere respecto al primero (una forma que ya no aplica, porque la subducción legítima ahora avanza a ritmo más constante en vez de frenar dentro de esta ventana de 300 pasos), se acota que ningún tramo consuma una fracción catastrófica del continente de partida — margen ~1,75× sobre el peor tramo medido (19,7% → umbral 35%).
+- **`LongRunStability`**: su aserción de "sin resolver" pasa ahora con margen enorme (0,0004% del planeta, frente al umbral de 0,8%) — la prueba directa de que el arreglo funciona a escala de producción. Pero la aserción de tierra emergida **sigue en rojo, y peor que antes** (9,5% a 1000 Ma, frente al 13,2% ya documentado en ROADMAP F1H). Diagnóstico: la congelación de celdas que acabamos de arreglar estaba, sin querer, **protegiendo** corteza continental de la subducción — una celda congelada nunca cambia de dueño, así que nunca podía perderse en una colisión. Al arreglar la resolución de verdad esa protección accidental desaparece, y el colapso de tierra que ya sabíamos que existía se ve con más crudeza, no se crea de nuevo. Se deja el test en rojo tal cual, sin recalibrar: sigue vigilando un problema real y todavía sin resolver (la razón original de construir F1E), no algo que este arreglo debiera silenciar.
+
+### Pendiente
+
+- **F1D, friccion y sismicidad de verdad**: este arreglo resuelve la **partición** (a quién pertenece la celda) en costuras transformantes, no añade la física de deslizamiento en sí (fricción, esfuerzo acumulado, sismicidad) que `ROADMAP.md` F1D sigue teniendo pendiente. Son capas distintas: esta hacía falta primero para que hubiera un estado de partición estable sobre el que construir esa física después.
+- El 4% de residuo "convergente" que la búsqueda ampliada tampoco explique del todo merece una mirada aparte si vuelve a aparecer en cantidad tras esta corrección — de momento, con la búsqueda ampliada puesta, es un puñado de celdas, no una categoría que valga la pena perseguir todavía.
+
+---
+
+## Validación F1E + F1F: ¿frena el monopolio? (18-08-2026)
+
+La validación larga que quedaba pendiente desde que se construyó F1E ("¿de verdad contrarresta el monopolio de F1F?") nunca se había hecho con datos objetivos — solo "a ojo en el editor", y encima antes del arreglo de costura transformante de esta misma sesión. Se construyó `Simu.Tectonics.F1EF1FLongRun`: fixture de 8 placas, `bUseDynamicKinematics` activado, 1000 Ma con puntos de control cada 125 Ma, para ver la **forma** de la curva de tierra emergida, no solo el punto final.
+
+**Primer intento, a Res 48 (la resolución habitual de esta familia de tests):** tierra 24,5% → 10,8%, con desaceleración clara, pero **`placas 8 -> 8` durante toda la corrida — F1E nunca fragmentó nada**. Causa: `MinFragmentCells = 800` se calibró contra Grid 128 de producción (~98.000 celdas totales); a Res 48 (~13.800 celdas totales) ese umbral es casi el 6% del **planeta entero**, no de una placa, así que el mecanismo de fragmentación de F1E queda efectivamente desactivado a esa escala. La mejora medida ahí es atribuible al arreglo de costura transformante, no a F1E.
+
+**Repetido a Res 128 (producción de verdad, mismo test, `GridRes` y `RasterRes` a 128):**
+
+| Ma | Tierra | Placas |
+|---|---|---|
+| 0 | 24,5% | 8 |
+| 125 | 23,0% | 8 |
+| 250 | 20,4% | 8 |
+| 375 | 17,5% | 8 |
+| 500 | 14,9% | 8 |
+| 625 | 13,5% | 8 |
+| 750 | 13,2% | **9** (F1E fragmenta aquí) |
+| 875 | 12,6% | 9 |
+| 1000 | 11,8% | 9 |
+
+Esta vez F1E sí entra en juego (una fragmentación, 8→9, hacia los 750 Ma) — una intervención real pero modesta, no el mecanismo dominante. La forma de la curva es la misma que a Res 48: caída de ~2,6-2,9 puntos por cada 125 Ma al principio, bajando a ~0,3-0,8 puntos por cada 125 Ma al final — se asienta en torno al 12-14%, sin indicios de seguir cayendo hacia el colapso total que se medía antes (24,5% → 8,6% en solo 382 Ma, y sin frenar).
+
+**Conclusión, sin adornarla:** el planeta ya no se ahoga sin fondo — encuentra un equilibrio bajo en vez de colapsar. No es "problema resuelto" (12-14% sigue muy por debajo del ~41% real de la Tierra, y la mayor parte de la mejora medida parece venir del arreglo de costura transformante, con F1E aportando un frenado adicional ocasional, no el protagonista que se esperaba). Es la primera corrida larga con F1F dinámico que se estabiliza en vez de desbocarse, y ahora hay un test permanente (`Simu.Tectonics.F1EF1FLongRun`) para vigilar que se mantenga así.
+
+### Pendiente
+
+- **F1E solo fragmentó una vez en 1000 Ma** a resolución de producción — o el monopolio de F1F no es tan agresivo como se temía con la base ya arreglada, o el umbral de 800 celdas sigue siendo conservador. No hay datos todavía para saber cuál.
+- Muerte y sutura de placas (F1E, ver ROADMAP 1E) siguen sin implementar; con solo fragmentación+asimilación puestas, no hay manera de que dos placas que dejen de moverse relativamente se vuelvan a fundir, ni de que una placa reducida a casi nada desaparezca.
+
+### Por qué el equilibrio es tan bajo: umbral de rift probado y descartado (18-08-2026)
+
+Instrumentado `Simu.Tectonics.F1EF1FLongRun` para loguear, por tramo de 125 Ma, el delta de celdas creadas (rift) y destruidas (subducción) además de la tierra emergida. Resultado con el umbral de rift original (`AvgDivergence > 0.10 * MaxAngularSpeed`): el ratio creado/destruido se mantiene **estable en 0,42-0,50 durante los 1000 Ma enteros** — no empeora con el tiempo (descartando un transitorio que se fuera a corregir solo), pero tampoco se acerca nunca a 1,0. Un desequilibrio persistente de ~2:1, sostenido.
+
+**Hipótesis probada:** el umbral de rift (`ROADMAP.md` F1D lo señalaba como "no fiable, pendiente de recalibrar ahora que la balanza de corteza es sana") estaba creando menos océano del que le tocaba. Se bajó a la mitad (0,05) y se remidió con el mismo test.
+
+**Resultado: descartada.** El ratio apenas se movió (0,46-0,49 con el umbral nuevo, prácticamente el mismo rango que el 0,42-0,50 original) — bajar el umbral a la mitad no acercó la balanza a 1,0 de forma apreciable. Y de propina, la tierra emergida salió *peor* (9,7% frente a 11,8% a 1000 Ma), con una explosión de fragmentaciones F1E en el último tramo (8→15 placas en 125 Ma) y el ratio de ese tramo cayendo a 0,29 — probablemente un umbral más laxo generó más fronteras nuevas y activas de golpe, alimentando más colisiones, no menos. Revertido al valor original (0,10).
+
+**Conclusión:** el umbral de rift no es la palanca dominante del desequilibrio creación/destrucción. Sospecha planteada aquí y descartada más abajo por datos: hay una **asimetría estructural**, no solo numérica, entre los dos mecanismos — una colisión con 3 o más reclamantes destruye varias celdas de un plumazo (todas menos la ganadora), mientras que el rift solo puede crear una celda nueva por cada celda individual que cumple el umbral de divergencia. Medido después (ver más abajo, "destruidas/colisión"): 0,82-0,99, **por debajo** de 1 — la amplificación por colisión múltiple tampoco es la causa.
+
+---
+
+## Árbitro único de vecino más cercano: arreglo de raíz de la asimetría (18-08-2026)
+
+### El diagnóstico, en términos académicos
+
+A petición explícita: *"cómo lo haría una universidad que estuviese haciendo este software"*. La respuesta no es geodinámica computacional (CitcomS, ASPECT) — ahí no existe "placa dueña de una celda", solo un campo continuo advectado por una única velocidad, así que la ambigüedad de partición no puede aparecer. El paralelo correcto es el software de reconstrucción de placas (**GPlates**): las placas son cuerpos rígidos con frontera, igual que aquí, y la partición del planeta se decide por un **único árbitro** (punto-en-polígono contra el polígono reconstruido) — nunca preguntando a cada placa por separado "¿la reclamas tú?" y contando cuántas dicen que sí.
+
+El diseño anterior (`Claimants.Num()`, heredado de R2.9) hacía exactamente eso: N pruebas independientes, una por placa, cada una con su propia búsqueda tolerante aislada de las demás. Reclamar una celda es una condición **OR** (basta que una de las N diga que sí). No reclamarla es una condición **AND** (tienen que fallar las N a la vez). Con territorios independientes y algo de margen de tolerancia en cada uno, los solapes (colisión) son mecánicamente más fáciles de producir que los huecos limpios (candidato a rift) — no por ningún umbral mal puesto, por la propia forma del mecanismo de decisión.
+
+**Medido** (`Simu.Tectonics.F1EF1FLongRun`, con la costura transformante ya arreglada): el ratio de celdas con 0 reclamantes frente a celdas con 2+ crecía sin parar, de 1,1 a 4,5 en 1000 Ma, mientras el ratio de corteza creada/destruida se quedaba plano en ~0,45 — la asimetría no se corrige sola con el tiempo, es del propio diseño.
+
+### El arreglo
+
+`AdvectPlateField` sustituye el conteo de reclamantes por un único árbitro de distancia (`FindNearestOwnerWide`, ya existente desde el arreglo de costura transformante, reutilizado aquí como mecanismo central en vez de solo fallback): para cada celda de frontera, se mide la distancia real de **cada** placa a su territorio más cercano, y se ordena. El ganador (`Candidates[0]`) es, por construcción, único — no puede haber ambigüedad sobre "quién es el más cercano". Colisión, traspaso limpio y rift se **derivan** de comparar esa distancia mínima contra la segunda más cercana con una **única vara de medir** (`ContestRadiusSq`), en vez de contarse por separado con pruebas de exigencia distinta:
+
+- Nadie dentro del radio de contienda → candidato a hueco: se comprueba divergencia real (mismo test de siempre) → rift, o traspaso al más cercano de todos si no diverge.
+- Solo uno dentro del radio → dueño claro, traspaso limpio (equivalente al viejo "1 reclamante").
+- Dos o más dentro del radio → contienda de verdad → colisión, con la misma selección de ganador por tipo/edad/elevación que ya existía, sin tocar esa lógica.
+
+### Calibración de `ContestRadiusSq`, y por qué no fue trivial
+
+Primer valor, 2,5 (pensado como el alcance peor-caso de la vieja búsqueda de 4 candidatos): las colisiones **subieron** por encima del sistema viejo (56.207 vs 40.405 en el primer tramo) y el ratio empeoró (0,21-0,30). Segundo valor, 1,0 (más cerca de "un solo vecino inmediato"): el ratio mejoró de verdad (0,48-0,60, el mejor medido) pero la tierra emergida salió **peor** (8,0% a 1000 Ma, por debajo de la línea de seguridad de 8,6% — el test falló). Sumando los totales: con radio 1,0 la pérdida neta de continente era *menor* que con el sistema viejo (81.625 vs 103.904 celdas) pero el resultado final era peor — el ratio bruto de creación/destrucción no explicaba por sí solo el resultado. Quedó ahí, sin resolver del todo, mientras se perseguía la causa real (ver la sección siguiente). Valor final: **1,0**, mantenido porque el ratio creado/destruido es el que mejor se comporta y porque el verdadero sumidero resultó ser otra cosa (ver más abajo) — no el radio de contienda.
+
+---
+
+## La corteza continental que desaparecía sin pasar por rift ni colisión (18-08-2026)
+
+### El hilo de la investigación, con cada hipótesis puesta a prueba y descartada por datos
+
+Con el árbitro nuevo puesto, la tierra emergida seguía cayendo con fuerza (24,5%→8-15% según el radio, en 1000 Ma). Antes de tocar más umbrales, dos preguntas del usuario reencuadraron la investigación: *"en una colisión gana la placa continental sobre la oceánica, ¿no? Entonces ¿por qué desaparece así la corteza continental?"* y *"¿podemos probarlo sin isostasia, para intentar aislar el problema?"*.
+
+**Aislado correctamente:** se añadió un contador de celdas continentales por `CrustTypeData`, independiente de isostasia/nivel del mar (mismo patrón que `ContinentsPersist`). Resultado: el recuento cae de 23.729 a 8.198 en 1000 Ma (65%), en lockstep con la tierra emergida — confirmando que la corteza se destruye de verdad, no que simplemente se hunde por elevación.
+
+**Hipótesis 1 — rift convirtiendo continente en océano sin comprobar qué había antes** (el rift pone `CrustTypeData=0` incondicionalmente). Instrumentado: solo el 1-3% de los rifts partían de una celda continental. Descartada como causa dominante.
+
+**Hipótesis 2 — colisión sin representación**: releído el código, confirmado que "gana la continental" solo se aplica **entre los reclamantes actuales** — si la placa continental dueña de una celda ya se ha retirado del todo, la celda se disputa entre otras placas sin que la regla de protección llegue a aplicarse nunca. Instrumentado: menos del 0,3% de las colisiones. Descartada.
+
+**Hipótesis 3 — limpieza de motas reasignando por coincidencia de placa, no de tipo**: instrumentado, también pequeña (<1%). Descartada como dominante.
+
+Las tres juntas explicaban solo el ~31% de la pérdida total. **El resto (69%) seguía sin explicación** hasta revisar exhaustivamente, con `grep`, todos los sitios del fichero que escriben `CrustTypeData` — siete en total, de los cuales cuatro quedaban por instrumentar del todo.
+
+### La causa real: `AssignCleanMove` en el camino más frecuente, con el material desincronizado
+
+`AssignCleanMove` lee el material que el **nuevo dueño** tiene guardado en su propio marco (`ReadPlateMaterial`) — si ese marco tiene *algo* guardado (aunque sea viejo, de otro momento de la historia de esa placa), ese dato se impone sin comparar con lo que había físicamente en el mundo un instante antes. El resguardo a "lo que ya había" solo salta si el marco está completamente vacío.
+
+Instrumentado primero en el camino de vecino más cercano (poco frecuente): explicaba un poco más (traspaso 392→841 por tramo), pero seguía faltando la mayoría. **Instrumentado después en el camino "1 reclamante claro" — el más frecuente con diferencia, sin tocar todavía**: el número se disparó a 8.000-12.000 celdas por tramo. Y por último, **incluso en el camino rápido de interior** (`Owner == CurrentOwner`, sin cambio de dueño siquiera) se encontró el mismo patrón: una placa leyendo su **propio** material, en su propio territorio, encontrando un tipo distinto al que el mundo dice que hay ahí ahora. Eso solo puede pasar si el marco de material está desincronizado del mundo.
+
+Y la causa de esa desincronización ya estaba documentada, sin dársele la importancia que tenía: en A14 (R2.9 Fase 4) quedó anotado como pendiente que **`WriteBackToPlateFrames()` solo corre una vez por `Step()`, no una vez por advección** — con `TimeScale` alto caben hasta 8 advecciones por `Step()`, así que en las intermedias el marco de material puede llevar varias advecciones de retraso respecto al mundo real. Se caracterizó entonces como *"acotado, no catastrófico"*. Los números de esta sesión dicen que es bastante severo: miles de celdas por tramo de 125 Ma, la mayor parte del sumidero de corteza continental sin explicar.
+
+### El arreglo, ya usado y probado antes en otro sitio
+
+La Capa 2a de depuración (modo `Y`) ya llamaba a `WriteBackToPlateFrames()` tras **cada** advección desde el 17-08-2026, precisamente para evitar este mismo desfase — pero esa corrección nunca se llevó a producción. Se aplicó el mismo patrón a la rama de producción de `Step()`: `WriteBackToPlateFrames()` se llama ahora tras cada advección, antes de reconstruir segmentos y cinemática, para que ambos lean material ya sincronizado. La llamada final de `Step()` (tras isostasia/difusión) se mantiene intacta — sigue haciendo falta para propagar lo que la física de superficie cambia, que no pasa por advección.
+
+**Pendiente de validar con datos propios**: el test automatizado (`TimeScale=1`) rara vez encadena 2+ advecciones dentro de un mismo `Step()`, así que no ejercita el escenario que el arreglo corrige — un intento de subir `TimeScale` dentro del test reveló que `System->Step()` se llama con `Params.DeltaTime` sin escalar mientras `Raster->Step()` sí aplica `TimeScale` internamente, descuadrando la cinemática del sistema respecto a la corteza; revertido, no vale la pena arreglar el arnés de test para esto. La validación de este arreglo concreto se hace en el editor con `TimeScale` de verdad (donde sí está bien conectado), confirmado a ojo por el usuario: la corteza continental aguanta mejor en una corrida larga con F1F activo, aunque el ratio creación/destrucción sigue por debajo de 1.
+
+### Pendiente
+
+- ~~El ratio creación/destrucción sigue sin llegar a 1,0~~ — resuelto en gran parte, ver la sección siguiente ("La fuga de tipo que sobrevivió al write-back").
+- Falta revalidar `Simu.Tectonics.*` completo (los ~20 tests) contra el estado actual del código — el árbitro, el radio de contienda y el arreglo de write-back se construyeron y afinaron después de la última pasada completa.
+- No se ha medido el coste (`AdvectionMs`) del árbitro nuevo a escala de producción — ahora hace la búsqueda amplia (25 candidatos por placa) en **toda** celda de frontera, no solo en el residuo que quedaba sin resolver antes.
+
+## La fuga de tipo que sobrevivió al write-back: extinción total en `ContinentsPersist` (18-08-2026, misma sesión, un día después)
+
+### El write-back por advección no era la causa completa
+
+Al correr `Simu.Tectonics.*` completo por primera vez tras el arreglo anterior (petición explícita del usuario: *"Corre simu.tectonics"*), saltaron dos regresiones nuevas: `PlateFieldEvolves` (falso positivo del propio test, arreglado aparte — contaba celdas con un array dimensionado al `NumPlates` fijo del fixture, y F1E puede crear placas nuevas en plena corrida) y **`ContinentsPersist` con extinción total**: `1321 → 0` celdas continentales en los primeros 150 pasos, reproducido idéntico en dos corridas independientes (semilla fija 555). Antes de esta sesión el peor tramo perdía un 19,7%; ahora era el 100%.
+
+Instrumentando los cuatro contadores "X-desde-continental" ya existentes (ver sección anterior) en esa misma corrida: `rift=347, handoff=8103, colisión=103, despeckle=77`. **`handoff` seguía siendo, con diferencia, el sumidero dominante** — 94% del total — **pese a que el write-back por advección ya estaba activo**. El arreglo de la sección anterior reducía la ventana de datos rancios, pero no la cerraba.
+
+### Por qué seguía pasando: el redondeo mundo↔marco no es una inversa exacta
+
+`AssignCleanMove` convierte una dirección del mundo a coordenadas del marco propio de la placa (`ReadPlateMaterial`, rotando por `PlateAccumRotation` y cuantizando con `floor()`), y `WriteBackToPlateFrames()` hace el camino inverso (coordenadas de marco → dirección del mundo, cuantizando también con `floor()`). Estas dos cuantizaciones **no son inversas exactas**: una rotación no preserva la alineación de una rejilla discreta, así que el centro de una celda de marco, rotado de vuelta al mundo, no cae necesariamente dentro de la misma celda de mundo de la que partió. El resultado es un alias ocasional de un píxel: la lectura acaba trayendo el dato de la celda de marco **vecina**, no la propia.
+
+Esto es invisible en la inmensa mayoría del interior de una placa, donde la celda vecina tiene el mismo tipo de corteza. Es catastrófico justo en una costa (frontera continental/oceánica *dentro* de la misma placa, no una frontera de placas): ahí el vecino de marco puede tener un tipo distinto, y como el tipo es categórico, un solo alias es un volteo permanente hasta el próximo rift o colisión que lo toque. Más grosero cuanto más baja la resolución — coincide con que `ContinentsPersist` (Res 32, el test que llegaba a extinción total) es mucho más pequeño que `LongRunStability`/`F1EF1FLongRun` (Res 128, que solo colapsaban con severidad).
+
+Esto también explica, con los datos ya en la mano, por qué el camino **más frecuente con diferencia** —el interior, `Owner == CurrentOwner`, ni siquiera un traspaso de propiedad— era el que más pesaba: es ~97% de las celdas del planeta, así que hasta una probabilidad de alias mínima por celda se traduce en miles de eventos absolutos por avance.
+
+### El arreglo: el tipo de corteza sale de `Prev`, nunca del marco rotado
+
+Para una celda que **no** cambia de dueño (interior o "1 reclamante claro" con `Owner == CurrentOwner`), el tipo físico de ese punto no ha cambiado, y `Prev` ya lo tiene exacto — sin pasar por ningún redondeo de ida y vuelta. `AssignCleanMove` se cambió para tomar `CrustTypeData` siempre de `Prev[FaceIdx]`, dejando Edad/Grosor/Elevación leyendo del marco como antes (campos continuos, sin el mismo modo de fallo catastrófico de un volteo categórico permanente).
+
+Para un traspaso genuino (`Owner != CurrentOwner`, tanto en el camino de "1 reclamante" como en el de vecino más cercano), se introdujo un helper nuevo, `AssignHandoff`, que toma **los cuatro campos** de `Prev`, sin llamar a `ReadPlateMaterial` en absoluto — un traspaso es por definición territorio que la placa no poseía hasta ese instante, así que no existe ningún dato "propio" fiable que leer; el marco de material del nuevo dueño en ese punto es, en el mejor caso, vacío (dispara el resguardo de todas formas) y en el peor, alias de otro momento de su historia.
+
+**Medido, antes → después del arreglo (misma corrida, semilla 555):**
+
+| | rift | handoff | colisión | despeckle | continente |
+|---|---|---|---|---|---|
+| Antes | 347 | 8103 | 103 | 77 | 1321 → **0** (extinción) |
+| Después | 368 | **0** | 153 | 117 | 1321 → **3271** (x2,48) |
+
+`handoff` es ahora estructuralmente 0 en los tres sitios donde se contaba — no es un umbral bajado, es imposible que vuelva a subir mientras el tipo salga de `Prev` en continuación y traspaso. Se dejó el `AddInfo` de diagnóstico en el propio test como guarda de regresión permanente.
+
+El ratio global creación/destrucción (no solo tipo) también mejoró de forma sustancial: de ~0,42-0,50 (medido en sesiones anteriores) a ~0,88 en esta corrida — el "sigue sin llegar a 1,0" que quedó pendiente en la sección anterior queda, si no cerrado del todo, sustancialmente resuelto por la misma causa raíz.
+
+### Consecuencia inesperada: la convergencia por tramos, que "dejó de cumplirse" el 18-08-2026, volvió sola
+
+La asección de `ContinentsPersist` que comprobaba que el segundo tramo de 150 pasos cambiara menos que el primero (desaceleración hacia un equilibrio) se había cambiado, más temprano en este mismo día, por una cota plana ("ningún tramo consume más del 35% del continente de partida") — la explicación de entonces era que la partición por vecino más cercano había quitado una protección accidental (celdas de frontera congeladas que nunca cambian de dueño). Esa cota plana también dejó de cumplirse (peor tramo 100%, la extinción de arriba).
+
+Con la fuga de tipo cerrada, **la convergencia volvió sin tocar la aserción**: 1766 → 141 celdas en la misma corrida que antes daba 1321 → 0. La explicación original (partición por vecino más cercano rompiendo la desaceleración) era incompleta — el verdadero culpable era la fuga de tipo, y la partición por vecino más cercano solo la exponía más rápido al mover más celdas de frontera por advección. Restaurada la aserción original (`SecondHalfChange < FirstHalfChange / 2`), con el historial completo documentado en el propio test para que no se pierda otra vez el motivo del cambio de ida y de vuelta.
+
+### `AdvectionChainingHypothesis`, misma causa, otro síntoma
+
+El mismo test que en su día (16-08-2026) midió `stride 1→x2,02, stride 2→x2,52, stride 4→x3,09` y sirvió para descartar la hipótesis de encadenamiento, había empezado a fallar tras el árbitro nuevo (`x2,48/x2,45/x2,21`, tendencia invertida y comprimida). Con la fuga de tipo cerrada: `x1,73/x2,16/x2,09` — stride 1 vuelve a ser con diferencia el mejor (incluso mejor que el histórico x2,02), aunque 2 y 4 quedan casi empatados y fuera de orden estricto entre sí (diferencia de 0,07). Se relajó la aserción para comprobar lo que de verdad importa —que nadie suba `AdvectionPixelStride` de producción sin saber que empeora los bordes— sin exigir una cadena monótona completa que ya no es la forma real de la curva.
+
+### Probado y descartado en el camino: la elevación no tenía el mismo problema
+
+Antes de identificar la fuga de tipo como algo distinto de la caída de tierra emergida (medida por elevación, no por tipo de corteza), se probó a extender el mismo arreglo (leer de `Prev`, no del marco) a `ElevationData` en `AssignCleanMove`. Resultado: **cero cambio**, dígito a dígito idéntico en `LongRunStability`/`F1EF1FLongRun` con y sin el cambio — la elevación es un campo continuo y el ruido de un píxel se diluye en la media, al contrario que el tipo, categórico y con un volteo permanente. Revertido, no aporta nada. La caída de tierra emergida sigue abierta, ver "Pendiente".
+
+### Pendiente
+
+- **La fracción de tierra emergida (elevación) sigue cayendo** en `LongRunStability`/`F1EF1FLongRun` (24,5%→0,9%/2,3%) pese a que la corteza continental **por tipo** mejoró muchísimo (`ContinentsPersist`, x2,48). Hipótesis más probable, sin confirmar: con el continente ya no destruido en cuanto nace, hay mucha más corteza continental joven que isostasia todavía no ha tenido tiempo de levantar por encima del nivel del mar dentro de la ventana del test — un transitorio, no una fuga. No investigado a fondo esta sesión.
+- `NoStraightCrustBridges` sigue en rojo, sin relación aparente con esta investigación — pendiente de una sesión dedicada.
+- Sigue sin medirse el coste (`AdvectionMs`) del árbitro a escala de producción.
