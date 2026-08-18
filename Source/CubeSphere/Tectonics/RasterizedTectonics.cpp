@@ -1028,91 +1028,48 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
         FFaceCounters& Count = Counters[FaceIdx];
         TArray<FTerritoryEvent>& Events = TerritoryEventsPerFace[FaceIdx];
 
-        // Movimiento limpio -un unico dueno, ya sea porque solo el sigue reclamando su
-        // propio territorio (camino rapido de interior) o porque solo el gano la busqueda
-        // completa (camino de frontera). El material sale SIEMPRE del marco propio de la
-        // placa; ya no hay "de donde vino" que valga la pena rastrear, el marco se
-        // transporta exacto.
-        auto AssignCleanMove = [&](int32 Owner, const FVector& Dir, int32 Idx)
-        {
-            float MAge; uint8 MType; float MThick; float MElev;
-            ++Count.MaterialReads;
-            if (!ReadPlateMaterial(Owner, Dir, MAge, MType, MThick, MElev))
-            {
-                ++Count.MaterialFallbacks;
-                // Sin material guardado en el marco -territorio recien ganado-: se hereda
-                // lo que YA HABIA en este mismo punto del mundo. El write-back de este paso
-                // deja el marco al dia para la proxima adveccion.
-                MAge = Prev[FaceIdx].CrustAgeData[Idx];
-                MThick = Prev[FaceIdx].CrustThicknessData[Idx];
-                MElev = Prev[FaceIdx].ElevationData[Idx];
-            }
-            Face.PlateIDData[Idx]        = static_cast<uint8>(Owner);
-            Face.ElevationData[Idx]      = MElev;
-            Face.CrustAgeData[Idx]       = MAge;
-            Face.CrustThicknessData[Idx] = MThick;
-            Face.RefSourceFaceData[Idx]  = static_cast<uint8>(FaceIdx);
-            Face.RefSourceIdxData[Idx]   = Idx;
-
-            // PROBADO Y DESCARTADO (18-08-2026): forzar tambien la elevacion desde Prev, con
-            // el mismo razonamiento que el tipo (abajo). Resultado medido: CERO cambio en la
-            // fraccion de tierra emergida de Simu.Tectonics.LongRunStability/F1EF1FLongRun,
-            // digito a digito identico con y sin el cambio. El alias mundo<->marco no esta
-            // corrompiendo elevacion de forma apreciable -el campo es continuo y el ruido de
-            // un pixel se diluye en la media, al contrario que el tipo, que es categorico y
-            // un solo volteo es permanente-. La caida de tierra emergida es un fenomeno
-            // distinto y no investigado aqui: revertido para no cargar codigo sin beneficio
-            // medido. Hipotesis mas probable, sin confirmar: con el continente ya no
-            // destruido en cuanto nace (ver el arreglo del tipo), hay mas corteza continental
-            // JOVEN que isostasia todavia no ha tenido tiempo de levantar por encima del
-            // nivel del mar dentro de la ventana del test -no una fuga, un transitorio.
-
-            // TIPO DE CORTEZA SIEMPRE DE PREV, NUNCA DEL MARCO (18-08-2026): este camino solo
-            // se usa cuando Owner == CurrentOwner -continuacion, no traspaso-, asi que el tipo
-            // fisico de este punto no ha cambiado y Prev ya lo tiene exacto, sin pasar por el
-            // redondeo de ida y vuelta mundo<->marco rotado.
-            //
-            // MEDIDO: leer el tipo del marco (via ReadPlateMaterial, como Edad/Grosor/
-            // Elevacion de arriba, que si necesitan viajar por el marco para advectar
-            // correctamente con la placa) provocaba miles de volteos continental->oceanico
-            // por avance, incluso en celdas de interior donde Owner nunca cambia -Simu.
-            // Tectonics.ContinentsPersist llegaba a extincion total (1321->0) con
-            // handoff=8463 en 300 pasos-. La conversion Dir->marco (ReadPlateMaterial) y
-            // marco->mundo (WriteBackToPlateFrames) no son inversas exactas: cuantizan cada
-            // una por su lado con floor(), y una rotacion no preserva alineacion de rejilla,
-            // asi que el redondeo de ida y vuelta ocasionalmente lee la celda de marco VECINA
-            // en vez de la propia -invisible en la inmensa mayoria del interior, donde vecina
-            // significa "mismo tipo", pero catastrofico justo en la costa de un continente,
-            // que es exactamente donde el tipo SI puede diferir de un pixel de marco a otro.
-            // Edad/Grosor/Elevacion son continuos -ese mismo ruido de un pixel no los
-            // desestabiliza-, pero el tipo es categorico y un solo volteo es permanente
-            // hasta el proximo rift o colision que lo toque.
-            Face.CrustTypeData[Idx] = Prev[FaceIdx].CrustTypeData[Idx];
-
-            ++Count.Moved;
-        };
-
-        // TRASPASO (18-08-2026): entrega de un punto que esta placa NO poseia el paso
-        // anterior -costura transformante o vecino mas cercano-, sin rift ni colision. El
-        // punto fisico no cambia de material, solo de dueño, asi que el material tiene que
-        // salir de lo que YA HABIA aqui (Prev), nunca del marco propio del nuevo dueño.
+        // MOVIMIENTO LIMPIO Y TRASPASO, UNIFICADOS (18-08-2026, version final de una
+        // historia en tres actos).
         //
-        // MEDIDO (medicion "handoff" del diagnostico, ver ANEXO.md): usar AssignCleanMove
-        // aqui -leer el marco de Owner, con Prev solo como respaldo si esta vacio- convertia
-        // continente en oceano miles de veces en una corrida de 300 pasos, incluso con el
-        // write-back corriendo en cada adveccion. La causa no era la cadencia del write-back
-        // -eso ya se arreglo-, sino que un traspaso es por definicion territorio que la placa
-        // NO poseia hasta este instante: FrameIdx se calcula rotando la direccion mundial por
-        // la rotacion acumulada del NUEVO dueño, y esa rotacion cambia con el tiempo, asi que
-        // el mismo indice discreto de marco puede corresponder a un punto del mundo
-        // COMPLETAMENTE DISTINTO segun cuanto haya girado la placa desde la ultima vez que
-        // ese hueco del marco tuvo dato. El respaldo a Prev solo saltaba si el marco estaba
-        // vacio (Occupied == 0); si por coincidencia de redondeo ese hueco SI tenia dato -de
-        // otro momento de la historia de la placa, en otro punto del mundo-, se leia como si
-        // fuera valido. Mas grosero cuanto mas baja la resolucion (menos celdas de marco,
-        // mas facil que dos puntos distintos caigan en el mismo indice discreto) -coincide
-        // con que Simu.Tectonics.ContinentsPersist (Res 32) llegaba a extincion total
-        // mientras Simu.Tectonics.LongRunStability (Res 128) solo colapsaba severamente.
+        // Un unico dueno para esta celda, ya sea porque solo el sigue reclamando su propio
+        // territorio (camino rapido de interior), porque solo el gano como reclamante
+        // unico, o porque gano la busqueda de vecino mas cercano. En los tres casos el
+        // punto fisico no cambia de material por el simple hecho de resolverse la
+        // propiedad -eso solo pasa en rift o colision, ver mas abajo-, asi que el material
+        // tiene que salir de lo que YA HABIA aqui: Prev. Nunca del marco propio de ninguna
+        // placa, ganadora o no.
+        //
+        // ACTO 1 (medicion "handoff" del diagnostico): leer el marco del NUEVO dueño en un
+        // traspaso -con Prev solo como respaldo si el marco estaba vacio- convertia
+        // continente en oceano miles de veces por corrida. Razon: FrameIdx se calcula
+        // rotando la direccion mundial por la rotacion ACUMULADA de la placa, que cambia
+        // con el tiempo, asi que el mismo indice discreto de marco puede corresponder a un
+        // punto del mundo completamente distinto segun cuanto haya girado la placa desde la
+        // ultima vez que ese hueco tuvo dato -y el respaldo a Prev solo saltaba si el marco
+        // estaba VACIO, no si tenia datos viejos pero equivocados. Arreglado leyendo el tipo
+        // siempre de Prev en el traspaso.
+        //
+        // ACTO 2: la misma sospecha se puso a prueba en el camino de CONTINUACION (Owner ==
+        // CurrentOwner, sin traspaso alguno) -leer el marco de UNO MISMO tambien podia
+        // volcar un tipo desactualizado, por el mismo alias de redondeo mundo<->marco (dos
+        // cuantizaciones con floor(), una rotacion no preserva alineacion de rejilla,
+        // ocasionalmente se lee la celda de marco VECINA en vez de la propia). Confirmado:
+        // Simu.Tectonics.ContinentsPersist llegaba a extincion total (1321->0 celdas).
+        // Arreglado igual, tipo siempre de Prev tambien en continuacion.
+        //
+        // ACTO 3, el que faltaba: con el tipo ya arreglado en los dos caminos, una cohorte
+        // de celdas rastreada por grosor (no por tipo) seguia cayendo de 20,4 km a 7-15 km
+        // en los primeros 25-50 Ma tras madurar, sin volver a subir en el resto de la
+        // corrida -pese a que siguian contando como continentales, porque el tipo ya no
+        // volteaba-. El grosor tiene la MISMA discontinuidad fisica marcada que el tipo
+        // -20+ km junto a 7 km oceanicos, en el mismo punto de la costa-, asi que el mismo
+        // alias que corrompia tipo corrompe grosor igual de bien; se habia asumido sin
+        // comprobar que un campo continuo se libraba de este modo de fallo por diluirse en
+        // la media, y esa cohorte demuestra que no es asi cuando el propio valor tiene un
+        // salto brusco en el punto exacto donde el alias pega. Codigo unificado: las dos
+        // funciones que existian por separado (una leyendo el marco para Edad/Grosor/
+        // Elevacion con Prev solo de respaldo, otra ya arreglada del todo para el tipo)
+        // quedaban haciendo lo mismo en la practica; fundidas en una sola.
         auto AssignHandoff = [&](int32 Owner, int32 Idx)
         {
             Face.PlateIDData[Idx]        = static_cast<uint8>(Owner);
@@ -1164,16 +1121,14 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
                     int32 OwnFrameIdx; float OwnDistSq;
                     if (TryTerritoryTolerant(CurrentOwner, Dir, OwnFrameIdx, OwnDistSq))
                     {
-                        // DIAGNOSTICO (18-08-2026): aqui Owner==CurrentOwner, no hay cambio
-                        // de dueño -pero si el marco de material de la propia placa esta
-                        // desincronizado del mundo (WriteBackToPlateFrames() solo corre una
-                        // vez por Step(), no una vez por adveccion, ver ANEXO A14
-                        // "pendiente"), hasta leer el material de UNO MISMO puede volcar un
-                        // tipo desactualizado. El interior es ~97% del planeta -hasta una
-                        // probabilidad minima por celda pesaria mucho en numeros absolutos.
+                        // Owner==CurrentOwner: continuacion pura, ningun traspaso -material
+                        // de Prev (ver el comentario junto a AssignHandoff). El chequeo de
+                        // abajo es un canario de regresion: estructuralmente ya no puede
+                        // dispararse, y si alguna vez lo hace es que algo volvio a leer del
+                        // marco en vez de Prev en este camino, el ~97% del planeta.
                         const uint8 TypeBeforeOwnRead = Prev[FaceIdx].CrustTypeData[Idx];
 
-                        AssignCleanMove(CurrentOwner, Dir, Idx);
+                        AssignHandoff(CurrentOwner, Idx);
                         bResolved = true;
 
                         if (TypeBeforeOwnRead == 1 && Face.CrustTypeData[Idx] == 0)
@@ -1263,9 +1218,9 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
 
                         if (Owner == CurrentOwner)
                         {
-                            // Continuacion: sigue siendo suyo, el marco propio es la
-                            // fuente correcta (ver comentario de AssignCleanMove).
-                            AssignCleanMove(Owner, Dir, Idx);
+                            // Continuacion: sigue siendo suyo, ningun traspaso -material de
+                            // Prev (ver el comentario junto a AssignHandoff).
+                            AssignHandoff(Owner, Idx);
                         }
                         else
                         {
@@ -1642,11 +1597,33 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
         TArray<int32> DespeckleFromContinentalPerFace;
         DespeckleFromContinentalPerFace.SetNumZeroed(6);
 
+        // MOTAS DE TIPO, INDEPENDIENTES DE LA PLACA (18-08-2026). Reportado por el usuario
+        // viendo el campo "Tipo de corteza" en el visor: pixeles oceanicos sueltos dentro de
+        // un continente por lo demas solido. La limpieza de arriba nunca los toca -su placa
+        // SI coincide con las 4 vecinas (misma placa, sigue siendo territorio legitimo),
+        // solo el TIPO no coincide con ninguna-, asi que estructuralmente son invisibles
+        // para un despeckle que solo mira PlateIDData. Origen mas probable: celdas que en
+        // algun momento cayeron en el residuo real (ver RecoveryCountData, "222 CONGELADOS"
+        // en el HUD) mientras eran de un tipo, y el continente crecio/roto a su alrededor
+        // despues sin que nada las reclamara -una laguna que nunca se relleno, no ruido de
+        // remuestreo de frontera como las motas de placa.
+        //
+        // Arreglo del mismo patron, aplicado al tipo: si el TIPO de una celda no coincide
+        // con NINGUNA de sus 4 vecinas -aunque la PLACA si coincida con alguna, asi que la
+        // propiedad es correcta y no hay que tocar territorio ni PlateIDData-, se reasigna
+        // solo el material (tipo/edad/grosor/elevacion) al del vecino de tipo mayoritario.
+        // Misma logica de voto que la limpieza de placa, con la salvedad de que aqui NO se
+        // liberan ni conceden eventos de territorio: el dueño no ha cambiado, solo la
+        // materia que habia mal etiquetada.
+        TArray<int32> TypeSpeckleFixedPerFace;
+        TypeSpeckleFixedPerFace.SetNumZeroed(6);
+
         ParallelFor(6, [&](int32 FaceIdx)
         {
             FTectonicFaceTextureData& Face = FaceData[FaceIdx];
             TArray<FTerritoryEvent>& Events = DespeckleEventsPerFace[FaceIdx];
             int32& DespeckleFromContinental = DespeckleFromContinentalPerFace[FaceIdx];
+            int32& TypeSpeckleFixed = TypeSpeckleFixedPerFace[FaceIdx];
             const int32 NOff[4][2] = {{-1,0},{1,0},{0,-1},{0,1}};
 
             for (int32 Y = 0; Y < Resolution; ++Y)
@@ -1655,14 +1632,17 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
                 {
                     const int32 Idx = Y * Resolution + X;
                     const uint8 Mine = Speckled[FaceIdx].PlateIDData[Idx];
+                    const uint8 MyType = Speckled[FaceIdx].CrustTypeData[Idx];
 
                     int32 Same = 0;
+                    int32 SameType = 0;
                     int32 BestFace = -1, BestIdx = -1;
                     uint8 BestId = Mine;
                     int32 BestCount = 0;
 
                     // Conteo de vecinas por ID, con solo cuatro no hace falta mapa
                     uint8 NeighbourIds[4];
+                    uint8 NeighbourTypes[4];
                     int32 NeighbourFace[4], NeighbourIdx[4], NumNeighbours = 0;
 
                     for (int32 N = 0; N < 4; ++N)
@@ -1675,59 +1655,118 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
                         const int32 NFi = static_cast<int32>(NF);
                         const int32 NI = NY * Resolution + NX;
                         NeighbourIds[NumNeighbours] = Speckled[NFi].PlateIDData[NI];
+                        NeighbourTypes[NumNeighbours] = Speckled[NFi].CrustTypeData[NI];
                         NeighbourFace[NumNeighbours] = NFi;
                         NeighbourIdx[NumNeighbours] = NI;
                         if (NeighbourIds[NumNeighbours] == Mine) { ++Same; }
+                        if (NeighbourTypes[NumNeighbours] == MyType) { ++SameType; }
                         ++NumNeighbours;
                     }
 
-                    // Solo se tocan las celdas que no coinciden con NINGUNA vecina
-                    if (Same > 0 || NumNeighbours == 0)
+                    if (NumNeighbours == 0)
                     {
                         continue;
                     }
 
-                    for (int32 A = 0; A < NumNeighbours; ++A)
+                    // Mota de PLACA: no coincide con NINGUNA vecina ni en propiedad.
+                    if (Same == 0)
                     {
-                        int32 Count = 0;
-                        for (int32 B = 0; B < NumNeighbours; ++B)
+                        for (int32 A = 0; A < NumNeighbours; ++A)
                         {
-                            if (NeighbourIds[B] == NeighbourIds[A]) { ++Count; }
+                            int32 Count = 0;
+                            for (int32 B = 0; B < NumNeighbours; ++B)
+                            {
+                                if (NeighbourIds[B] == NeighbourIds[A]) { ++Count; }
+                            }
+                            if (Count > BestCount)
+                            {
+                                BestCount = Count;
+                                BestId = NeighbourIds[A];
+                                BestFace = NeighbourFace[A];
+                                BestIdx = NeighbourIdx[A];
+                            }
                         }
-                        if (Count > BestCount)
+
+                        if (BestFace >= 0)
                         {
-                            BestCount = Count;
-                            BestId = NeighbourIds[A];
-                            BestFace = NeighbourFace[A];
-                            BestIdx = NeighbourIdx[A];
+                            if (Speckled[FaceIdx].CrustTypeData[Idx] == 1 && Speckled[BestFace].CrustTypeData[BestIdx] == 0)
+                            {
+                                ++DespeckleFromContinental;
+                            }
+
+                            Face.PlateIDData[Idx]        = BestId;
+                            Face.CrustTypeData[Idx]      = Speckled[BestFace].CrustTypeData[BestIdx];
+                            Face.CrustAgeData[Idx]       = Speckled[BestFace].CrustAgeData[BestIdx];
+                            Face.CrustThicknessData[Idx] = Speckled[BestFace].CrustThicknessData[BestIdx];
+                            Face.ElevationData[Idx]      = Speckled[BestFace].ElevationData[BestIdx];
+
+                            // Rarisimo (una mota de un pixel), pero si no se libera/concede
+                            // aqui tambien, PlateTerritory se desincroniza permanentemente de
+                            // este pixel: la placa vieja seguiria reclamandolo para siempre.
+                            const FVector Dir = CubeFaceMapping::PixelToDirection(
+                                static_cast<ECSCubeFace>(FaceIdx), X, Y, Resolution);
+                            if (Plates.IsValidIndex(static_cast<int32>(Mine)))
+                            {
+                                Events.Add({ static_cast<int32>(Mine), GetTerritoryFrameIndex(Mine, Dir), 0 });
+                            }
+                            if (Plates.IsValidIndex(static_cast<int32>(BestId)))
+                            {
+                                Events.Add({ static_cast<int32>(BestId), GetTerritoryFrameIndex(BestId, Dir), 1 });
+                            }
                         }
                     }
-
-                    if (BestFace >= 0)
+                    // Mota de TIPO: la placa SI coincide con alguna vecina (propiedad
+                    // correcta, nada que conceder ni liberar), pero el tipo no coincide con
+                    // NINGUNA -laguna aislada dentro de territorio por lo demas solido.
+                    else if (SameType == 0)
                     {
-                        if (Speckled[FaceIdx].CrustTypeData[Idx] == 1 && Speckled[BestFace].CrustTypeData[BestIdx] == 0)
+                        // MEDIA, no un solo vecino prestado (18-08-2026, corregido tras medir
+                        // una regresion real): copiar el valor EXACTO de un unico vecino -el
+                        // mismo patron que ya usa la limpieza de placa- funciona para tipo
+                        // (categorico, no hay "entre medias") pero no para edad: si ese vecino
+                        // concreto resultaba ser mas viejo que la zona alrededor, la celda
+                        // arreglada se convertia en un islote de corteza vieja de nueva
+                        // creacion -Simu.Tectonics.FrozenCellsAtProductionRes lo detecto
+                        // subiendo de 0,82% a 1,56%, justo la firma que esta misma limpieza
+                        // deberia evitar, no producir. La media entre TODOS los vecinos del
+                        // tipo mayoritario es representativa de la zona en vez de prestada de
+                        // uno solo, y no puede crear un maximo/minimo local nuevo por
+                        // construccion -una media nunca supera al mayor de sus terminos ni
+                        // baja del menor-.
+                        int32 MajorityType = MyType;
+                        int32 BestTypeCount = 0;
+                        for (int32 A = 0; A < NumNeighbours; ++A)
                         {
-                            ++DespeckleFromContinental;
+                            int32 Count = 0;
+                            for (int32 B = 0; B < NumNeighbours; ++B)
+                            {
+                                if (NeighbourTypes[B] == NeighbourTypes[A]) { ++Count; }
+                            }
+                            if (Count > BestTypeCount)
+                            {
+                                BestTypeCount = Count;
+                                MajorityType = NeighbourTypes[A];
+                            }
                         }
 
-                        Face.PlateIDData[Idx]        = BestId;
-                        Face.CrustTypeData[Idx]      = Speckled[BestFace].CrustTypeData[BestIdx];
-                        Face.CrustAgeData[Idx]       = Speckled[BestFace].CrustAgeData[BestIdx];
-                        Face.CrustThicknessData[Idx] = Speckled[BestFace].CrustThicknessData[BestIdx];
-                        Face.ElevationData[Idx]      = Speckled[BestFace].ElevationData[BestIdx];
-
-                        // Rarisimo (una mota de un pixel), pero si no se libera/concede
-                        // aqui tambien, PlateTerritory se desincroniza permanentemente de
-                        // este pixel: la placa vieja seguiria reclamandolo para siempre.
-                        const FVector Dir = CubeFaceMapping::PixelToDirection(
-                            static_cast<ECSCubeFace>(FaceIdx), X, Y, Resolution);
-                        if (Plates.IsValidIndex(static_cast<int32>(Mine)))
+                        float AgeSum = 0.0f, ThicknessSum = 0.0f, ElevationSum = 0.0f;
+                        int32 MatchCount = 0;
+                        for (int32 A = 0; A < NumNeighbours; ++A)
                         {
-                            Events.Add({ static_cast<int32>(Mine), GetTerritoryFrameIndex(Mine, Dir), 0 });
+                            if (NeighbourTypes[A] != MajorityType) { continue; }
+                            AgeSum       += Speckled[NeighbourFace[A]].CrustAgeData[NeighbourIdx[A]];
+                            ThicknessSum += Speckled[NeighbourFace[A]].CrustThicknessData[NeighbourIdx[A]];
+                            ElevationSum += Speckled[NeighbourFace[A]].ElevationData[NeighbourIdx[A]];
+                            ++MatchCount;
                         }
-                        if (Plates.IsValidIndex(static_cast<int32>(BestId)))
+
+                        if (MatchCount > 0)
                         {
-                            Events.Add({ static_cast<int32>(BestId), GetTerritoryFrameIndex(BestId, Dir), 1 });
+                            Face.CrustTypeData[Idx]      = static_cast<uint8>(MajorityType);
+                            Face.CrustAgeData[Idx]       = AgeSum / MatchCount;
+                            Face.CrustThicknessData[Idx] = ThicknessSum / MatchCount;
+                            Face.ElevationData[Idx]      = ElevationSum / MatchCount;
+                            ++TypeSpeckleFixed;
                         }
                     }
                 }
@@ -1748,6 +1787,10 @@ void URasterizedTectonics::AdvectPlateField(float DeltaTime)
         for (int32 F : DespeckleFromContinentalPerFace)
         {
             AdvectionStats.CellsDespeckleFromContinental += F;
+        }
+        for (int32 F : TypeSpeckleFixedPerFace)
+        {
+            AdvectionStats.CellsTypeSpeckleFixed += F;
         }
 
         AccumulateMs(StepTimings.DespeckleMs, DespeckleStart);
@@ -2200,6 +2243,42 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
         // recorta a 1 porque una fraccion de mezcla mayor que 1 no suaviza: sobrepasa el
         // objetivo y oscila.
         //
+        // NO CRUZA LA FRONTERA DE TIPO DE CORTEZA (18-08-2026). Hasta ahora el kernel 3x3
+        // mezclaba CrustThicknessData de CUALQUIER vecino, sin mirar si era continental u
+        // oceanico. En el interior de una placa es inocuo -los vecinos tienen un grosor
+        // parecido-, pero en un margen -continental de ~20-35 km junto a oceanico de ~7 km,
+        // el gradiente mas pronunciado que existe en todo el campo- tira con mucha mas
+        // fuerza que en cualquier otro sitio. Y el margen es precisamente donde vive la
+        // corteza que importa: la recien madurada por acrecion de arco (ROADMAP.md F2).
+        //
+        // MEDIDO (histograma de grosor por tramo, Simu.Tectonics.F1EF1FLongRun, ver
+        // ANEXO.md): la distribucion entera de grosor continental colapsaba hacia el suelo
+        // de ArcMaturityThickness (20-25 km) en 1000 Ma -incluida la corteza VIEJA que
+        // empezaba a 35-45 km-, mientras la tierra emergida caia del 19,7% al 2,3% de forma
+        // monotona y sin frenar. La calibracion de OrogenyFactor contra DiffusionRate (ver
+        // el comentario junto a OrogenyFactor) se hizo pensando en la raiz de una colision
+        // continente-continente, gradiente suave a ambos lados -nunca se puso a prueba
+        // contra el margen continente-oceano, gradiente mucho mayor y mucho mas comun.
+        //
+        // ACTUALIZACION: este arreglo, por si solo, NO frena el colapso -remedido despues,
+        // el histograma sale practicamente identico con y sin el-. La causa dominante
+        // resulto ser otra, mas simple: AssignHandoff todavia no existia del todo unificado
+        // y el grosor de una celda en CONTINUACION (Owner == CurrentOwner, sin traspaso)
+        // seguia leyendose del marco rotado de la propia placa, con el mismo alias de
+        // redondeo que ya se habia arreglado para el tipo -ver el comentario junto a
+        // AssignHandoff mas arriba, "ACTO 3". Este arreglo de la difusion sigue siendo
+        // correcto por su propio merito -no hay motivo fisico para promediar grosor entre
+        // tipos distintos-, pero no era la pieza que faltaba.
+        //
+        // Arreglo, no parche: el kernel excluye a cualquier vecino de tipo distinto y
+        // renormaliza por la suma de pesos realmente usada -exactamente lo mismo que ya
+        // se le exige al tipo de corteza (nunca se mezcla entre celdas de dueño distinto,
+        // ver AssignHandoff mas arriba), aplicado ahora tambien al grosor
+        // en la frontera fisica que de verdad importa -tipo de corteza, no propiedad de
+        // placa-. Si NINGUN vecino comparte tipo (celda de 1 sola de ancho, caso raro tras
+        // la limpieza de motas) el peso total es solo el propio centro y el resultado no
+        // cambia -ni un parche de un pixel se disuelve por definicion, no por casualidad.
+        //
         // RENDIMIENTO: el bucle se parte en interior y anillo de borde. A Resolution=256 el
         // interior es el 98,4% de los pixeles y no puede cruzar de cara, asi que va con
         // indexado directo por filas; solo el anillo paga la reproyeccion geometrica. Antes
@@ -2219,12 +2298,28 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
                     Snapshot[FaceIdx] = FaceData[FaceIdx].CrustThicknessData;
                 }
 
+                // Tipo de corteza del vecino, cruzando de cara si hace falta -misma
+                // resolucion de vecino que SampleNeighborField, pero sobre CrustTypeData
+                // (uint8, no hay snapshot: el tipo no lo toca esta pasada, asi que leer el
+                // valor actual es identico a leer una instantanea).
+                auto SampleNeighborType = [this](ECSCubeFace F, int32 X, int32 Y, int32 DX, int32 DY) -> uint8
+                {
+                    ECSCubeFace NFace;
+                    int32 NX, NY;
+                    if (!GetNeighborPixel(F, X, Y, DX, DY, NFace, NX, NY))
+                    {
+                        return FaceData[static_cast<int32>(F)].CrustTypeData[GetLinearIndex(X, Y)];
+                    }
+                    return FaceData[static_cast<int32>(NFace)].CrustTypeData[NY * Resolution + NX];
+                };
+
                 ParallelFor(6, [&](int32 FaceIdx)
                 {
                     const ECSCubeFace Face = static_cast<ECSCubeFace>(FaceIdx);
                     const TArray<float>& Src = Snapshot[FaceIdx];
                     TArray<float>& Dst = FaceData[FaceIdx].CrustThicknessData;
                     const float* SrcPtr = Src.GetData();
+                    const uint8* TypePtr = FaceData[FaceIdx].CrustTypeData.GetData();
 
                     // --- Interior: sin cruces de cara, indexado directo ---
                     for (int32 Y = 1; Y < Resolution - 1; ++Y)
@@ -2232,37 +2327,57 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
                         const float* R0 = SrcPtr + (Y - 1) * Resolution;
                         const float* R1 = SrcPtr + (Y    ) * Resolution;
                         const float* R2 = SrcPtr + (Y + 1) * Resolution;
+                        const uint8* T0 = TypePtr + (Y - 1) * Resolution;
+                        const uint8* T1 = TypePtr + (Y    ) * Resolution;
+                        const uint8* T2 = TypePtr + (Y + 1) * Resolution;
 
                         for (int32 X = 1; X < Resolution - 1; ++X)
                         {
-                            const float Sum =
-                                (R0[X - 1] + 2.0f * R0[X] + R0[X + 1] +
-                                 2.0f * R1[X - 1] + 4.0f * R1[X] + 2.0f * R1[X + 1] +
-                                 R2[X - 1] + 2.0f * R2[X] + R2[X + 1]) * (1.0f / 16.0f);
+                            const uint8 MyType = T1[X];
+                            float Sum = 4.0f * R1[X];
+                            float WeightTotal = 4.0f;
 
-                            Dst[Y * Resolution + X] = FMath::Lerp(R1[X], Sum, MixFraction);
+                            if (T0[X - 1] == MyType) { Sum += 1.0f * R0[X - 1]; WeightTotal += 1.0f; }
+                            if (T0[X]     == MyType) { Sum += 2.0f * R0[X];     WeightTotal += 2.0f; }
+                            if (T0[X + 1] == MyType) { Sum += 1.0f * R0[X + 1]; WeightTotal += 1.0f; }
+                            if (T1[X - 1] == MyType) { Sum += 2.0f * R1[X - 1]; WeightTotal += 2.0f; }
+                            if (T1[X + 1] == MyType) { Sum += 2.0f * R1[X + 1]; WeightTotal += 2.0f; }
+                            if (T2[X - 1] == MyType) { Sum += 1.0f * R2[X - 1]; WeightTotal += 1.0f; }
+                            if (T2[X]     == MyType) { Sum += 2.0f * R2[X];     WeightTotal += 2.0f; }
+                            if (T2[X + 1] == MyType) { Sum += 1.0f * R2[X + 1]; WeightTotal += 1.0f; }
+
+                            Dst[Y * Resolution + X] = FMath::Lerp(R1[X], Sum / WeightTotal, MixFraction);
                         }
                     }
 
                     // --- Anillo de borde: aqui si hay que cruzar a la cara contigua ---
-                    const float Kernel[3][3] = {
-                        { 1.0f/16.0f, 2.0f/16.0f, 1.0f/16.0f },
-                        { 2.0f/16.0f, 4.0f/16.0f, 2.0f/16.0f },
-                        { 1.0f/16.0f, 2.0f/16.0f, 1.0f/16.0f }
+                    const float KernelWeight[3][3] = {
+                        { 1.0f, 2.0f, 1.0f },
+                        { 2.0f, 4.0f, 2.0f },
+                        { 1.0f, 2.0f, 1.0f }
                     };
 
                     auto BlurBorderPixel = [&](int32 X, int32 Y)
                     {
+                        const int32 Idx = Y * Resolution + X;
+                        const uint8 MyType = TypePtr[Idx];
                         float Sum = 0.0f;
+                        float WeightTotal = 0.0f;
                         for (int32 KY = -1; KY <= 1; ++KY)
                         {
                             for (int32 KX = -1; KX <= 1; ++KX)
                             {
-                                Sum += SampleNeighborField(Snapshot, Face, X, Y, KX, KY) * Kernel[KY + 1][KX + 1];
+                                if (SampleNeighborType(Face, X, Y, KX, KY) != MyType)
+                                {
+                                    continue;
+                                }
+                                const float Weight = KernelWeight[KY + 1][KX + 1];
+                                Sum += SampleNeighborField(Snapshot, Face, X, Y, KX, KY) * Weight;
+                                WeightTotal += Weight;
                             }
                         }
-                        const int32 Idx = Y * Resolution + X;
-                        Dst[Idx] = FMath::Lerp(SrcPtr[Idx], Sum, MixFraction);
+                        Dst[Idx] = FMath::Lerp(SrcPtr[Idx],
+                            (WeightTotal > 0.0f) ? (Sum / WeightTotal) : SrcPtr[Idx], MixFraction);
                     };
 
                     for (int32 X = 0; X < Resolution; ++X)

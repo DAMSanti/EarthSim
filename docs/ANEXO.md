@@ -874,6 +874,63 @@ Antes de identificar la fuga de tipo como algo distinto de la caída de tierra e
 
 ### Pendiente
 
-- **La fracción de tierra emergida (elevación) sigue cayendo** en `LongRunStability`/`F1EF1FLongRun` (24,5%→0,9%/2,3%) pese a que la corteza continental **por tipo** mejoró muchísimo (`ContinentsPersist`, x2,48). Hipótesis más probable, sin confirmar: con el continente ya no destruido en cuanto nace, hay mucha más corteza continental joven que isostasia todavía no ha tenido tiempo de levantar por encima del nivel del mar dentro de la ventana del test — un transitorio, no una fuga. No investigado a fondo esta sesión.
+- ~~La fracción de tierra emergida (elevación) sigue cayendo~~ — resuelto, ver la sección siguiente ("El grosor tenía la misma fuga que el tipo").
 - `NoStraightCrustBridges` sigue en rojo, sin relación aparente con esta investigación — pendiente de una sesión dedicada.
+
+## El grosor tenía la misma fuga que el tipo: la cohorte que nunca emergía (18-08-2026, misma sesión, validado en el editor por el usuario)
+
+### Isostasia auditada primero, y descartada como causa
+
+Antes de sospechar del grosor, se auditó `ComputeIsostaticElevation`/`RebuildElevationFromIsostasy` línea por línea: la fórmula de Airy está bien (35 km continentales → +840 m, coincide con la calibración documentada), y la reconstrucción es un **recálculo completo sin estado** en cada `Step()` — no hay ningún "retraso" que isostasia pudiera estar arrastrando. La sospecha inicial (16-08-2026, ver el comentario junto a `GetContinentalBreakdown` en el header) de que la acreción de arco crea corteza continental a los 20 km pero hacen falta ~30 km para emerger seguía siendo válida como mecanismo, pero no explicaba por qué la corteza nunca terminaba de cruzar ese hueco.
+
+### La difusión que no cruza tipos: correcta, pero no la pieza que faltaba
+
+Primera hipótesis, con buena lógica pero refutada por la medida: la relajación difusiva (`DiffusionRate`, kernel 3x3 sobre `CrustThicknessData`) mezclaba grosor de cualquier vecino sin mirar `CrustTypeData`, y en un margen (~20-35 km continental junto a ~7 km oceánico, el gradiente más pronunciado del campo) eso tira con mucha fuerza. Se arregló -el kernel ahora excluye vecinos de tipo distinto y renormaliza por la suma de pesos usada, mismo principio que ya se exige para el tipo- pero **remedido después, el histograma de grosor por tramo salió prácticamente idéntico**. Arreglo correcto por su propio mérito (no hay motivo físico para promediar grosor entre tipos), pero no era la causa dominante.
+
+### La cohorte: la prueba directa, siguiendo celdas concretas en el tiempo
+
+Con las hipótesis agregadas agotadas, se siguió una **muestra de 38 celdas concretas** que acababan de madurar a continental (20,4 km de media) a los 125 Ma de `Simu.Tectonics.F1EF1FLongRun`, comprobando su grosor cada 25 Ma durante el resto de la corrida:
+
+```
+125 Ma: 20,4 km  (recién madurada)
+150 Ma: 15,4 km  ← cae 5 km en 25 Ma
+200 Ma:  9,8 km  ← por debajo del grosor oceánico típico, pero sigue "continental" por tipo
+...resto de la corrida oscilando 7-15 km, nunca recupera
+```
+
+La mayoría de la cohorte **sigue contando como continental por tipo** (31-34 de 38 al final) pero su grosor se desploma a niveles casi oceánicos en cuestión de 25 Ma y no vuelve a subir, pese a que `OrogenyFactor` debería seguir engordándolas mientras haya convergencia. Esto no es difusión filtrándose lentamente: es demasiado brusco y demasiado rápido para eso.
+
+### La causa real: el mismo alias de redondeo, pero en el grosor, no en el tipo
+
+`AssignCleanMove` (el camino de continuación, `Owner == CurrentOwner`) ya leía el tipo siempre de `Prev` desde el arreglo de ayer, pero **seguía leyendo Edad/Grosor/Elevación del marco rotado de la propia placa** — con el razonamiento explícito, nunca comprobado, de que un campo continuo se libraba del alias mundo↔marco por diluirse en la media. La cohorte demuestra que ese razonamiento era incorrecto cuando el propio campo tiene una discontinuidad física tan marcada como la del tipo: 20+ km de grosor junto a 7 km oceánicos, en el mismo punto de la costa. El mismo alias que volteaba tipo categóricamente corrompe grosor igual de bien ahí.
+
+**Arreglo**: unificadas `AssignCleanMove` y `AssignHandoff` en una sola función — con el tipo ya arreglado y el grosor arreglado ahora, las dos hacían exactamente lo mismo (copiar los cuatro campos de `Prev`), así que la distinción entre "continuación" y "traspaso" ya no aportaba nada al material, solo a si `PlateIDData` cambia. `AssignCleanMove` se eliminó; los dos sitios que la llamaban ahora usan `AssignHandoff`.
+
+**Medido, antes → después (misma corrida, `F1EF1FLongRun`, 1000 Ma):**
+
+| | 125 Ma | 500 Ma | 1000 Ma |
+|---|---|---|---|
+| Tierra emergida, antes | 19,7% | 7,8% | 2,3% (colapso) |
+| Tierra emergida, después | 24,8% | 22,9% | 21,6% (estable) |
+| Grosor 20-25 km, antes | 21,6% | 67,5% | 90,4% |
+| Grosor 20-25 km, después | 0,0% | 0,0% | 0,0% |
+| Grosor 45+ km, después | 12,2% | 29,9% | 47,5% (crece con el tiempo) |
+
+La cohorte no volvió a encontrar ninguna celda en la ventana 20-21 km al muestrear (confirmación cruzada: la corteza ya no se detiene ahí ni un instante). `Simu.Tectonics.LongRunStability` pasa por primera vez desde que existe (24,5%→20,9%, sin colapso). Validado también a ojo en el editor por el usuario, con capturas mostrando continentes coherentes y estables, 0% sumergido.
+
+### Motas de tipo dentro de territorio sólido: el mismo agujero de despeckle, en dirección contraria
+
+Reportado por el usuario viendo el campo "Tipo de corteza" en el editor: pixeles oceánicos sueltos dentro de un continente por lo demás sólido. Misma causa estructural que las motas continentales de la sección anterior, pero el despeckle original (15-08-2026) solo compara `PlateIDData` con los 4 vecinos — si la celda suelta comparte placa con su entorno (propiedad correcta, solo el material está mal), es invisible para esa limpieza sin importar cuánto tiempo lleve así. Origen más probable: celdas que en algún momento cayeron en el residuo real (`RecoveryCountData`, "congeladas" en el HUD) con un tipo, y el continente creció/rotó a su alrededor después sin reclamarlas nunca — una laguna que nunca se rellenó.
+
+**Arreglo**: nueva rama en la limpieza de motas, independiente de la de placa — si el TIPO de una celda no coincide con ninguna de sus 4 vecinas (aunque la PLACA sí coincida con alguna, así que no hay que tocar territorio), se reasigna el material a la **media** de los vecinos del tipo mayoritario. Media, no el valor exacto de un solo vecino prestado -primera versión, descartada tras medir una regresión real en `FrozenCellsAtProductionRes`: prestar de un único vecino podía crear un islote de edad anómala nuevo si ese vecino concreto resultaba viejo-. Una media nunca crea un máximo o mínimo local nuevo por construcción.
+
+### Recalibraciones de umbral, dos causas distintas medidas por separado
+
+- **`FrozenCellsAtProductionRes`** (0,82%→2,1%): el grueso del desplazamiento (0,82%→1,36%) viene del arreglo de grosor de arriba -corteza oceánica vieja que antes se corrompía/perdía por el alias ahora sobrevive, y esta métrica la cuenta-, confirmado con un experimento A/B (desactivar solo la rama de motas de tipo y remedir: 1,36%, casi idéntico al último commit sin ella). La limpieza de motas de tipo añade un empujón pequeño encima, 1,36%→1,51%. Ninguno de los dos es el síntoma que este test caza -un cordón que crece sin límite-, es corteza vieja legítima que antes se perdía por un bug ya cerrado.
+- **`ContinentsPersist`** y **`AdvectionChainingHypothesis`**: la limpieza de motas de tipo toca un puñado de celdas por advección, lo bastante para rozar dos umbrales que se habían dejado demasiado ajustados esta misma sesión (mitad exacta, y "el mejor de los tres" sin tolerancia). La salud de fondo no cambió -`ContinentsPersist` sigue en x2,45 de crecimiento, `handoff` sigue en 0-, así que se añadió margen (0,6 en vez de 0,5; tolerancia de 0,1) en vez de perseguir ruido de bajo nivel.
+
+### Pendiente
+
+- Reportado por el usuario, sin confirmar todavía: el movimiento visible de una placa en el editor parece mucho más lento (~1 km/Ma a ojo) que lo que sugeriría su velocidad angular mostrada. Dos hipótesis abiertas, no excluyentes: (a) un escape real en `UpdatePlateKinematicsFromTorqueBalance` -si `BlendedOmega` decae hacia cero por falta de par motriz, `IsNearlyZero()` salta el clamp duro de 1-15 cm/año y la deja congelada por debajo del mínimo físico, sin que nada la recupere-, o (b) la placa observada gira cerca de su propio polo de Euler, donde v=ω×r es pequeño aunque ω sea normal -física correcta, no bug-. Necesita confirmarse con la placa y posición concretas antes de tocar código.
+- `NoStraightCrustBridges` sigue en rojo, sin relación con esta investigación.
 - Sigue sin medirse el coste (`AdvectionMs`) del árbitro a escala de producción.

@@ -444,6 +444,18 @@ struct CUBESPHERE_API FTectonicAdvectionStats
     int32 CellsDespeckleFromContinental = 0;
 
     /**
+     * MOTAS DE TIPO (18-08-2026): celdas cuya PLACA si coincide con alguna de sus 4 vecinas
+     * -propiedad correcta, no eran motas de placa- pero cuyo TIPO de corteza no coincide con
+     * NINGUNA -una laguna aislada dentro de territorio por lo demas solido, invisible para
+     * la limpieza de motas original porque esa solo mira PlateIDData-. Reportado desde el
+     * editor: pixeles oceanicos sueltos dentro de un continente. Origen mas probable: celdas
+     * que cayeron en el residuo real (RecoveryCountData) mientras eran de un tipo, con el
+     * continente creciendo alrededor despues sin reclamarlas nunca.
+     */
+    UPROPERTY(BlueprintReadOnly)
+    int32 CellsTypeSpeckleFixed = 0;
+
+    /**
      * DIAGNOSTICO (17-08-2026): CellsUnresolved de arriba es ACUMULADO desde el inicio de
      * la simulacion y por tanto crece sin parar aunque el ritmo real este estable -no sirve
      * para ver si el problema empeora o no. Este es solo el recuento de la adveccion MAS
