@@ -57,6 +57,7 @@ void URasterizedTectonics::Initialize(UCubeSphereGrid* InGrid, UTectonicPlateSys
         Face.RefSourceIdxData.SetNumZeroed(PixelsPerFace);
         Face.CrustTypeData.SetNumZeroed(PixelsPerFace);
         Face.CrustThicknessData.SetNumZeroed(PixelsPerFace);
+        Face.BoundaryTypeData.SetNumZeroed(PixelsPerFace);
 
         // Inicializar velocidades a cero
         for (int32 i = 0; i < PixelsPerFace; ++i)
@@ -745,6 +746,45 @@ int32 URasterizedTectonics::GetCrustTypeAt(ECSCubeFace Face, int32 X, int32 Y) c
         return 0;
     }
     return static_cast<int32>(FaceData[FaceIdx].CrustTypeData[GetLinearIndex(X, Y)]);
+}
+
+int32 URasterizedTectonics::GetBoundaryTypeAt(ECSCubeFace Face, int32 X, int32 Y) const
+{
+    const int32 FaceIdx = static_cast<int32>(Face);
+    if (!bIsInitialized || FaceIdx < 0 || FaceIdx >= 6 || !IsValidCoord(X, Y))
+    {
+        return 0;
+    }
+    return static_cast<int32>(FaceData[FaceIdx].BoundaryTypeData[GetLinearIndex(X, Y)]);
+}
+
+int32 URasterizedTectonics::GetNumLivingPlates() const
+{
+    if (!bIsInitialized || !PlateSystem)
+    {
+        return 0;
+    }
+
+    TArray<bool> HasCells;
+    HasCells.Init(false, PlateSystem->GetPlates().Num());
+
+    for (int32 F = 0; F < 6; ++F)
+    {
+        for (const uint8 ID : FaceData[F].PlateIDData)
+        {
+            if (HasCells.IsValidIndex(ID))
+            {
+                HasCells[ID] = true;
+            }
+        }
+    }
+
+    int32 Count = 0;
+    for (const bool bAlive : HasCells)
+    {
+        if (bAlive) { ++Count; }
+    }
+    return Count;
 }
 
 // ============================================================
@@ -1928,8 +1968,17 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
 
                     // F1E Fase A: si la adveccion partio el territorio de alguna placa en
                     // trozos disjuntos, aqui nace la placa nueva -antes de reconstruir
-                    // segmentos, para que estos ya reflejen la particion.
+                    // segmentos, para que estos ya reflejen la particion. La muerte de
+                    // placas (area total bajo el umbral) vive dentro de esta misma funcion,
+                    // no aparte: comparte el flood-fill de componentes conexas.
                     HandlePlateFragmentation();
+
+                    // F1E, sutura: el complemento de la fragmentacion. Lee BoundarySegments
+                    // de la adveccion ANTERIOR (la de esta todavia no se ha reconstruido, ver
+                    // mas abajo) para decidir que fusionar -Age se acumula durante cientos de
+                    // Ma, un desfase de una adveccion es irrelevante-, y aplica la fusion
+                    // sobre el PlateIDData ya avanzado por esta adveccion.
+                    HandlePlateSuture();
 
                     // R2.12: PlateIDData solo cambia aqui, asi que los segmentos se
                     // reconstruyen a la misma cadencia que la propia adveccion.
@@ -2048,6 +2097,12 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
                     const int32 Idx = GetLinearIndex(X, Y);
                     const uint8 CurrentPlateID = Face.PlateIDData[Idx];
 
+                    // ROADMAP.md F1D: se repone a "no es frontera" antes de clasificar
+                    // -si algo mas abajo la marca convergente/divergente/transformante,
+                    // lo sobreescribe; si ninguno de los `continue` de aqui abajo llega a
+                    // clasificar nada (no hay segmento, o no se encuentra), se queda en 0.
+                    Face.BoundaryTypeData[Idx] = 0;
+
                     // Offsets de los 4 vecinos directos: se reutiliza mas abajo, sin
                     // cambios, para decidir si una celda oceanica convergente TOCA
                     // continente (acrecion de arco). No interviene en la clasificacion.
@@ -2097,6 +2152,7 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
                     if (bTransformDominant)
                     {
                         ++LocalTransformCount;
+                        Face.BoundaryTypeData[Idx] = 3;
                         // Sin consumidor todavia (friccion/sismicidad, R7.x vulcanismo):
                         // se cuenta y se deja la celda tal cual, ni engrosa ni adelgaza.
                         // Ver ROADMAP.md F1G.
@@ -2104,6 +2160,7 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
                     else if (ConvergenceSum > 0.0f)
                     {
                         ++LocalConvergentCount;
+                        Face.BoundaryTypeData[Idx] = 1;
 
                         // OROGENIA COMO ENGROSAMIENTO (ROADMAP.md F2).
                         //
@@ -2209,6 +2266,8 @@ void URasterizedTectonics::Step(const FPlateMovementParams& Params)
                     }
                     else if (ConvergenceSum < 0.0f)
                     {
+                        Face.BoundaryTypeData[Idx] = 2;
+
                         // Divergencia: dorsal. Corteza oceanica nueva y caliente; su altura
                         // la pone el hundimiento termico desde la edad, asi que basta con
                         // reiniciar edad y grosor.
@@ -2560,6 +2619,30 @@ void URasterizedTectonics::EnsurePlateFrameCapacity(int32 PlateIndex)
 // territorio/material, SOLO se ejecuta si de verdad hay alguna placa fragmentada -el caso
 // comun (nada fragmentado) se va con un solo barrido barato.
 // ============================================================
+void URasterizedTectonics::LogPlateLifecycleEvent(EPlateLifecycleEvent Event, int32 PlateID, int32 RelatedPlateID, int32 CellCount)
+{
+    FPlateLifecycleRecord Record;
+    Record.Event = Event;
+    Record.PlateID = PlateID;
+    Record.RelatedPlateID = RelatedPlateID;
+    Record.SimTime = TotalSimulationTime;
+    Record.CellCount = CellCount;
+    PlateHistory.Add(Record);
+}
+
+void URasterizedTectonics::ClearPlateFrame(int32 PlateIndex)
+{
+    if (PlateMaterial.IsValidIndex(PlateIndex))
+    {
+        FPlateMaterialFrame& Frame = PlateMaterial[PlateIndex];
+        Frame.Occupied.Init(0, Frame.Occupied.Num());
+    }
+    if (PlateTerritory.IsValidIndex(PlateIndex))
+    {
+        PlateTerritory[PlateIndex].Init(0, PlateTerritory[PlateIndex].Num());
+    }
+}
+
 void URasterizedTectonics::HandlePlateFragmentation()
 {
     if (!bIsInitialized || !PlateSystem)
@@ -2593,16 +2676,22 @@ void URasterizedTectonics::HandlePlateFragmentation()
     TArray<int32> ComponentPlateID;
     TArray<int32> ComponentCellCount;
 
+    // MUERTE (18-08-2026): centroide de cada componente -direccion media de sus celdas, sin
+    // normalizar todavia-, para derivar el polo de Euler de una placa nueva de la geometria
+    // real de la ruptura en vez de copiar ciegamente el del padre (ver mas abajo).
+    TArray<FVector> ComponentCentroidSum;
+
     // F1E Fase A.1 -asimilacion (17-08-2026): mientras se hace el flood-fill, se registra
-    // que PlateID limitan con cada componente. Por la propia definicion del flood-fill, dos
-    // celdas vecinas con el MISMO PlateID caen siempre en la MISMA componente -asi que
-    // cualquier vecino fuera de la componente actual tiene, necesariamente, un PlateID
-    // DISTINTO-. Si una componente pequeña linda unicamente con una sola placa vecina en
-    // todo su perimetro, esa placa vecina la rodea por completo y deberia quedarsela -ver
-    // ComponentBorderPlateID/Ambiguous, usados mas abajo-. Si linda con dos o mas, queda
-    // ambigua y no se toca -misma filosofia que el resto del trilema de R2.9 Fase 4-.
-    TArray<int32> ComponentBorderPlateID;   // INDEX_NONE = todavia no se ha visto ningun vecino distinto
-    TArray<bool> ComponentBorderAmbiguous;  // true = linda con 2+ placas vecinas distintas
+    // que PlateID limitan con cada componente y CUANTAS celdas de borde comparte con cada
+    // uno. Por la propia definicion del flood-fill, dos celdas vecinas con el MISMO PlateID
+    // caen siempre en la MISMA componente -asi que cualquier vecino fuera de la componente
+    // actual tiene, necesariamente, un PlateID DISTINTO-. Si una componente pequeña linda
+    // unicamente con una sola placa vecina en todo su perimetro, esa placa vecina la rodea
+    // por completo y deberia quedarsela. Si linda con dos o mas, queda ambigua para la
+    // asimilacion normal -mismo trilema de R2.9 Fase 4-, pero MUERTE (mas abajo) necesita
+    // forzar una resolucion de todas formas: guardar el RECUENTO, no solo si es ambiguo o
+    // no, permite elegir al vecino con mas frontera compartida cuando no queda mas remedio.
+    TArray<TMap<int32, int32>> ComponentBorderCounts;
 
     TArray<TPair<int32, int32>> Stack;
     const int32 Offsets4[4][2] = { {-1, 0}, {1, 0}, {0, -1}, {0, 1} };
@@ -2622,8 +2711,8 @@ void URasterizedTectonics::HandlePlateFragmentation()
                 const int32 SeedPlate = static_cast<int32>(FaceData[FaceIdx].PlateIDData[SeedIdx]);
                 const int32 ComponentIdx = ComponentPlateID.Add(SeedPlate);
                 ComponentCellCount.Add(0);
-                ComponentBorderPlateID.Add(INDEX_NONE);
-                ComponentBorderAmbiguous.Add(false);
+                ComponentCentroidSum.Add(FVector::ZeroVector);
+                ComponentBorderCounts.AddDefaulted();
 
                 Stack.Reset();
                 Stack.Add(TPair<int32, int32>(FaceIdx, SeedIdx));
@@ -2638,6 +2727,8 @@ void URasterizedTectonics::HandlePlateFragmentation()
                     const int32 CX = CIdx % Resolution;
 
                     ++ComponentCellCount[ComponentIdx];
+                    ComponentCentroidSum[ComponentIdx] += CubeFaceMapping::PixelToDirection(
+                        static_cast<ECSCubeFace>(CFace), CX, CY, Resolution);
 
                     for (int32 i = 0; i < 4; ++i)
                     {
@@ -2656,14 +2747,7 @@ void URasterizedTectonics::HandlePlateFragmentation()
                             // Vecino de otra placa: registrar como candidato a "quien rodea
                             // a esta componente", sin visitarlo -pertenece a su propio
                             // flood-fill, no al de aqui.
-                            if (ComponentBorderPlateID[ComponentIdx] == INDEX_NONE)
-                            {
-                                ComponentBorderPlateID[ComponentIdx] = NeighborPlate;
-                            }
-                            else if (ComponentBorderPlateID[ComponentIdx] != NeighborPlate)
-                            {
-                                ComponentBorderAmbiguous[ComponentIdx] = true;
-                            }
+                            ++ComponentBorderCounts[ComponentIdx].FindOrAdd(NeighborPlate);
                             continue;
                         }
 
@@ -2679,6 +2763,30 @@ void URasterizedTectonics::HandlePlateFragmentation()
             }
         }
     }
+
+    // Vecino UNICO (asimilacion normal: la componente esta enteramente rodeada por una sola
+    // placa) o INDEX_NONE si linda con 0 o 2+.
+    auto GetSingleBorderNeighbor = [](const TMap<int32, int32>& Counts) -> int32
+    {
+        return (Counts.Num() == 1) ? Counts.CreateConstIterator()->Key : INDEX_NONE;
+    };
+
+    // Vecino con MAS frontera compartida, sea o no el unico. Solo para muerte: ahi no hay
+    // opcion de "dejarlo tal cual" -la placa entera tiene que ir a alguna parte-.
+    auto GetBestBorderNeighbor = [](const TMap<int32, int32>& Counts) -> int32
+    {
+        int32 Best = INDEX_NONE;
+        int32 BestCount = 0;
+        for (const TPair<int32, int32>& Pair : Counts)
+        {
+            if (Pair.Value > BestCount)
+            {
+                BestCount = Pair.Value;
+                Best = Pair.Key;
+            }
+        }
+        return Best;
+    };
 
     // Agrupar componentes por placa original -son pocos (decenas), no celdas.
     TMap<int32, TArray<int32>> ComponentsPerPlate;
@@ -2713,6 +2821,57 @@ void URasterizedTectonics::HandlePlateFragmentation()
     for (auto& Entry : ComponentsPerPlate)
     {
         TArray<int32>& Comps = Entry.Value;
+        const int32 ParentID = Entry.Key;
+        if (!PlatesConstRef.IsValidIndex(ParentID))
+        {
+            continue; // no deberia pasar: toda celda tiene un PlateID valido
+        }
+        const FTectonicPlate ParentPlate = PlatesConstRef[ParentID];
+
+        // ------------------------------------------------------------
+        // MUERTE (ROADMAP.md F1E, 18-08-2026): el area TOTAL de la placa -sumando todos sus
+        // componentes, no solo los que fragmentarian por separado- por debajo del umbral.
+        // A diferencia de la fragmentacion/asimilacion de mas abajo, aqui NINGUN componente
+        // se salva -ni siquiera el mayor-: la placa entera se disuelve, componente a
+        // componente, en quien mas le rodee. Es la asimilacion normal, solo que forzada:
+        // si el mejor vecino no es unico (2+ candidatos empatados o la componente no linda
+        // con nadie, aislada en mitad de un oceano ajeno), se elige el de mas frontera
+        // compartida en vez de dejarlo tal cual -una placa muerta no tiene la opcion de
+        // "esperar al siguiente paso", tiene que ir a alguna parte ya.
+        // ------------------------------------------------------------
+        int32 TotalPlateCells = 0;
+        for (const int32 C : Comps)
+        {
+            TotalPlateCells += ComponentCellCount[C];
+        }
+
+        if (TotalPlateCells < MinPlateAreaCells)
+        {
+            bool bAnyResolved = false;
+            for (const int32 ComponentIdx : Comps)
+            {
+                const int32 SingleNeighbor = GetSingleBorderNeighbor(ComponentBorderCounts[ComponentIdx]);
+                const int32 BestNeighbor = (SingleNeighbor != INDEX_NONE)
+                    ? SingleNeighbor : GetBestBorderNeighbor(ComponentBorderCounts[ComponentIdx]);
+                if (BestNeighbor == INDEX_NONE)
+                {
+                    continue; // no deberia pasar salvo que sea el unico habitante del planeta
+                }
+                ComponentNewPlateID[ComponentIdx] = BestNeighbor;
+                bAnyResolved = true;
+            }
+
+            if (bAnyResolved)
+            {
+                bAnyFragmentation = true;
+                LogPlateLifecycleEvent(EPlateLifecycleEvent::Died, ParentID, INDEX_NONE, TotalPlateCells);
+                UE_LOG(LogRasterizedTectonics, Log,
+                    TEXT("F1E: la placa %d muere (%d celdas en total, bajo el umbral de %d) y se disuelve en sus vecinas"),
+                    ParentID, TotalPlateCells, MinPlateAreaCells);
+            }
+            continue; // el destino de TODOS sus componentes ya quedo decidido arriba
+        }
+
         if (Comps.Num() < 2)
         {
             continue;
@@ -2720,13 +2879,6 @@ void URasterizedTectonics::HandlePlateFragmentation()
 
         // La componente mayor conserva el PlateID original y su cinematica tal cual.
         Comps.Sort([&ComponentCellCount](int32 A, int32 B) { return ComponentCellCount[A] > ComponentCellCount[B]; });
-
-        const int32 ParentID = Entry.Key;
-        if (!PlatesConstRef.IsValidIndex(ParentID))
-        {
-            continue; // no deberia pasar: toda celda tiene un PlateID valido
-        }
-        const FTectonicPlate ParentPlate = PlatesConstRef[ParentID];
 
         for (int32 i = 1; i < Comps.Num(); ++i)
         {
@@ -2742,12 +2894,48 @@ void URasterizedTectonics::HandlePlateFragmentation()
                     continue;
                 }
 
-                // Hereda tipo de corteza, densidad, grosor y cinematica del padre: F1F la
-                // refinara sola en la proxima adveccion si la cinematica dinamica esta activa.
+                // Hereda tipo de corteza, densidad y grosor del padre: eso no cambia por
+                // partirse en dos. La cinematica NO se hereda ciegamente -ver mas abajo.
                 FTectonicPlate NewPlate = ParentPlate;
                 NewPlate.CellCount = ComponentCellCount[ComponentIdx];
                 NewPlate.PlateID = PlateSystem->GetPlates().Num(); // TectonicPlateSystem asume Plates[i].PlateID == i
                 NewPlate.PlateName = FString::Printf(TEXT("Plate_%d"), NewPlate.PlateID);
+
+                // POLO DE EULER PROPIO, DERIVADO DE LA GEOMETRIA DE LA RUPTURA (18-08-2026,
+                // ROADMAP.md F1E). Antes: NewPlate = ParentPlate copiaba EulerPole y
+                // AngularVelocity tal cual -el fragmento nuevo giraba exactamente igual que
+                // el padre, para siempre, hasta que F1F (si la cinematica dinamica estaba
+                // activa) lo corrigiera en el siguiente paso. Con cinematica FIJA nunca se
+                // corrige.
+                //
+                // Derivacion: si a ~b son unitarios y perpendiculares entre si, (a×b)×a = b
+                // -identidad del triple producto vectorial, a·a=1, a·b=0-. Asi que un eje de
+                // rotacion Axis = ChildCentroid × AwayDir cumple Axis × ChildCentroid =
+                // AwayDir: rotar alrededor de Axis mueve el centroide del fragmento nuevo en
+                // la direccion en la que se alejo del resto de la placa al partirse -el
+                // fragmento hereda el RITMO del padre (misma magnitud de AngularVelocity,
+                // que ya viene calibrada a rango fisico) pero con un eje que si refleja la
+                // ruptura, no una copia ciega.
+                const FVector ChildCentroid = ComponentCentroidSum[ComponentIdx].GetSafeNormal();
+                const FVector ParentCentroid = ParentPlate.Centroid.GetSafeNormal();
+                FVector AwayDir = ChildCentroid - ParentCentroid;
+                AwayDir -= ChildCentroid * FVector::DotProduct(AwayDir, ChildCentroid); // tangente a la esfera en ChildCentroid
+                AwayDir = AwayDir.GetSafeNormal();
+
+                if (!ChildCentroid.IsNearlyZero() && !AwayDir.IsNearlyZero())
+                {
+                    const FVector Axis = FVector::CrossProduct(ChildCentroid, AwayDir).GetSafeNormal();
+                    if (!Axis.IsNearlyZero())
+                    {
+                        NewPlate.EulerPole = Axis;
+                        // AngularVelocity se queda como la del padre -mismo ritmo, eje nuevo.
+                    }
+                }
+                // Si el centroide del padre coincide con el del hijo (degenerado, centroide
+                // del padre desactualizado) o el flood-fill no dio un centroide valido, se
+                // deja la cinematica heredada tal cual -mismo comportamiento que antes de
+                // este arreglo, nunca peor.
+
                 const int32 NewID = PlateSystem->AddPlate(NewPlate);
 
                 EnsurePlateFrameCapacity(NewID);
@@ -2757,13 +2945,21 @@ void URasterizedTectonics::HandlePlateFragmentation()
                 ComponentNewPlateID[ComponentIdx] = NewID;
                 bAnyFragmentation = true;
 
+                LogPlateLifecycleEvent(EPlateLifecycleEvent::BornFromFragmentation, NewID, ParentID, ComponentCellCount[ComponentIdx]);
                 UE_LOG(LogRasterizedTectonics, Log,
                     TEXT("F1E: la placa %d se fragmenta -nace la placa %d con %d celdas"),
                     ParentID, NewID, ComponentCellCount[ComponentIdx]);
             }
-            else if (!bDebugDisableAssimilation
-                     && !ComponentBorderAmbiguous[ComponentIdx] && ComponentBorderPlateID[ComponentIdx] != INDEX_NONE)
+            else if (!bDebugDisableAssimilation)
             {
+                const int32 SingleNeighbor = GetSingleBorderNeighbor(ComponentBorderCounts[ComponentIdx]);
+                if (SingleNeighbor == INDEX_NONE)
+                {
+                    // Ambigua (linda con 2+ placas) o sin resolver: se deja tal cual, mismo
+                    // criterio que el resto del trilema documentado.
+                    continue;
+                }
+
                 // F1E Fase A.1 -asimilacion: la componente es demasiado pequeña para ser
                 // placa propia, pero esta enteramente rodeada por UNA sola placa vecina -no
                 // es territorio en disputa, es una isla huerfana dejada atras por una
@@ -2771,16 +2967,14 @@ void URasterizedTectonics::HandlePlateFragmentation()
                 // viejo indefinidamente (motivo completo en ANEXO.md). No hace falta crear
                 // placa ni tocar PlateAccumRotation -el destino ya existe y ya tiene su
                 // propia rotacion acumulada; el sembrado de la Pasada 2 la usa tal cual.
-                const int32 AssimilatorID = ComponentBorderPlateID[ComponentIdx];
-                ComponentNewPlateID[ComponentIdx] = AssimilatorID;
+                ComponentNewPlateID[ComponentIdx] = SingleNeighbor;
                 bAnyFragmentation = true;
 
+                LogPlateLifecycleEvent(EPlateLifecycleEvent::AssimilatedOrphanIsland, ParentID, SingleNeighbor, ComponentCellCount[ComponentIdx]);
                 UE_LOG(LogRasterizedTectonics, Log,
                     TEXT("F1E: isla huerfana de la placa %d (%d celdas) asimilada por la placa %d"),
-                    ParentID, ComponentCellCount[ComponentIdx], AssimilatorID);
+                    ParentID, ComponentCellCount[ComponentIdx], SingleNeighbor);
             }
-            // Componente pequeña Y ambigua (linda con 2+ placas, o con ninguna resuelta):
-            // se deja tal cual, mismo criterio que el resto del trilema documentado.
         }
     }
 
@@ -2833,6 +3027,135 @@ void URasterizedTectonics::HandlePlateFragmentation()
     }
 
     AccumulateMs(StepTimings.FragmentationMs, FragStart);
+}
+
+// ============================================================
+// SUTURA (ROADMAP.md F1E, 18-08-2026)
+//
+// EL COMPLEMENTO DE LA FRAGMENTACION. Un continente que colisiona y deja de separarse -el
+// margen que antes era convergente o divergente se queda quieto, sin movimiento relativo
+// sostenido- no deberia seguir existiendo como dos placas para siempre: en la Tierra real
+// eso es una sutura (el Himalaya es la sutura India-Asia). Sin esto, F1E solo puede AUMENTAR
+// el numero de placas (fragmentacion) o mantenerlo (asimilacion de islas ya cubierta) -nunca
+// bajarlo por la via de "dos placas que ya se movian juntas se vuelven una", que es la unica
+// reduccion que no depende de que una placa se quede casi sin territorio (eso ya lo cubre
+// muerte, dentro de HandlePlateFragmentation).
+//
+// CRITERIO: el mismo FBoundarySegment::Age que R2.12 ya pensaba para esto ("es directamente
+// lo que R2.16 necesitara para decidir sutura", comentario de origen del propio campo) mas
+// las medias de convergencia/deslizamiento tangencial del segmento -ambas casi cero durante
+// mucho tiempo es la firma de "sin movimiento relativo", no solo "no diverge" como el umbral
+// de rift-. Umbral bastante mas estricto (SutureVelocityFraction=0.02 contra el 0.10 de
+// rift) porque aqui hace falta quietud de verdad, no solo ausencia de separacion.
+//
+// FUSION: se recorren TODAS las celdas del perdedor (menos celdas de las dos) y se
+// reasignan al ganador -no hay "componente" que preservar, la placa entera cambia de ID-.
+// El marco de material/territorio del perdedor se vacia (ClearPlateFrame): nadie debe
+// volver a leerlo, y dejarlo con datos rancios podria confundir un diagnostico futuro.
+// ============================================================
+void URasterizedTectonics::HandlePlateSuture()
+{
+    if (!bIsInitialized || !PlateSystem || BoundarySegments.Num() == 0)
+    {
+        return;
+    }
+
+    const TArray<FTectonicPlate>& Plates = PlateSystem->GetPlates();
+
+    float MaxAngularSpeed = 0.0f;
+    for (const FTectonicPlate& Plate : Plates)
+    {
+        MaxAngularSpeed = FMath::Max(MaxAngularSpeed, FMath::Abs(Plate.AngularVelocity));
+    }
+    if (MaxAngularSpeed <= KINDA_SMALL_NUMBER)
+    {
+        return; // planeta inmovil -nada que soldar, ninguna frontera se mueve ni se queda quieta
+    }
+    const float VelocityThreshold = SutureVelocityFraction * MaxAngularSpeed;
+
+    // Redirect[X] = a que placa acaba yendo X una vez resueltas todas las fusiones de este
+    // mismo paso -encadenadas, por si dos segmentos distintos afectan a la misma placa-.
+    TMap<int32, int32> Redirect;
+    auto Resolve = [&Redirect](int32 PlateID) -> int32
+    {
+        int32 Current = PlateID;
+        while (const int32* Next = Redirect.Find(Current))
+        {
+            Current = *Next;
+        }
+        return Current;
+    };
+
+    TArray<TPair<int32, int32>> Merges; // (Loser, Survivor), ya resueltos
+
+    for (const FBoundarySegment& Seg : BoundarySegments)
+    {
+        if (Seg.Age < SutureAgeThresholdMa)
+        {
+            continue;
+        }
+        if (FMath::Abs(Seg.AverageConvergence) >= VelocityThreshold
+            || FMath::Abs(Seg.AverageTangential) >= VelocityThreshold)
+        {
+            continue;
+        }
+
+        const int32 PlateA = Resolve(Seg.PlateA);
+        const int32 PlateB = Resolve(Seg.PlateB);
+        if (PlateA == PlateB || !Plates.IsValidIndex(PlateA) || !Plates.IsValidIndex(PlateB))
+        {
+            continue; // ya fusionadas este mismo paso, o ID invalido
+        }
+
+        // El superviviente es quien tenga MAS celdas AHORA -CellCount en FTectonicPlate solo
+        // se pone al día en la generación y en el nacimiento por fragmentación, no paso a
+        // paso, así que no es fiable aquí; se cuenta de verdad.
+        int32 CountA = 0, CountB = 0;
+        for (int32 F = 0; F < 6; ++F)
+        {
+            for (const uint8 ID : FaceData[F].PlateIDData)
+            {
+                if (ID == PlateA) { ++CountA; }
+                else if (ID == PlateB) { ++CountB; }
+            }
+        }
+
+        const int32 Survivor = (CountA >= CountB) ? PlateA : PlateB;
+        const int32 Loser = (Survivor == PlateA) ? PlateB : PlateA;
+
+        Redirect.Add(Loser, Survivor);
+        Merges.Add(TPair<int32, int32>(Loser, Survivor));
+
+        LogPlateLifecycleEvent(EPlateLifecycleEvent::SuturedInto, Loser, Survivor,
+            (Survivor == PlateA) ? CountB : CountA);
+        UE_LOG(LogRasterizedTectonics, Log,
+            TEXT("F1E: sutura -la placa %d se funde en la %d (segmento de %.0f Ma sin movimiento relativo)"),
+            Loser, Survivor, Seg.Age);
+    }
+
+    if (Merges.Num() == 0)
+    {
+        return;
+    }
+
+    // Reescritura: una sola pasada por el planeta, redirigiendo cada perdedor -incluso si
+    // encadeno varias fusiones este mismo paso- a su superviviente final.
+    for (int32 F = 0; F < 6; ++F)
+    {
+        for (uint8& ID : FaceData[F].PlateIDData)
+        {
+            const int32 Redirected = Resolve(static_cast<int32>(ID));
+            if (Redirected != static_cast<int32>(ID))
+            {
+                ID = static_cast<uint8>(Redirected);
+            }
+        }
+    }
+
+    for (const TPair<int32, int32>& Merge : Merges)
+    {
+        ClearPlateFrame(Merge.Key);
+    }
 }
 
 bool URasterizedTectonics::ReadPlateMaterial(int32 PlateIdx, const FVector& WorldDir,

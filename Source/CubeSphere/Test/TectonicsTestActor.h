@@ -472,6 +472,13 @@ private:
     TArray<float> PlateIDFieldCache[6];
     TArray<float> CrustTypeFieldCache[6];
 
+    /**
+     * ROADMAP.md F1D: espejo en float de BoundaryTypeData -0=interior, 1=convergente,
+     * 2=divergente, 3=transformante-, la misma clasificacion por segmento que ya decide
+     * orogenia/acrecion/rift en AdvectPlateField.
+     */
+    TArray<float> BoundaryTypeFieldCache[6];
+
     /** Grosor de corteza en km y altura sobre el nivel del mar actual, para el visor. */
     TArray<float> CrustThicknessFieldCache[6];
     TArray<float> AboveSeaLevelFieldCache[6];

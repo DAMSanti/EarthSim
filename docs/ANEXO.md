@@ -934,3 +934,59 @@ Reportado por el usuario viendo el campo "Tipo de corteza" en el editor: pixeles
 - Reportado por el usuario, sin confirmar todavía: el movimiento visible de una placa en el editor parece mucho más lento (~1 km/Ma a ojo) que lo que sugeriría su velocidad angular mostrada. Dos hipótesis abiertas, no excluyentes: (a) un escape real en `UpdatePlateKinematicsFromTorqueBalance` -si `BlendedOmega` decae hacia cero por falta de par motriz, `IsNearlyZero()` salta el clamp duro de 1-15 cm/año y la deja congelada por debajo del mínimo físico, sin que nada la recupere-, o (b) la placa observada gira cerca de su propio polo de Euler, donde v=ω×r es pequeño aunque ω sea normal -física correcta, no bug-. Necesita confirmarse con la placa y posición concretas antes de tocar código.
 - `NoStraightCrustBridges` sigue en rojo, sin relación con esta investigación.
 - Sigue sin medirse el coste (`AdvectionMs`) del árbitro a escala de producción.
+
+## F1D completo (campo de frontera) y F1E completo (muerte, sutura, polo de Euler propio, historial) (18-08-2026, misma sesión)
+
+Petición explícita: *"quiero que termines el tipo de frontera de F1D y F1E entero"*.
+
+### F1D: campo "Tipo de frontera" en el visor
+
+Sin física nueva -la clasificación convergente/divergente/transformante por segmento ya existía (R2.13/FASE 2) y ya decidía orogenia/acreción/rift-, solo faltaba exponerla. Se añadió `BoundaryTypeData` a `FTectonicFaceTextureData` (0=interior, 1=convergente, 2=divergente, 3=transformante), escrito en el mismo punto de `AdvectPlateField` donde ya se clasifica cada celda de frontera, reseteado a 0 al empezar cada advección. Accesor público `GetBoundaryTypeAt`, campo `BoundaryType` registrado en el visor con la misma paleta categórica que "Tipo de corteza". Verificado con test dedicado (`Simu.Tectonics.BoundaryTypeField`, Res 64, 100 pasos): interior 22.182, convergente 461, divergente 562, transformante 1.371 -el interior sigue siendo con diferencia la mayoría, las fronteras una franja fina, tal como deberían verse-.
+
+La fricción/esfuerzo acumulado/sismicidad de fallas transformantes (el otro pendiente de F1D) se dejó fuera deliberadamente: sin ningún consumidor todavía, sería construir infraestructura sin usuario claro.
+
+### F1E: la base reutilizada para todo
+
+Todo lo nuevo -muerte, polo de Euler propio, historial- vive dentro o junto a `HandlePlateFragmentation()`, reutilizando su flood-fill de componentes conexas en vez de recorrer el planeta otra vez por cada mecanismo nuevo. Cambio de base necesario primero: `ComponentBorderPlateID`/`ComponentBorderAmbiguous` (un `INDEX_NONE` + un booleano, solo distinguía "un vecino" de "dos o más") se sustituyó por `ComponentBorderCounts` (`TMap<int32,int32>` por componente, vecino → celdas de frontera compartidas) -la asimilación normal sigue funcionando igual (vecino único = `Counts.Num()==1`), pero muerte necesita además "el vecino con MÁS frontera, aunque no sea único", que el booleano no podía dar.
+
+### Muerte
+
+Área TOTAL de una placa (sumando TODOS sus componentes, no solo los que fragmentarían por separado -una placa reducida a un único componente pequeño nunca entraba en el bucle de fragmentación, que exige `Comps.Num() >= 2`-) por debajo de `MinPlateAreaCells` (150, un orden de magnitud por debajo de `MinFragmentCells`=800, primera calibración sin línea base medida todavía) ⇒ la placa entera se disuelve, componente a componente, en quien más le rodee -incluso el componente que normalmente conservaría el ID-. Si el mejor vecino no es único, se elige el de más frontera compartida en vez de dejarlo tal cual: una placa muerta no tiene la opción de "esperar al siguiente paso".
+
+No se elimina del array de `TectonicPlateSystem` -el `PlateID` es el índice, y borrar en medio correría todos los índices posteriores, corrompiendo cada celda que apunta a un índice mayor-. Se queda como una placa "fantasma": 0 celdas, entrada del array intacta. `ClearPlateFrame()` vacía su `PlateMaterial`/`PlateTerritory` para que nadie lea datos rancios.
+
+No se disparó en la corrida de validación (`Simu.Tectonics.PlateLifecycle`, 1000 Ma, Res 128, semilla 4242) -emergente, no garantizado; el umbral de 150 puede ser conservador, o simplemente no tocó en esta semilla concreta-.
+
+### Sutura
+
+El complemento de la fragmentación: sin esto, F1E solo podía aumentar el número de placas (fragmentación) o mantenerlo (asimilación) -nunca reducirlo por "dos placas que ya se movían juntas se vuelven una", que es la única reducción que no depende de quedarse casi sin territorio (eso ya lo cubre muerte). Criterio, el mismo que `FBoundarySegment::Age` ya preveía desde que se documentó ("es directamente lo que R2.16 necesitará para decidir sutura"): `Age >= SutureAgeThresholdMa` (300 Ma) y `|AverageConvergence|`/`|AverageTangential|` ambos por debajo de `SutureVelocityFraction` (0,02, más estricto que el 0,10 de rift porque hace falta quietud de verdad, no solo ausencia de separación) × `MaxAngularSpeed`.
+
+La placa con menos celdas AHORA (contadas de verdad, no `FTectonicPlate::CellCount` -ese campo solo se pone al día en la generación y en el nacimiento por fragmentación, no paso a paso, así que no es fiable para decidir quién sobrevive-) se reasigna entera a la de más. `HandlePlateSuture()` corre justo después de `HandlePlateFragmentation()`, leyendo `BoundarySegments` de la advección anterior -la de esta todavía no se ha reconstruido en ese punto del `Step()`, pero `Age` se acumula durante cientos de Ma, un desfase de una advección es irrelevante-.
+
+**Medido en `Simu.Tectonics.F1EF1FLongRun` (1000 Ma, Res 128, dinámico): 3 fusiones** (placa 7→5 a los 302 Ma sin movimiento relativo, placa 4→1 a los 312 Ma, placa 5→2 a los 346 Ma), más 1 fragmentación nueva y 1585 asimilaciones de islas huérfanas. Tierra emergida 24,9%→22,7%, **sin colapso**, sumergido en 0,0% durante toda la corrida.
+
+### Polo de Euler propio para la placa nueva
+
+Antes: `NewPlate = ParentPlate` copiaba `EulerPole`/`AngularVelocity` tal cual -el fragmento nuevo giraba exactamente igual que el padre, para siempre, salvo que F1F dinámico lo corrigiera en el siguiente paso; con cinemática fija nunca se corregía-.
+
+Derivación: si *a* y *b* son vectores unitarios y perpendiculares entre sí, `(a×b)×a = b` (identidad del triple producto vectorial, `a·a=1`, `a·b=0`). Con `ChildCentroid` (centroide del componente que nace, acumulado gratis durante el mismo flood-fill que ya recorre sus celdas) y `AwayDir` (dirección desde el centroide del padre hacia el del hijo, proyectada tangente a la esfera en el hijo), el eje `Axis = ChildCentroid × AwayDir` cumple `Axis × ChildCentroid = AwayDir`: rotar alrededor de `Axis` mueve el centroide del fragmento nuevo en la dirección en la que de verdad se alejó del resto de la placa al partirse. Magnitud: la misma `AngularVelocity` del padre -ya calibrada a rango físico-, solo el eje cambia. Degenerado (centroide del padre desactualizado, coincide con el del hijo) ⇒ se cae al comportamiento anterior, nunca peor que antes del arreglo.
+
+### Historial de placas
+
+`FPlateLifecycleRecord` (`Event`, `PlateID`, `RelatedPlateID`, `SimTime`, `CellCount`) en un array append-only, `GetPlateHistory()`. Cuatro eventos: nacimiento por fragmentación, asimilación de isla huérfana (ya existía como mecánica, ahora también se registra), muerte, sutura. Sin esto, un `PlateID` reciclado -dos placas distintas ocupando el mismo índice en momentos distintos tras una muerte, aunque en la práctica el índice nunca se recicla porque nunca se libera de verdad- no se podría distinguir de la misma placa continua con solo mirar `PlateIDData`.
+
+### `GetNumLivingPlates()`: el número que de verdad importa
+
+Efecto colateral necesario de que muerte/sutura nunca reduzcan el array: `PlateSystem->GetNumPlates()` (`Plates.Num()`, el tamaño del array) sigue creciendo con cada fragmentación y **nunca baja**, así que un HUD que solo muestre ese número parece contradecir el propio objetivo de muerte/sutura -"placas 9" tras 3 fusiones no es mentira, pero es la mitad de la historia-. `GetNumLivingPlates()` recorre el mundo una vez y cuenta cuántos IDs tienen al menos una celda de verdad ahora. En la corrida de validación: **`GetNumPlates()` decía 9, `GetNumLivingPlates()` decía 6**. El HUD de `TectonicsTestActor` ahora muestra ambos ("Placas: 6 vivas (9 en total)").
+
+### Verificación
+
+Test dedicado `Simu.Tectonics.PlateLifecycle` (Res 128, semilla 4242, 1000 Ma, dinámico): no exige que muerte/sutura ocurran -son emergentes, forzarlas de forma determinista pediría un escenario de juguete que no probaría el código de producción-, solo comprueba los invariantes que tienen que sostenerse siempre: conservación total de celdas, `GetNumLivingPlates() <= GetNumPlates()`, y que toda placa que aparece en el historial como muerta o fusionada tiene de verdad 0 celdas ahora -no solo que el evento se registró, que el mecanismo funcionó-. En la corrida real: 1 nacimiento, 1585 asimilaciones, 0 muertes, 3 suturas, 6 vivas de 9, todas las comprobaciones en verde.
+
+Suite completa `Simu.Tectonics.*`: **22/23 en verde**, incluidos los dos tests nuevos (`BoundaryTypeField`, `PlateLifecycle`). El único rojo (`NoStraightCrustBridges`) es el problema pre-existente ya documentado, sin relación.
+
+### Pendiente
+
+- Muerte no se ha visto disparar todavía en ninguna corrida de validación -el umbral (150 celdas) es una primera calibración por analogía con `MinFragmentCells`, no medida contra una línea base real. Si en una corrida más larga o con más placas nunca dispara, revisar si el umbral es demasiado bajo.
+- El polo de Euler derivado de la ruptura no se ha comparado numéricamente contra el del padre en ninguna corrida -se sabe que compila y que el mecanismo tiene sentido geométrico, pero no hay una medida de "cuánto difiere" en la práctica.
+- Fricción/esfuerzo/sismicidad de fallas transformantes (F1D) y campo de esfuerzo del manto de gran escala (F1F, R2.18) quedan fuera deliberadamente: física nueva y autocontenida, cada una merece su propia sesión.

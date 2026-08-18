@@ -46,7 +46,15 @@ struct FTectonicFaceTextureData
     // tanto no tienen colision ni rift que las resuelva. Es la senal para
     // StuckCellsNearEulerPole y para ver en el visor si el residuo forma un patron
     // reconocible (estrias a lo largo de una frontera que desliza).
-    
+
+    // ROADMAP.md F1D (18-08-2026): regimen de frontera de la celda, tal como lo clasifico
+    // la ULTIMA adveccion -no recalculado aqui, es un espejo de la misma clasificacion por
+    // segmento que ya decide orogenia/acrecion/rift en AdvectPlateField (R2.13/FASE 2).
+    // 0 = no es frontera este paso, 1 = convergente, 2 = divergente, 3 = transformante.
+    // Se re-pone a 0 al empezar cada adveccion y solo se escribe donde hay segmento -asi
+    // que una celda que dejo de ser frontera no arrastra una clasificacion vieja.
+    TArray<uint8> BoundaryTypeData;
+
     bool bIsValid = false;
 };
 
@@ -611,6 +619,55 @@ struct CUBESPHERE_API FBoundarySegment
     float AverageAgePlateB = 0.0f;
 };
 
+/** ROADMAP.md F1E: un evento en la vida de una placa, para llevar historial. */
+UENUM(BlueprintType)
+enum class EPlateLifecycleEvent : uint8
+{
+    /** Nace por fragmentacion: otra placa avanzo por en medio y la partio en componentes
+     * disjuntas; la mayor conserva el ID del padre, esta nace nueva. */
+    BornFromFragmentation,
+    /** Un trozo por debajo del umbral de placa nueva, rodeado por una sola vecina, se le
+     * asigna a esa vecina sin crear placa (F1E Fase A.1, ya existia, ahora se registra). */
+    AssimilatedOrphanIsland,
+    /** Area total por debajo del umbral de placa viva: se disuelve entera en sus vecinas,
+     * componente a componente, cada uno a quien mas le rodee. */
+    Died,
+    /** Sin movimiento relativo con otra placa durante Age >= umbral de sutura: se fusiona
+     * con ella -RelatedPlateID es quien la absorbe-. */
+    SuturedInto,
+};
+
+/**
+ * ROADMAP.md F1E: registro de un evento de vida de placa, para reconstruir quien nacio de
+ * quien y cuando murio -sin esto, un ID de placa reciclado (dos placas distintas ocupando
+ * el mismo indice en momentos distintos, tras una muerte) no se puede distinguir de la
+ * misma placa continua con solo mirar PlateID.
+ */
+USTRUCT(BlueprintType)
+struct CUBESPHERE_API FPlateLifecycleRecord
+{
+    GENERATED_BODY()
+
+    UPROPERTY(BlueprintReadOnly)
+    EPlateLifecycleEvent Event = EPlateLifecycleEvent::BornFromFragmentation;
+
+    /** La placa protagonista: la que nace, la que muere, o la que desaparece por sutura. */
+    UPROPERTY(BlueprintReadOnly)
+    int32 PlateID = INDEX_NONE;
+
+    /** Segun el evento: de que placa nacio (BornFromFragmentation), quien la asimilo/
+     * hereda su territorio (AssimilatedOrphanIsland/Died), o en quien queda fusionada
+     * (SuturedInto). INDEX_NONE si no aplica. */
+    UPROPERTY(BlueprintReadOnly)
+    int32 RelatedPlateID = INDEX_NONE;
+
+    UPROPERTY(BlueprintReadOnly)
+    float SimTime = 0.0f;
+
+    UPROPERTY(BlueprintReadOnly)
+    int32 CellCount = 0;
+};
+
 /**
  * URasterizedTectonics
  *  
@@ -695,6 +752,22 @@ public:
     /** R2.12: los segmentos de frontera activos ahora mismo, con su ID persistente. */
     UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics")
     const TArray<FBoundarySegment>& GetBoundarySegments() const { return BoundarySegments; }
+
+    /** ROADMAP.md F1E: historial completo de nacimiento/asimilacion/muerte/sutura. */
+    UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics")
+    TArray<FPlateLifecycleRecord> GetPlateHistory() const { return PlateHistory; }
+
+    /**
+     * ROADMAP.md F1E: cuantas placas tienen AL MENOS una celda ahora mismo. Distinto de
+     * PlateSystem->GetNumPlates() (Plates.Num(), el tamaño del array) -muerte y sutura
+     * nunca reducen el array, porque el PlateID es el indice y borrar en medio correria
+     * todos los indices posteriores, corrompiendo cada celda que los referencia-. Una placa
+     * muerta o absorbida por sutura sigue contando en GetNumPlates() para siempre, con 0
+     * celdas. Este es el numero que de verdad importa para saber si el planeta tiene 8
+     * placas o 17 "placas" de las que la mitad son fantasmas.
+     */
+    UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics")
+    int32 GetNumLivingPlates() const;
 
     /**
      * F1F, FASE A (17-08-2026): SOLO DIAGNOSTICO. Calcula, para cada placa, el par de
@@ -858,6 +931,15 @@ public:
     /** Tipo de corteza: 0 = oceÃ¡nica, 1 = continental. */
     UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics")
     int32 GetCrustTypeAt(ECSCubeFace Face, int32 X, int32 Y) const;
+
+    /**
+     * ROADMAP.md F1D: regimen de frontera de la celda tal como lo clasifico la ultima
+     * adveccion. 0 = no es frontera este paso, 1 = convergente, 2 = divergente,
+     * 3 = transformante. Espejo de BoundaryTypeData, misma clasificacion que ya decide
+     * orogenia/acrecion/rift en AdvectPlateField -no recalcula nada nuevo.
+     */
+    UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics")
+    int32 GetBoundaryTypeAt(ECSCubeFace Face, int32 X, int32 Y) const;
 
     /**
      * DECISIÃ“N (ROADMAP.md M2, 11-08-2026): SyncFromGPU/SyncToGPU y las texturas GPU
@@ -1095,6 +1177,41 @@ protected:
      */
     TArray<TArray<uint8>> PlateTerritory;
 
+    /** ROADMAP.md F1E: historial de nacimiento/asimilacion/muerte/sutura. Append-only. */
+    TArray<FPlateLifecycleRecord> PlateHistory;
+
+    // ============================================================
+    // ROADMAP.md F1E: MUERTE Y SUTURA -umbrales, sin un valor "correcto" universal, misma
+    // filosofia que MinFragmentCells (calibrados por orden de magnitud, no medidos contra
+    // una linea base todavia, primera pasada abierta a ajuste).
+    // ============================================================
+
+    /**
+     * Celdas totales (sumando TODOS los componentes de la placa, no solo los que
+     * fragmentan) por debajo de las cuales una placa se considera funcionalmente muerta y
+     * se disuelve entera en sus vecinas. Un orden de magnitud por debajo de
+     * MinFragmentCells (800): una placa de menos de esto ya no aporta nada distinguible al
+     * mapa de IDs, es ruido con nombre propio.
+     */
+    static constexpr int32 MinPlateAreaCells = 150;
+
+    /**
+     * Edad minima (Ma) que un segmento de frontera debe llevar existiendo de forma
+     * continuada, con movimiento relativo casi nulo, antes de considerar la sutura. Del
+     * orden de la duracion de una fragmentacion tipica en las corridas medidas esta sesion
+     * (varios cientos de Ma) para no fusionar algo que solo esta de paso por una
+     * coincidencia transitoria de velocidades.
+     */
+    static constexpr float SutureAgeThresholdMa = 300.0f;
+
+    /**
+     * Fraccion de MaxAngularSpeed por debajo de la cual la convergencia y el deslizamiento
+     * tangencial de un segmento cuentan como "sin movimiento relativo". Mas estricto que el
+     * umbral de rift (0.10, ver AdvectPlateField) porque sutura necesita quietud de verdad,
+     * no solo "no diverge claramente".
+     */
+    static constexpr float SutureVelocityFraction = 0.02f;
+
 public:
     // ============================================================
     // MODO DEPURACION POR CAPAS (17-08-2026)
@@ -1277,8 +1394,28 @@ private:
      */
     void HandlePlateFragmentation();
 
+    /**
+     * ROADMAP.md F1E, muerte: si el area TOTAL de una placa (sumando todos sus componentes,
+     * no solo los que fragmentan) cae por debajo de MinPlateAreaCells, se disuelve entera en
+     * sus vecinas -cada componente, incluido el que normalmente conservaria el ID, se asigna
+     * a quien mas le rodee-. Vive dentro de HandlePlateFragmentation(): comparte el mismo
+     * flood-fill de componentes conexas, no tiene sentido recorrer el planeta dos veces.
+     *
+     * Sutura: la reduccion opuesta, ver HandlePlateSuture() -placas completas que se
+     * fusionan por falta de movimiento relativo, no por quedarse sin territorio.
+     */
+    void HandlePlateSuture();
+
+    /** Registra un evento en PlateHistory con el tiempo simulado actual. */
+    void LogPlateLifecycleEvent(EPlateLifecycleEvent Event, int32 PlateID, int32 RelatedPlateID, int32 CellCount);
+
     /** Crece PlateTerritory/PlateMaterial/PlateAccumRotation hasta cubrir PlateIndex. */
     void EnsurePlateFrameCapacity(int32 PlateIndex);
+
+    /** Vacia el marco de material/territorio de una placa muerta o fusionada -sin esto, el
+     * marco queda con datos rancios que nadie deberia leer pero que siguen ocupando
+     * memoria y podrian confundir un diagnostico futuro. */
+    void ClearPlateFrame(int32 PlateIndex);
 
     /**
      * Devuelve a los marcos de placa lo que la fisica ha cambiado sobre el mundo.

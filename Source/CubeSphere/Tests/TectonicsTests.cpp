@@ -3397,3 +3397,187 @@ bool FPlateShapeOrganicTest::RunTest(const FString& Parameters)
 
     return true;
 }
+
+// ------------------------------------------------------------
+// ROADMAP.md F1D: EL CAMPO "TIPO DE FRONTERA" REFLEJA LA MISMA CLASIFICACION QUE YA USA
+// LA FISICA.
+//
+// No recalcula nada nuevo -BoundaryTypeData es un espejo de la misma clasificacion por
+// segmento (convergente/divergente/transformante) que AdvectPlateField ya usa para decidir
+// orogenia/acrecion/rift-, asi que esto no prueba la fisica, prueba que el espejo no esta
+// roto: que existan celdas de los tres tipos, y que el interior (0) siga siendo la inmensa
+// mayoria del planeta -las fronteras son una franja fina, no la mitad del mapa-.
+// ------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBoundaryTypeFieldTest,
+    "Simu.Tectonics.BoundaryTypeField",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FBoundaryTypeFieldTest::RunTest(const FString& Parameters)
+{
+    const int32 Res = 64;
+
+    UCubeSphereGrid* Grid = nullptr;
+    UTectonicPlateSystem* System = nullptr;
+    URasterizedTectonics* Raster = nullptr;
+    if (!TestTrue(TEXT("Fixture montado"), BuildF1Fixture(Res, Res, 8, 4242, Grid, System, Raster)))
+    {
+        return false;
+    }
+
+    FPlateMovementParams Params;
+    Params.DeltaTime = 1.0f;
+    Params.TimeScale = 5.0f;
+    for (int32 i = 0; i < 100; ++i)
+    {
+        System->Step(Params.DeltaTime * Params.TimeScale);
+        Raster->Step(Params);
+    }
+
+    int32 CountByType[4] = { 0, 0, 0, 0 };
+    for (int32 F = 0; F < 6; ++F)
+    {
+        const ECSCubeFace Face = static_cast<ECSCubeFace>(F);
+        for (int32 Y = 0; Y < Res; ++Y)
+        {
+            for (int32 X = 0; X < Res; ++X)
+            {
+                const int32 Type = Raster->GetBoundaryTypeAt(Face, X, Y);
+                if (Type >= 0 && Type < 4) { ++CountByType[Type]; }
+            }
+        }
+    }
+
+    const int32 Total = 6 * Res * Res;
+    const int32 BoundaryTotal = CountByType[1] + CountByType[2] + CountByType[3];
+
+    AddInfo(FString::Printf(
+        TEXT("interior %d | convergente %d | divergente %d | transformante %d (de %d celdas)"),
+        CountByType[0], CountByType[1], CountByType[2], CountByType[3], Total));
+
+    TestTrue(TEXT("Hay celdas de frontera clasificadas (convergente+divergente+transformante > 0)"),
+        BoundaryTotal > 0);
+    TestTrue(FString::Printf(TEXT("El interior sigue siendo la inmensa mayoria del planeta (%d de %d)"),
+        CountByType[0], Total), CountByType[0] > BoundaryTotal);
+
+    return true;
+}
+
+// ------------------------------------------------------------
+// ROADMAP.md F1E: CICLO DE VIDA COMPLETO -NACIMIENTO, ASIMILACION, MUERTE Y SUTURA- NO
+// ROMPE LA CONSERVACION DE CELDAS, Y LOS MECANISMOS DE VERDAD HACEN LO QUE DICEN.
+//
+// Muerte y sutura son eventos EMERGENTES -dependen de que la dinamica organica de una
+// corrida larga produzca una placa casi vacia o una frontera inmovil durante cientos de
+// Ma-, no algo que se pueda forzar de forma determinista sin construir un escenario de
+// juguete que no prueba el codigo de produccion. Por eso este test no exige que ocurran
+// -solo los registra si ocurren, con AddInfo, para verlos en el log- y en su lugar
+// comprueba los INVARIANTES que tienen que sostenerse SIEMPRE, con o sin eventos:
+// conservacion de celdas, y que si un evento de muerte/sutura quedo registrado, la placa
+// que protagoniza realmente se quedo sin celdas -no solo que el log lo dice-.
+// ------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPlateLifecycleTest,
+    "Simu.Tectonics.PlateLifecycle",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FPlateLifecycleTest::RunTest(const FString& Parameters)
+{
+    const int32 Res = 128;
+
+    UCubeSphereGrid* Grid = nullptr;
+    UTectonicPlateSystem* System = nullptr;
+    URasterizedTectonics* Raster = nullptr;
+    if (!TestTrue(TEXT("Fixture montado"), BuildF1Fixture(Res, Res, 8, 4242, Grid, System, Raster)))
+    {
+        return false;
+    }
+    Raster->SetUseDynamicKinematics(true);
+
+    FPlateMovementParams Params;
+    Params.DeltaTime = 0.25f;
+    Params.TimeScale = 1.0f;
+
+    const int32 Steps = 4000; // 1000 Ma, mismo regimen que F1EF1FLongRun -donde ya se vio
+                              // disparar sutura y fragmentacion en la misma corrida.
+    for (int32 i = 0; i < Steps; ++i)
+    {
+        System->Step(Params.DeltaTime);
+        Raster->Step(Params);
+    }
+
+    // CONSERVACION: toda celda del planeta sigue teniendo una placa valida, sin importar
+    // cuantas veces haya nacido, muerto o se haya fusionado una placa entera por el camino.
+    auto CountCellsOwnedBy = [Raster, Res](int32 PlateID) -> int32
+    {
+        int32 N = 0;
+        for (int32 F = 0; F < 6; ++F)
+        {
+            const ECSCubeFace Face = static_cast<ECSCubeFace>(F);
+            for (int32 Y = 0; Y < Res; ++Y)
+            {
+                for (int32 X = 0; X < Res; ++X)
+                {
+                    if (Raster->GetPlateIDAt(Face, X, Y) == PlateID) { ++N; }
+                }
+            }
+        }
+        return N;
+    };
+
+    int32 TotalCells = 0;
+    for (int32 F = 0; F < 6; ++F)
+    {
+        const ECSCubeFace Face = static_cast<ECSCubeFace>(F);
+        for (int32 Y = 0; Y < Res; ++Y)
+        {
+            for (int32 X = 0; X < Res; ++X)
+            {
+                if (Raster->GetPlateIDAt(Face, X, Y) >= 0) { ++TotalCells; }
+            }
+        }
+    }
+    TestEqual(TEXT("Todas las celdas siguen teniendo placa tras nacimientos/muertes/suturas"),
+        TotalCells, 6 * Res * Res);
+
+    const int32 NumLiving = Raster->GetNumLivingPlates();
+    const int32 NumTotal = System->GetNumPlates();
+    TestTrue(FString::Printf(TEXT("Placas vivas (%d) no puede superar el tamaño del array (%d)"),
+        NumLiving, NumTotal), NumLiving <= NumTotal);
+
+    const TArray<FPlateLifecycleRecord> History = Raster->GetPlateHistory();
+    int32 Births = 0, Assimilations = 0, Deaths = 0, Sutures = 0;
+    for (const FPlateLifecycleRecord& Rec : History)
+    {
+        switch (Rec.Event)
+        {
+        case EPlateLifecycleEvent::BornFromFragmentation:    ++Births; break;
+        case EPlateLifecycleEvent::AssimilatedOrphanIsland:  ++Assimilations; break;
+        case EPlateLifecycleEvent::Died:                     ++Deaths; break;
+        case EPlateLifecycleEvent::SuturedInto:              ++Sutures; break;
+        }
+    }
+
+    AddInfo(FString::Printf(
+        TEXT("Historial: %d nacimientos, %d asimilaciones, %d muertes, %d suturas | %d vivas de %d"),
+        Births, Assimilations, Deaths, Sutures, NumLiving, NumTotal));
+
+    // No basta con que el evento se registrara: la placa protagonista de una muerte o
+    // sutura tiene que estar de verdad sin celdas ahora -comprueba el MECANISMO, no el log.
+    int32 Checked = 0;
+    for (const FPlateLifecycleRecord& Rec : History)
+    {
+        if (Rec.Event != EPlateLifecycleEvent::Died && Rec.Event != EPlateLifecycleEvent::SuturedInto)
+        {
+            continue;
+        }
+        ++Checked;
+        TestEqual(FString::Printf(TEXT("La placa %d (muerta/fusionada en t=%.0f Ma) no tiene celdas"),
+            Rec.PlateID, Rec.SimTime), CountCellsOwnedBy(Rec.PlateID), 0);
+    }
+
+    if (Checked == 0)
+    {
+        AddInfo(TEXT("Ni muerte ni sutura se dispararon en esta corrida -emergente, no garantizado; ver F1EF1FLongRun donde si se ha visto disparar sutura."));
+    }
+
+    return true;
+}

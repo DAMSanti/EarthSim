@@ -994,6 +994,12 @@ void ATectonicsTestActor::RefreshCategoricalFieldCaches()
             CrustTypeFieldCache[FaceIdx][i] = static_cast<float>(Face->CrustTypeData[i]);
         }
 
+        BoundaryTypeFieldCache[FaceIdx].SetNumUninitialized(Face->BoundaryTypeData.Num());
+        for (int32 i = 0; i < Face->BoundaryTypeData.Num(); ++i)
+        {
+            BoundaryTypeFieldCache[FaceIdx][i] = static_cast<float>(Face->BoundaryTypeData[i]);
+        }
+
         // Grosor en km, que es la unidad en la que se piensa la corteza (35 km, 70 km),
         // no en metros.
         CrustThicknessFieldCache[FaceIdx].SetNumUninitialized(Face->CrustThicknessData.Num());
@@ -1106,6 +1112,26 @@ void ATectonicsTestActor::RegisterSimulationFields()
         {
             const int32 Idx = static_cast<int32>(Face);
             return (Idx >= 0 && Idx < 6) ? &Self->CrustTypeFieldCache[Idx] : nullptr;
+        };
+        FieldRegistry->RegisterField(Field);
+    }
+
+    // --- Tipo de frontera (ROADMAP.md F1D) --------------------------------------
+    // 0=interior (no es frontera este paso), 1=convergente, 2=divergente,
+    // 3=transformante -misma clasificacion por segmento que ya decide orogenia/acrecion/
+    // rift en AdvectPlateField, solo expuesta al visor.
+    {
+        FPlanetScalarField Field;
+        Field.Id = TEXT("BoundaryType");
+        Field.Label = TEXT("Tipo de frontera (0=interior, 1=convergente, 2=divergente, 3=transformante)");
+        Field.Palette = EPlanetFieldPalette::Categorical;
+        Field.Resolution = Res;
+        Field.bAutoRange = false;
+        ATectonicsTestActor* Self = this;
+        Field.GetFaceData = [Self](ECSCubeFace Face) -> const TArray<float>*
+        {
+            const int32 Idx = static_cast<int32>(Face);
+            return (Idx >= 0 && Idx < 6) ? &Self->BoundaryTypeFieldCache[Idx] : nullptr;
         };
         FieldRegistry->RegisterField(Field);
     }
@@ -1369,7 +1395,7 @@ void ATectonicsTestActor::DrawScreenDebugInfo()
         TEXT("=== TECTÓNICA ===\n")
         TEXT("Tiempo: %.2f Ma | Pasos: %d\n")
         TEXT("Estado: %s | Escala: %.1fx\n")
-        TEXT("Placas: %d | Grid: %d\n")
+        TEXT("Placas: %d vivas (%d en total) | Grid: %d\n")
         TEXT("DIAG tierra: emergida %.1f%% | continental sumergida %.1f%% | oceanica %.1f%%\n")
         TEXT("R2.12 segmentos: %d activos | edad media %.2f Ma | celdas %d\n")
         TEXT("Corteza: +%d creada / -%d destruida (%d advecciones)\n")
@@ -1383,6 +1409,12 @@ void ATectonicsTestActor::DrawScreenDebugInfo()
         SimulationSteps,
         bSimulationRunning ? TEXT("EJECUTANDO") : TEXT("PAUSADO"),
         TimeScale,
+        // ROADMAP.md F1E: "vivas" cuenta placas con celdas de verdad ahora mismo; "en total"
+        // es el tamaño del array de PlateSystem, que muerte/sutura nunca reducen -el PlateID
+        // es el indice, borrar en medio corromperia cada celda que apunta a un indice
+        // posterior-. Sin este desglose, una placa muerta o fusionada parece seguir viva
+        // para siempre.
+        RasterizedTectonics ? RasterizedTectonics->GetNumLivingPlates() : 0,
         PlateSystem ? PlateSystem->GetNumPlates() : 0,
         GridResolution,
         EmergedContinentalFrac * 100.0f,
