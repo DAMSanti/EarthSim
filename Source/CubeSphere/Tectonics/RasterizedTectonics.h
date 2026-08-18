@@ -55,6 +55,13 @@ struct FTectonicFaceTextureData
     // que una celda que dejo de ser frontera no arrastra una clasificacion vieja.
     TArray<uint8> BoundaryTypeData;
 
+    // ROADMAP.md F1D, sismicidad (18-08-2026): espejo por celda de
+    // FBoundarySegment::AccumulatedStrain -en METROS, no en radianes, para que el visor lo
+    // muestre en una unidad que se pueda leer directamente-. Se escribe en
+    // ExtractAndTrackBoundarySegments(), el mismo punto que ya estampa el SegmentID por
+    // celda. 0 fuera de una falla transformante con esfuerzo acumulado.
+    TArray<float> AccumulatedStrainData;
+
     bool bIsValid = false;
 };
 
@@ -617,6 +624,58 @@ struct CUBESPHERE_API FBoundarySegment
     float AverageAgePlateA = 0.0f;
     UPROPERTY(BlueprintReadOnly)
     float AverageAgePlateB = 0.0f;
+
+    /**
+     * ROADMAP.md F1D, sismicidad (18-08-2026): desplazamiento acumulado sin liberar, en
+     * RADIANES -misma unidad natural que AngularVelocity/AverageTangential, se convierte a
+     * metros multiplicando por el radio del planeta solo al usarlo (magnitud, campo del
+     * visor)-. Solo se acumula mientras el segmento es de verdad una falla transformante
+     * (deslizamiento tangencial domina sobre convergencia/divergencia, mismo criterio que
+     * clasifica BoundaryTypeData); en otro regimen se congela, no se resetea -un segmento
+     * que pasa un paso por convergente no ha liberado nada de verdad-. Una falla real no
+     * desliza continuamente: se atasca por friccion, acumula deformacion elastica, y la
+     * libera de golpe -el terremoto-. Esto es esa acumulacion.
+     */
+    UPROPERTY(BlueprintReadOnly)
+    float AccumulatedStrain = 0.0f;
+};
+
+/**
+ * ROADMAP.md F1D, sismicidad (18-08-2026): un terremoto -liberacion brusca del esfuerzo
+ * acumulado en un segmento de falla transformante-. Magnitud por la formula de
+ * Hanks-Kanamori (Mw = (2/3)*log10(M0) - 6.07, M0 en N*m), con el area de ruptura
+ * aproximada como longitud del segmento x profundidad sismogenica asumida -una
+ * simplificacion deliberada: no hay geometria de falla en 3D en esta simulacion, la
+ * longitud del segmento en el raster es lo mas parecido a un area de ruptura que se puede
+ * medir sin inventar mas fisica de la que hay-.
+ */
+USTRUCT(BlueprintType)
+struct CUBESPHERE_API FSeismicEvent
+{
+    GENERATED_BODY()
+
+    UPROPERTY(BlueprintReadOnly)
+    int32 PlateA = INDEX_NONE;
+    UPROPERTY(BlueprintReadOnly)
+    int32 PlateB = INDEX_NONE;
+
+    /** Magnitud de momento (Mw), formula de Hanks-Kanamori. */
+    UPROPERTY(BlueprintReadOnly)
+    float Magnitude = 0.0f;
+
+    /** Desplazamiento liberado, en metros. */
+    UPROPERTY(BlueprintReadOnly)
+    float SlipMetres = 0.0f;
+
+    UPROPERTY(BlueprintReadOnly)
+    float SimTime = 0.0f;
+
+    /** Direccion mundial del centro del segmento en el instante de la ruptura. */
+    UPROPERTY(BlueprintReadOnly)
+    FVector Position = FVector::ZeroVector;
+
+    UPROPERTY(BlueprintReadOnly)
+    int32 CellCount = 0;
 };
 
 /** ROADMAP.md F1E: un evento en la vida de una placa, para llevar historial. */
@@ -768,6 +827,15 @@ public:
      */
     UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics")
     int32 GetNumLivingPlates() const;
+
+    /** ROADMAP.md F1D, sismicidad: umbral de deslizamiento (m) que dispara una liberacion
+     * -expuesto para que los tests puedan comprobar contra el mismo numero, sin
+     * duplicarlo a mano. */
+    static float GetSeismicSlipThresholdMetres() { return SeismicSlipThresholdMetres; }
+
+    /** ROADMAP.md F1D, sismicidad: tope de terremotos liberados por segmento y por
+     * adveccion -expuesto para que los tests comprueben el mismo numero sin duplicarlo. */
+    static int32 GetMaxSeismicEventsPerSegmentPerAdvection() { return MaxSeismicEventsPerSegmentPerAdvection; }
 
     /**
      * F1F, FASE A (17-08-2026): SOLO DIAGNOSTICO. Calcula, para cada placa, el par de
@@ -940,6 +1008,19 @@ public:
      */
     UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics")
     int32 GetBoundaryTypeAt(ECSCubeFace Face, int32 X, int32 Y) const;
+
+    /**
+     * ROADMAP.md F1D, sismicidad: esfuerzo acumulado sin liberar en esta celda de falla
+     * transformante, en METROS de deslizamiento pendiente. 0 fuera de una falla o en una
+     * que acaba de liberarlo en un terremoto.
+     */
+    UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics")
+    float GetAccumulatedStrainAt(ECSCubeFace Face, int32 X, int32 Y) const;
+
+    /** ROADMAP.md F1D, sismicidad: historial completo de terremotos -liberaciones brusca
+     * de esfuerzo acumulado en una falla transformante-. */
+    UFUNCTION(BlueprintCallable, Category = "Rasterized Tectonics")
+    TArray<FSeismicEvent> GetSeismicHistory() const { return SeismicHistory; }
 
     /**
      * DECISIÃ“N (ROADMAP.md M2, 11-08-2026): SyncFromGPU/SyncToGPU y las texturas GPU
@@ -1211,6 +1292,58 @@ protected:
      * no solo "no diverge claramente".
      */
     static constexpr float SutureVelocityFraction = 0.02f;
+
+    /** ROADMAP.md F1D, sismicidad: historial de terremotos. Append-only. */
+    TArray<FSeismicEvent> SeismicHistory;
+
+    // ============================================================
+    // ROADMAP.md F1D, SISMICIDAD (18-08-2026): umbrales y constantes fisicas.
+    //
+    // AVISO DE ESCALA, honesto en vez de fingir precision que no hay: esta simulacion
+    // resuelve el tiempo en fracciones de Ma por adveccion -millones de años-, mientras que
+    // un terremoto de verdad dura segundos y su ciclo de recurrencia son decadas o siglos.
+    // Un solo "evento sismico" registrado aqui no es un terremoto individual real: es la
+    // liberacion agregada de esfuerzo de una falla transformante durante TODA una
+    // adveccion, que en la escala de tiempo real habria sido una secuencia de muchos
+    // terremotos. La magnitud de Hanks-Kanamori sigue siendo la formula correcta para
+    // convertir momento sismico en un numero comparable con la escala real -pero hay que
+    // leer cada evento como "esto es lo que costaria en energia", no como "esto paso en un
+    // instante".
+    // ============================================================
+
+    /**
+     * Desplazamiento acumulado (m) que dispara una liberacion. Del orden del deslizamiento
+     * caracteristico de un terremoto real grande (M7-8), para que la formula de magnitud
+     * de mas abajo caiga en un rango con el que comparar de verdad -no una eleccion
+     * arbitraria, pero sin linea base medida todavia en esta simulacion concreta.
+     */
+    static constexpr float SeismicSlipThresholdMetres = 3.0f;
+
+    /** Profundidad sismogenica asumida (m) -~15 km, tipico de corteza continental- para
+     * aproximar el AREA de ruptura como longitud del segmento x esta profundidad. Sin
+     * geometria de falla en 3D en esta simulacion, es la mejor aproximacion disponible sin
+     * inventar mas fisica de la que hay. */
+    static constexpr float SeismogenicDepthMetres = 15000.0f;
+
+    /** Modulo de rigidez de la corteza (Pa) -~30 GPa, valor tipico- para el momento
+     * sismico M0 = mu * Area * Deslizamiento. */
+    static constexpr float CrustalShearModulusPa = 3.0e10f;
+
+    /**
+     * F1D, sismicidad (18-08-2026, segunda vuelta): tope de terremotos registrados por
+     * segmento y por adveccion. A la granularidad de esta simulacion (pasos de Ma, con
+     * velocidades de 1-15 cm/año) una sola adveccion puede acumular cientos de km de
+     * desplazamiento tangencial -muy por encima de los 3 m que libera cada terremoto-,
+     * asi que "vaciar el todo el acumulado siempre" exigiria decenas de miles de eventos
+     * por paso. Eso no es un problema de rendimiento nada mas: fisicamente, la corteza
+     * real tampoco almacena deformacion elastica sin limite -mas alla de un desliz
+     * moderado, el resto del movimiento de placa se acomoda por reptacion asismica /
+     * deformacion distribuida que esta simulacion no resuelve a esta resolucion. Por eso,
+     * al llegar a este tope, el resto de la deformacion de ese paso se DESCARTA -se trata
+     * como reptacion asismica, no como un atraso que se acumula para el paso siguiente-.
+     * Esto es lo que garantiza, por construccion y no por ajuste de umbral, que
+     * AccumulatedStrain nunca crece sin limite. */
+    static constexpr int32 MaxSeismicEventsPerSegmentPerAdvection = 20;
 
 public:
     // ============================================================

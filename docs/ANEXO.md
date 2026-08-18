@@ -990,3 +990,44 @@ Suite completa `Simu.Tectonics.*`: **22/23 en verde**, incluidos los dos tests n
 - Muerte no se ha visto disparar todavía en ninguna corrida de validación -el umbral (150 celdas) es una primera calibración por analogía con `MinFragmentCells`, no medida contra una línea base real. Si en una corrida más larga o con más placas nunca dispara, revisar si el umbral es demasiado bajo.
 - El polo de Euler derivado de la ruptura no se ha comparado numéricamente contra el del padre en ninguna corrida -se sabe que compila y que el mecanismo tiene sentido geométrico, pero no hay una medida de "cuánto difiere" en la práctica.
 - Fricción/esfuerzo/sismicidad de fallas transformantes (F1D) y campo de esfuerzo del manto de gran escala (F1F, R2.18) quedan fuera deliberadamente: física nueva y autocontenida, cada una merece su propia sesión.
+
+## Visor de velocidad: flecha y número por placa (18-08-2026)
+
+Pedido explícito del usuario tras la sesión de F1E: al pulsar V no bastaba con el reporte de texto, había que ver por placa una flecha con dirección y un número con la velocidad. `DrawVelocityDebug()` calcula, por placa, `CentroidDir` (dirección del centroide desde el centro del planeta), `Omega` (vector de velocidad angular a partir de `EulerPole`/`AngularVelocity`) y `VelocityDir = CrossProduct(Omega, CentroidDir)` normalizado -la velocidad lineal de un punto en rotación rígida es siempre perpendicular tanto al eje como al radio-. La rapidez en cm/año usa la misma fórmula que el clamp de cinemática de F1F: `SpeedCmPerYear = |AngularVelocity| * RadiusMetres / 1e4`.
+
+Dos rondas de arreglo visual guiadas por captura de pantalla del usuario:
+- La flecha no se veía -`DrawDebugDirectionalArrow` recibía un `Thickness` fijo de 25 unidades contra un `VisualRadius` de 637.100.000: invisible a esa escala aunque la LONGITUD sí estaba bien escalada. Arreglo: `Thickness = ArrowLength * 0,08f`.
+- Con la línea ya visible, "falta una punta de flecha clara" -el cono nativo no se distinguía a esa escala. Arreglo: añadir una esfera de depuración (`DrawDebugSphere`) en la punta, no depender del cono.
+
+Aceptado por el usuario sin pedir más iteración ("lo dejamos así").
+
+## F1D: sismicidad, fricción y esfuerzo acumulado de verdad (18-08-2026)
+
+### El modelo
+
+`FBoundarySegment::AccumulatedStrain` (radianes) acumula desplazamiento tangencial SOLO cuando el régimen del segmento es transformante (`bTransformDominant`); cualquier otro régimen lo CONGELA -no lo resetea, un paso que clasifica distinto no ha liberado nada de verdad-. Convertido a metros (`* RadiusMetres`) se libera en terremotos de tamaño fijo (`SeismicSlipThresholdMetres = 3 m`, del orden de un M7-8 real) vía la fórmula de momento de Hanks-Kanamori: `Mw = (2/3) log10(M0) - 6,07`, `M0 = μ * Área * Deslizamiento`, con `Área = (CellCount * CellWidthMetres) * SeismogenicDepthMetres` (15 km, profundidad sismogénica típica de corteza continental) y `μ = 3×10¹⁰ Pa` (rigidez típica de la corteza). Cada evento se registra en `SeismicHistory` (`FSeismicEvent`: placas, magnitud, deslizamiento, posición, tiempo) y se resume en el HUD ("Sismos: N totales | último Mw X hace Y Ma").
+
+### Primer bug: liberar todo de golpe da magnitudes imposibles
+
+La primera versión liberaba TODO lo acumulado en un solo evento cuando superaba el umbral, y reseteaba a 0. A la granularidad de esta simulación (pasos de Ma, velocidades típicas de 1-15 cm/año) una sola advección transformante puede acumular fácilmente decenas de km de deslizamiento tangencial -muy por encima del umbral-, así que el "deslizamiento liberado" de un evento salía en decenas de miles de metros, con magnitudes Mw 10-12: más allá de cualquier terremoto real (récord histórico ~Mw 9,5). No era "un evento agregando varios terremotos reales", era simplemente un número mal acotado.
+
+Primer arreglo: en vez de liberar todo de golpe, un bucle que libera EXACTAMENTE `SeismicSlipThresholdMetres` por vuelta, tantas veces como haga falta, acotado con una cota de seguridad de 1000 vueltas "para nunca bloquear el frame". Cada evento queda físicamente acotado y comparable entre sí.
+
+### Segundo bug, medido al re-validar: el atraso crece sin límite
+
+Al re-ejecutar `Simu.Tectonics.TransformFaultSeismicity` tras el primer arreglo, el test falló -no por magnitud, sino por: `'El esfuerzo acumulado no crece sin limite (maximo actual 9997693.0 m)'`. El log mostraba miles de eventos idénticos (`Mw 7,5 entre placas 3 y 6, segmento de 2 celdas`) en el mismo milisegundo.
+
+Causa: la cota de 1000 vueltas nunca se pensó como techo habitual, pero a esta granularidad SÍ se alcanza cada paso en fallas rápidas -una sola advección puede meter cientos de km de deslizamiento tangencial (a 15 cm/año durante 1 Ma, hasta 150 km), y 1000 vueltas de 3 m son solo 3 km liberados-. El resto se quedaba en `AccumulatedStrain` como atraso, y ese atraso crecía paso tras paso hasta casi 10.000.000 m en una corrida de 400 Ma -órdenes de magnitud por encima de lo que la corteza real puede almacenar como deformación elástica antes de fallar.
+
+Arreglo de fondo, no de umbral: se bajó la cota a `MaxSeismicEventsPerSegmentPerAdvection = 20` (pensada para no inundar el log, no para "drenar del todo") y, el cambio que importa, al llegar a esa cota el resto de la deformación de ESE PASO se DESCARTA -se trata como reptación asísmica / deformación distribuida no resuelta a esta resolución- en vez de guardarse para el paso siguiente. Con eso, `AccumulatedStrain` queda acotado por construcción (nunca por encima de ~3 m entre liberaciones) sin importar cuánto entre en un paso dado, así que el invariante del test se cumple estructuralmente y no por ajustar un número.
+
+### Verificación
+
+`Simu.Tectonics.TransformFaultSeismicity` (Res 96, semilla 4242, 400 Ma): verde. 105.440 eventos registrados en la corrida (frente a los 7,18 millones antes del arreglo de la cota, y a la ausencia de límite superior en `AccumulatedStrain` que causaba el fallo). Todas las magnitudes finitas y en rango (-2, 10,5), todo deslizamiento igual al umbral, máximo de esfuerzo acumulado en cualquier celda del planeta muy por debajo del límite de cordura del test.
+
+Suite completa `Simu.Tectonics.*`: **23/24 en verde**. El único rojo (`NoStraightCrustBridges`) sigue siendo el problema pre-existente ya documentado, sin relación.
+
+### Pendiente
+
+- Los umbrales (`SeismicSlipThresholdMetres`, `MaxSeismicEventsPerSegmentPerAdvection`, profundidad sismogénica, módulo de rigidez) son una primera calibración razonada, no medida contra una línea base real -mismo estilo de aviso que el resto de constantes de F1E.
+- El descarte por reptación asísmica al llegar a la cota es una simplificación de modelado defendible pero no calibrada: no hay medida de qué fracción del movimiento de placa real se acomoda así frente a sísmicamente.

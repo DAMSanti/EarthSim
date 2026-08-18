@@ -1000,6 +1000,8 @@ void ATectonicsTestActor::RefreshCategoricalFieldCaches()
             BoundaryTypeFieldCache[FaceIdx][i] = static_cast<float>(Face->BoundaryTypeData[i]);
         }
 
+        AccumulatedStrainFieldCache[FaceIdx] = Face->AccumulatedStrainData;
+
         // Grosor en km, que es la unidad en la que se piensa la corteza (35 km, 70 km),
         // no en metros.
         CrustThicknessFieldCache[FaceIdx].SetNumUninitialized(Face->CrustThicknessData.Num());
@@ -1132,6 +1134,28 @@ void ATectonicsTestActor::RegisterSimulationFields()
         {
             const int32 Idx = static_cast<int32>(Face);
             return (Idx >= 0 && Idx < 6) ? &Self->BoundaryTypeFieldCache[Idx] : nullptr;
+        };
+        FieldRegistry->RegisterField(Field);
+    }
+
+    // --- Esfuerzo acumulado (ROADMAP.md F1D, sismicidad) ------------------------------
+    // Metros de deslizamiento pendiente de liberar en una falla transformante -sube
+    // mientras la friccion la mantiene atascada, cae a 0 de golpe en cuanto libera un
+    // terremoto (ver ExtractAndTrackBoundarySegments). Rango automatico: la escala varia
+    // mucho segun cuanto tiempo lleve atascada una falla concreta.
+    {
+        FPlanetScalarField Field;
+        Field.Id = TEXT("AccumulatedStrain");
+        Field.Label = TEXT("Esfuerzo acumulado (fallas transformantes)");
+        Field.Unit = TEXT("m");
+        Field.Palette = EPlanetFieldPalette::Sequential;
+        Field.Resolution = Res;
+        Field.bAutoRange = true;
+        ATectonicsTestActor* Self = this;
+        Field.GetFaceData = [Self](ECSCubeFace Face) -> const TArray<float>*
+        {
+            const int32 Idx = static_cast<int32>(Face);
+            return (Idx >= 0 && Idx < 6) ? &Self->AccumulatedStrainFieldCache[Idx] : nullptr;
         };
         FieldRegistry->RegisterField(Field);
     }
@@ -1301,7 +1325,6 @@ void ATectonicsTestActor::RegisterSimulationFields()
 
 void ATectonicsTestActor::DrawVelocityDebug()
 {
-    // Simplificado: dibujamos los polos de Euler de cada placa
     if (!PlateSystem)
     {
         return;
@@ -1315,20 +1338,77 @@ void ATectonicsTestActor::DrawVelocityDebug()
 
     FVector ActorLoc = GetActorLocation();
 
+    // v[cm/año] = omega[rad/Ma] * RadiusMetres[m] / 1e4 -misma formula que el clamp fisico
+    // de F1F (UpdatePlateKinematicsFromTorqueBalance, R2.5: 1-15 cm/año), para que el
+    // numero que se ve aqui sea directamente comparable con ese rango documentado.
+    const float RadiusMetres = CubeSphereGrid ? (CubeSphereGrid->GetRadius() / 100.0f) : 6371000.0f;
+
     const TArray<FTectonicPlate>& Plates = PlateSystem->GetAllPlates();
     for (int32 i = 0; i < Plates.Num(); ++i)
     {
         const FTectonicPlate& Plate = Plates[i];
-        
+
         // Dibujar polo de Euler
         FVector PolePos = Plate.EulerPole.GetSafeNormal() * VisualRadius * 1.1f + ActorLoc;
-        
-        DrawDebugSphere(World, PolePos, 500.0f, 8, 
+
+        DrawDebugSphere(World, PolePos, 500.0f, 8,
             GetPlateColor(i).ToFColor(true), false, -1.0f, 0, 3.0f);
-        
+
         // Etiqueta
-        DrawDebugString(World, PolePos, 
+        DrawDebugString(World, PolePos,
             FString::Printf(TEXT("P%d"), i), nullptr, FColor::White, 0.0f, true);
+
+        // ============================================================
+        // FLECHA Y NUMERO DE VELOCIDAD POR PLACA (18-08-2026, pedido explicitamente).
+        //
+        // El polo de arriba muestra el EJE de rotacion, no si la placa se mueve rapido o
+        // lento en un punto concreto -v=ω×r depende de r, cerca del propio polo v es
+        // pequeño aunque ω sea normal-. Esto dibuja la velocidad TANGENCIAL de verdad en
+        // el centroide de la placa: si el numero dice un valor razonable (1-15 cm/año) y
+        // la flecha se ve del tamaño esperado pero el mapa no se mueve visiblemente, el
+        // problema no es la cinematica -es que hay que esperar mas Ma o que el punto que
+        // se estaba mirando estaba cerca del polo de esa placa concreta-.
+        // ============================================================
+        const FVector CentroidDir = Plate.Centroid.GetSafeNormal();
+        if (CentroidDir.IsNearlyZero())
+        {
+            continue; // placa sin territorio (muerta/fusionada tras F1E): sin centroide fiable
+        }
+
+        const FVector Omega = Plate.EulerPole.GetSafeNormal() * Plate.AngularVelocity;
+        const FVector VelocityDir = FVector::CrossProduct(Omega, CentroidDir).GetSafeNormal();
+        const float SpeedCmPerYear = FMath::Abs(Plate.AngularVelocity) * RadiusMetres / 1.0e4f;
+
+        if (VelocityDir.IsNearlyZero())
+        {
+            continue; // velocidad angular nula: nada que dibujar como flecha
+        }
+
+        const FVector ArrowStart = CentroidDir * VisualRadius * 1.02f + ActorLoc;
+        // Longitud de la flecha proporcional a la velocidad, mapeada sobre el rango fisico
+        // documentado (1-15 cm/año) -asi la flecha misma es una segunda lectura de si la
+        // velocidad es alta o baja, no solo el numero.
+        const float ArrowLength = FMath::GetMappedRangeValueClamped(
+            FVector2D(0.0f, 15.0f), FVector2D(VisualRadius * 0.04f, VisualRadius * 0.22f), SpeedCmPerYear);
+        const FVector ArrowEnd = ArrowStart + VelocityDir * ArrowLength;
+
+        // PROBADO Y ARREGLADO (18-08-2026): un grosor fijo (25 unidades) era invisible
+        // -VisualRadius es 637.100.000 (radio real de la Tierra en cm), asi que la flecha
+        // mide decenas de millones de unidades de largo pero el trazo se dibujaba con un
+        // grosor de hormiga. Ligado a ArrowLength, igual que ya estaba el tamaño de punta.
+        const FColor PlateColor = GetPlateColor(i).ToFColor(true);
+        DrawDebugDirectionalArrow(World, ArrowStart, ArrowEnd, ArrowLength * 0.25f,
+            PlateColor, false, -1.0f, 0, ArrowLength * 0.08f);
+
+        // PROBADO Y ARREGLADO (18-08-2026): incluso con el grosor ya arreglado, el cono de
+        // punta de DrawDebugDirectionalArrow se ve como una linea mas, no como una punta
+        // clara -reportado por el usuario ("falta una punta de flecha clara")-. Una esfera
+        // solida en el extremo, mas grande que el propio grosor del trazo, marca la
+        // direccion sin depender de como el motor dibuje el cono nativo.
+        DrawDebugSphere(World, ArrowEnd, ArrowLength * 0.09f, 8, PlateColor, false, -1.0f, 0, 3.0f);
+
+        DrawDebugString(World, ArrowEnd,
+            FString::Printf(TEXT("%.1f cm/año"), SpeedCmPerYear), nullptr, PlateColor, 0.0f, true);
     }
 }
 
@@ -1404,6 +1484,7 @@ void ATectonicsTestActor::DrawScreenDebugInfo()
         TEXT("AUDIT respaldo material: %d de %d (%.2f%%)\n")
         TEXT("AUDIT huecos: %d recuperados por tolerancia | %d CONGELADOS acumulado (trilema) | %d distintas, max %d fallos | %d ESTA adveccion (%d convergen, %d cerca de cero) | %d resueltas por vecino cercano\n")
         TEXT("Drenaje: %d celdas de cauce | %d lagos\n")
+        TEXT("Sismos: %d totales | ultimo Mw %.1f hace %.1f Ma\n")
         TEXT("%s"),
         SimulationTime,
         SimulationSteps,
@@ -1489,6 +1570,20 @@ void ATectonicsTestActor::DrawScreenDebugInfo()
         RasterizedTectonics ? RasterizedTectonics->GetAdvectionStats().LastResolvedByWideSearch : 0,
         Hydrology ? Hydrology->GetStats().ChannelCells : 0,
         Hydrology ? Hydrology->GetStats().SinkCells : 0,
+        // ROADMAP.md F1D, sismicidad: total de terremotos registrados y el mas reciente
+        // -"hace X Ma" en vez del tiempo absoluto, que es lo que de verdad importa para
+        // saber si una falla sigue activa o lleva mucho callada.
+        RasterizedTectonics ? RasterizedTectonics->GetSeismicHistory().Num() : 0,
+        [this]() {
+            if (!RasterizedTectonics) return 0.0f;
+            const TArray<FSeismicEvent>& Events = RasterizedTectonics->GetSeismicHistory();
+            return Events.Num() > 0 ? Events.Last().Magnitude : 0.0f;
+        }(),
+        [this]() {
+            if (!RasterizedTectonics) return 0.0f;
+            const TArray<FSeismicEvent>& Events = RasterizedTectonics->GetSeismicHistory();
+            return Events.Num() > 0 ? (RasterizedTectonics->GetTotalSimulationTime() - Events.Last().SimTime) : 0.0f;
+        }(),
         FieldRegistry ? *FieldRegistry->GetLegendText() : TEXT("(sin visor)")
     );
 

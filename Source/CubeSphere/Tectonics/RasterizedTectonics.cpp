@@ -58,6 +58,7 @@ void URasterizedTectonics::Initialize(UCubeSphereGrid* InGrid, UTectonicPlateSys
         Face.CrustTypeData.SetNumZeroed(PixelsPerFace);
         Face.CrustThicknessData.SetNumZeroed(PixelsPerFace);
         Face.BoundaryTypeData.SetNumZeroed(PixelsPerFace);
+        Face.AccumulatedStrainData.SetNumZeroed(PixelsPerFace);
 
         // Inicializar velocidades a cero
         for (int32 i = 0; i < PixelsPerFace; ++i)
@@ -756,6 +757,16 @@ int32 URasterizedTectonics::GetBoundaryTypeAt(ECSCubeFace Face, int32 X, int32 Y
         return 0;
     }
     return static_cast<int32>(FaceData[FaceIdx].BoundaryTypeData[GetLinearIndex(X, Y)]);
+}
+
+float URasterizedTectonics::GetAccumulatedStrainAt(ECSCubeFace Face, int32 X, int32 Y) const
+{
+    const int32 FaceIdx = static_cast<int32>(Face);
+    if (!bIsInitialized || FaceIdx < 0 || FaceIdx >= 6 || !IsValidCoord(X, Y))
+    {
+        return 0.0f;
+    }
+    return FaceData[FaceIdx].AccumulatedStrainData[GetLinearIndex(X, Y)];
 }
 
 int32 URasterizedTectonics::GetNumLivingPlates() const
@@ -3290,6 +3301,22 @@ void URasterizedTectonics::ExtractAndTrackBoundarySegments(float DeltaTime)
         return;
     }
 
+    // ROADMAP.md F1D, sismicidad: hace falta el radio real para convertir el esfuerzo
+    // acumulado -en radianes, la unidad natural de AverageTangential- a metros de
+    // deslizamiento, y el ancho de celda para aproximar la longitud del segmento.
+    const float RadiusMetres = Grid ? (Grid->GetRadius() / 100.0f) : 6371000.0f;
+    const float CellWidthMetres = (Resolution > 0)
+        ? (PI * 0.5f * RadiusMetres / static_cast<float>(Resolution)) : 1.0f;
+
+    // Se repone a 0 antes de reconstruir: una celda que deja de ser frontera transformante
+    // no debe arrastrar para siempre el ultimo esfuerzo que tuvo -mismo criterio que
+    // BoundaryTypeData en AdvectPlateField.
+    for (int32 F = 0; F < 6; ++F)
+    {
+        FMemory::Memzero(FaceData[F].AccumulatedStrainData.GetData(),
+            FaceData[F].AccumulatedStrainData.Num() * sizeof(float));
+    }
+
     // El resultado del paso anterior es lo unico contra lo que se puede emparejar por
     // solape -las celdas de este paso todavia no existen.
     PrevBoundarySegmentIdPerFace = BoundarySegmentIdPerFace;
@@ -3615,9 +3642,90 @@ void URasterizedTectonics::ExtractAndTrackBoundarySegments(float DeltaTime)
         Seg.CrustTypePlateA = (Comp.CountA > 0 && Comp.OceanicVotesA * 2 >= Comp.CountA) ? 0 : 1;
         Seg.CrustTypePlateB = (Comp.CountB > 0 && Comp.OceanicVotesB * 2 >= Comp.CountB) ? 0 : 1;
 
+        // ROADMAP.md F1D, SISMICIDAD (18-08-2026): mismo criterio que BoundaryTypeData -el
+        // deslizamiento tangencial domina sobre la convergencia/divergencia radial-. Solo
+        // ahi tiene sentido hablar de "falla transformante atascada por friccion"; en
+        // cualquier otro regimen se CONGELA lo que ya llevaba acumulado -no se resetea, un
+        // paso que clasifica distinto no ha liberado nada de verdad-.
+        const bool bTransformDominant = FMath::Abs(Seg.AverageTangential) > FMath::Abs(Seg.AverageConvergence);
+        Seg.AccumulatedStrain = (OldSeg && OldSeg->PlateA == Comp.PlateA && OldSeg->PlateB == Comp.PlateB)
+            ? OldSeg->AccumulatedStrain : 0.0f;
+        if (bTransformDominant)
+        {
+            Seg.AccumulatedStrain += FMath::Abs(Seg.AverageTangential) * DeltaTime;
+        }
+
+        // TERREMOTO: el desplazamiento acumulado -convertido de radianes a metros- supera
+        // el umbral de liberacion. Magnitud de Hanks-Kanamori: Mw = (2/3)*log10(M0) - 6.07,
+        // M0 = mu * Area * Deslizamiento (N*m, SI). Area aproximada como longitud del
+        // segmento (CellCount celdas de ancho de CellWidthMetres cada una) x profundidad
+        // sismogenica asumida -ver el aviso de escala junto a los umbrales en el .h.
+        //
+        // ARREGLADO (18-08-2026, medido y corregido en la misma sesion): la primera version
+        // liberaba TODO lo acumulado de un golpe -si una adveccion entera acumulaba mas de
+        // el umbral, que a las velocidades de esta simulacion (~1-15 cm/año) es facil dentro
+        // de un Δt de Ma, el "deslizamiento liberado" salia en DECENAS DE KILOMETROS, con
+        // magnitudes Mw 10-12 -mas alla de cualquier terremoto real (record historico
+        // ~Mw 9,5)-. Eso no era "un evento agregando varios terremotos reales", era
+        // simplemente un numero mal acotado. Arreglo: liberar en trozos de EXACTAMENTE
+        // SeismicSlipThresholdMetres cada vez, en bucle, tantas veces como haga falta -asi
+        // cada evento registrado tiene un deslizamiento fisicamente acotado y comparable
+        // entre si, y una advencion que acumulo mucho de golpe queda como una SECUENCIA de
+        // varios terremotos de tamaño realista, no uno solo desmesurado.
+        const float RuptureLengthMetres = Seg.CellCount * CellWidthMetres;
+        const float RuptureAreaM2 = RuptureLengthMetres * SeismogenicDepthMetres;
+
+        // ARREGLADO otra vez (18-08-2026, misma sesion): la cota de seguridad de 1000
+        // vueltas nunca se pensaba como techo habitual, pero a esta granularidad SI se
+        // alcanza cada paso en fallas rapidas -una sola adveccion puede meter cientos de
+        // km de deslizamiento tangencial, y 1000 x 3 m son solo 3 km liberados-. El resto
+        // se quedaba en AccumulatedStrain como atraso, y ese atraso crecia sin limite paso
+        // tras paso -medido: hasta 9.997.693 m en una corrida de 400 Ma, disparando el
+        // test que comprueba que el esfuerzo acumulado no crece sin limite-. La cota ahora
+        // es MaxSeismicEventsPerSegmentPerAdvection (mas pequeña, pensada para no inundar
+        // el log) y, critico: lo que sobra al llegar a la cota se DESCARTA -ver el
+        // comentario junto a la constante en el .h- en vez de guardarse para el paso
+        // siguiente. Eso es lo que hace que el acotamiento sea estructural y no dependa de
+        // ajustar el numero correcto de vueltas.
+        int32 SafetyCounter = 0;
+        while (Seg.AccumulatedStrain * RadiusMetres >= SeismicSlipThresholdMetres
+               && SafetyCounter < MaxSeismicEventsPerSegmentPerAdvection)
+        {
+            ++SafetyCounter;
+            const float MomentNm = CrustalShearModulusPa * RuptureAreaM2 * SeismicSlipThresholdMetres;
+            const float Magnitude = (MomentNm > 1.0f)
+                ? (2.0f / 3.0f) * FMath::LogX(10.0f, MomentNm) - 6.07f : 0.0f;
+
+            FSeismicEvent Event;
+            Event.PlateA = Seg.PlateA;
+            Event.PlateB = Seg.PlateB;
+            Event.Magnitude = Magnitude;
+            Event.SlipMetres = SeismicSlipThresholdMetres;
+            Event.SimTime = TotalSimulationTime;
+            Event.Position = Seg.AveragePosition;
+            Event.CellCount = Seg.CellCount;
+            SeismicHistory.Add(Event);
+
+            UE_LOG(LogRasterizedTectonics, Log,
+                TEXT("F1D: terremoto Mw %.1f entre placas %d y %d (%.1f m liberados, segmento de %d celdas)"),
+                Magnitude, Seg.PlateA, Seg.PlateB, SeismicSlipThresholdMetres, Seg.CellCount);
+
+            Seg.AccumulatedStrain -= SeismicSlipThresholdMetres / RadiusMetres;
+        }
+
+        // Se llego a la cota de eventos con deformacion todavia por encima del umbral:
+        // el resto de este paso se pierde como reptacion asismica -no se acarrea-, ver el
+        // comentario junto a MaxSeismicEventsPerSegmentPerAdvection en el .h.
+        if (SafetyCounter >= MaxSeismicEventsPerSegmentPerAdvection)
+        {
+            Seg.AccumulatedStrain = 0.0f;
+        }
+
+        const float StrainMetresForField = Seg.AccumulatedStrain * RadiusMetres;
         for (const TPair<int32,int32>& Cell : Comp.Cells)
         {
             BoundarySegmentIdPerFace[Cell.Key][Cell.Value] = Seg.SegmentID;
+            FaceData[Cell.Key].AccumulatedStrainData[Cell.Value] = StrainMetresForField;
         }
 
         NewSegments.Add(Seg);

@@ -3581,3 +3581,98 @@ bool FPlateLifecycleTest::RunTest(const FString& Parameters)
 
     return true;
 }
+
+// ------------------------------------------------------------
+// ROADMAP.md F1D, SISMICIDAD: EL ESFUERZO ACUMULADO EN UNA FALLA TRANSFORMANTE SE LIBERA
+// EN EVENTOS CON MAGNITUD FISICAMENTE SENSATA, NO CRECE SIN LIMITE.
+//
+// No exige un numero minimo de terremotos -depende de que existan fallas transformantes
+// activas el tiempo suficiente, emergente igual que muerte/sutura-, pero SI comprueba que
+// si algo se registra, tiene la forma correcta: magnitud finita y en un rango realista,
+// deslizamiento liberado por encima del umbral que lo dispara, y el campo de esfuerzo
+// acumulado del visor no se dispara a valores absurdos -senal directa de que las
+// liberaciones de verdad estan resetando el acumulador, no solo registrando el evento
+// sin soltar el esfuerzo-.
+// ------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FTransformFaultSeismicityTest,
+    "Simu.Tectonics.TransformFaultSeismicity",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FTransformFaultSeismicityTest::RunTest(const FString& Parameters)
+{
+    const int32 Res = 96;
+
+    UCubeSphereGrid* Grid = nullptr;
+    UTectonicPlateSystem* System = nullptr;
+    URasterizedTectonics* Raster = nullptr;
+    if (!TestTrue(TEXT("Fixture montado"), BuildF1Fixture(Res, Res, 8, 4242, Grid, System, Raster)))
+    {
+        return false;
+    }
+
+    FPlateMovementParams Params;
+    Params.DeltaTime = 0.5f;
+    Params.TimeScale = 1.0f;
+
+    const int32 Steps = 800; // 400 Ma, suficiente para que una falla transformante activa
+                              // acumule y libere varias veces si la hay
+    for (int32 i = 0; i < Steps; ++i)
+    {
+        System->Step(Params.DeltaTime);
+        Raster->Step(Params);
+    }
+
+    const TArray<FSeismicEvent> Events = Raster->GetSeismicHistory();
+
+    float MaxMagnitude = -999.0f, MinMagnitude = 999.0f;
+    for (const FSeismicEvent& Event : Events)
+    {
+        TestTrue(FString::Printf(TEXT("Magnitud finita (Mw %.2f)"), Event.Magnitude),
+            FMath::IsFinite(Event.Magnitude));
+        // Rango apretado a proposito (18-08-2026): la PRIMERA version de este umbral
+        // (-5 a 12) dejo pasar el bug real -liberar todo lo acumulado de un golpe daba
+        // Mw 10-12, mas alla de cualquier terremoto real (record historico ~9,5)-. Arreglado
+        // liberando en trozos fijos (ver ExtractAndTrackBoundarySegments); este rango ya
+        // detectaria si volviera a romperse.
+        TestTrue(FString::Printf(TEXT("Magnitud en rango fisico razonable (Mw %.2f)"), Event.Magnitude),
+            Event.Magnitude > -2.0f && Event.Magnitude < 10.5f);
+        // Ahora cada evento libera EXACTAMENTE el umbral, no "como minimo" -ver el mismo
+        // arreglo-, asi que la comprobacion es de igualdad, no de cota inferior.
+        TestTrue(FString::Printf(TEXT("El deslizamiento liberado (%.2f m) es exactamente el umbral (%.2f m)"),
+            Event.SlipMetres, URasterizedTectonics::GetSeismicSlipThresholdMetres()),
+            FMath::IsNearlyEqual(Event.SlipMetres, URasterizedTectonics::GetSeismicSlipThresholdMetres(), 0.01f));
+        MaxMagnitude = FMath::Max(MaxMagnitude, Event.Magnitude);
+        MinMagnitude = FMath::Min(MinMagnitude, Event.Magnitude);
+    }
+
+    // El campo de esfuerzo acumulado no puede crecer sin limite si las liberaciones de
+    // verdad estan resetando el acumulador -una cota generosa (100 km) que solo se rompe
+    // si el reset no esta funcionando, muy por encima de cualquier valor que de verdad
+    // dispare una liberacion (SeismicSlipThresholdMetres, unos pocos metros).
+    float MaxStrainFound = 0.0f;
+    for (int32 F = 0; F < 6; ++F)
+    {
+        const ECSCubeFace Face = static_cast<ECSCubeFace>(F);
+        for (int32 Y = 0; Y < Res; ++Y)
+        {
+            for (int32 X = 0; X < Res; ++X)
+            {
+                MaxStrainFound = FMath::Max(MaxStrainFound, Raster->GetAccumulatedStrainAt(Face, X, Y));
+            }
+        }
+    }
+    TestTrue(FString::Printf(TEXT("El esfuerzo acumulado no crece sin limite (maximo actual %.1f m)"), MaxStrainFound),
+        MaxStrainFound < 100000.0f);
+
+    if (Events.Num() > 0)
+    {
+        AddInfo(FString::Printf(TEXT("%d terremotos | magnitud Mw %.2f a %.2f | esfuerzo maximo actual %.1f m"),
+            Events.Num(), MinMagnitude, MaxMagnitude, MaxStrainFound));
+    }
+    else
+    {
+        AddInfo(FString::Printf(TEXT("Ningun terremoto en esta corrida -emergente, no garantizado. Esfuerzo maximo actual %.1f m"), MaxStrainFound));
+    }
+
+    return true;
+}

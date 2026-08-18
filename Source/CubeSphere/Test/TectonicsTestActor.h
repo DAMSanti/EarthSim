@@ -479,6 +479,10 @@ private:
      */
     TArray<float> BoundaryTypeFieldCache[6];
 
+    /** ROADMAP.md F1D, sismicidad: espejo en float de AccumulatedStrainData, en metros de
+     * deslizamiento pendiente de liberar en una falla transformante. */
+    TArray<float> AccumulatedStrainFieldCache[6];
+
     /** Grosor de corteza en km y altura sobre el nivel del mar actual, para el visor. */
     TArray<float> CrustThicknessFieldCache[6];
     TArray<float> AboveSeaLevelFieldCache[6];
